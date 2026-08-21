@@ -43,7 +43,8 @@ Target latencies (measured, not aspirational — benchmarks in `bench/`):
 - Fallback chain: engine/model failure (load error, GPU OOM) degrades to next rung; the
   recorded audio is NEVER discarded — it re-transcribes on the fallback.
 - Model manager: browse/download/delete/switch, with size/speed/accuracy/language labels,
-  download progress, checksum verification, resumable downloads.
+  download progress, resumable downloads, size-window integrity check (engine load is the
+  authoritative validation; per-file checksums are a deferred hardening item).
 - Multi-language: auto-detect + manual; locale variants (en-AU/en-GB/en-US) affect spelling.
 - Streaming partial transcripts shown in the HUD while speaking.
 
@@ -106,3 +107,20 @@ behaviour · updates.
 - Focus moved to another app mid-recording (history must still capture)
 - Secure input field focused (mac) -> degrade cleanly
 - GPU OOM mid-load -> fallback chain, audio preserved
+
+
+## v1 shipped vs deferred (kept honest — updated 21/08/2026)
+
+SHIPPED: core loop (hold/toggle/hybrid incl. other-key gesture abort), non-activating HUD with
+outcome messages + pill/cassette/minimal styles, live partial transcripts while speaking,
+paste+copy+history with honoured copy/restore settings and transient-marked injection writes,
+WAV recovery, deterministic cleanup with reviewable trims, dictionary (bias+fuzzy+auto-learn,
+merge-safe), model manager with measured auto-selection + retry-then-demote ladder, unified
+fuzzy history palette (Enter pastes into previous app), clipboard capture with exclusions,
+4 palettes x light/dark, onboarding with download-error recovery, 15-min recording cap.
+
+DEFERRED (tracked in HUMAN_TASKS.md / WINDOWS_HANDOFF.md): local-LLM cleanup tier (settings
+scaffolded), Parakeet engine, per-file model checksums, overlay position presets, per-app paste
+modes, encryption at rest, auto-updater (needs signing keys), selectable app icons, session-only
+retention, low-confidence span inline highlighting (count badge shipped), audio cues,
+voice commands beyond dictated punctuation, Windows first compile+verification.

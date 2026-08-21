@@ -11,6 +11,7 @@ const BAR_COUNT = 27;
 export default function Hud() {
   const [state, setState] = useState<'recording' | 'transcribing' | 'idle'>('idle');
   const [partial, setPartial] = useState('');
+  const [outcome, setOutcome] = useState<{ text: string; kind: 'ok' | 'error' } | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [settings, setSettings] = useState<Settings | null>(null);
   const barsRef = useRef<number[]>(new Array(BAR_COUNT).fill(0.05));
@@ -24,9 +25,15 @@ export default function Hud() {
         setState(e.state === 'idle' ? 'idle' : e.state);
         if (e.state === 'recording') {
           setPartial('');
+          setOutcome(null);
           setElapsed(0);
           barsRef.current = new Array(BAR_COUNT).fill(0.05);
         }
+      }
+      if (e.kind === 'empty') setOutcome({ text: e.reason, kind: 'ok' });
+      if (e.kind === 'error') setOutcome({ text: e.message, kind: 'error' });
+      if (e.kind === 'completed' && e.injection?.manual_paste_required) {
+        setOutcome({ text: 'Copied — press ⌘V to paste (secure field)', kind: 'ok' });
       }
       // Theme may have changed while the HUD was hidden.
       if (e.kind === 'state_changed' && e.state === 'recording') {
@@ -55,9 +62,29 @@ export default function Hud() {
   const ss = Math.floor((elapsed % 60000) / 1000);
   const time = `${mm}:${ss.toString().padStart(2, '0')}`;
 
+  if (state === 'idle' && outcome) {
+    return (
+      <div className={`hud hud-${style} idle`}>
+        <div className={`hud-outcome ${outcome.kind}`}>{outcome.text}</div>
+      </div>
+    );
+  }
+
   return (
     <div className={`hud hud-${style} ${state}`}>
-      {style === 'cassette' ? (
+      {style === 'minimal' ? (
+        <div
+          className="hud-min-inner"
+          title={state === 'recording' ? 'Recording — click to stop' : 'Transcribing…'}
+          onClick={() => (state === 'recording' ? api.stopRecording() : undefined)}
+        >
+          {state === 'transcribing' ? <Spinner /> : <span className="hud-dot" />}
+          <span className="hud-time">{time}</span>
+          <button className="hud-cancel" title="Cancel (Esc)" onClick={(e) => { e.stopPropagation(); api.cancelRecording(); }}>
+            ✕
+          </button>
+        </div>
+      ) : style === 'cassette' ? (
         <Cassette recording={state === 'recording'} envelope={envelopeRef.current} time={time} />
       ) : (
         <>

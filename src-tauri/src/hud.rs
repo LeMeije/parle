@@ -5,7 +5,25 @@
 //! WS_EX_NOACTIVATE|TOPMOST|TOOLWINDOW applied to the raw HWND.
 
 use crate::pipeline::PipelineState;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+
+/// Epoch-ms until which the HUD stays visible after going Idle, so outcome
+/// messages (no speech, errors, "press paste yourself") are actually seen —
+/// the main window is usually hidden in tray use.
+static HOLD_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+pub fn hold_visible(ms: u64) {
+    let until = now_ms() + ms;
+    HOLD_UNTIL.fetch_max(until, Ordering::SeqCst);
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 pub const HUD_LABEL: &str = "hud";
 pub const MAIN_LABEL: &str = "main";
@@ -96,7 +114,22 @@ pub fn sync_hud(app: &AppHandle, state: PipelineState) {
             let _ = hud.show();
         }
         PipelineState::Idle => {
-            let _ = hud.hide();
+            let hold = HOLD_UNTIL.load(Ordering::SeqCst);
+            let now = now_ms();
+            if hold > now {
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(hold - now));
+                    // Re-check: a new hold or a new recording may have started.
+                    if HOLD_UNTIL.load(Ordering::SeqCst) <= now_ms() {
+                        if let Some(hud) = app.get_webview_window(HUD_LABEL) {
+                            let _ = hud.hide();
+                        }
+                    }
+                });
+            } else {
+                let _ = hud.hide();
+            }
         }
     }
 }

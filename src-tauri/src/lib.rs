@@ -133,12 +133,15 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "open" => hud::show_main(app),
             "toggle" => {
-                let state = app.state::<Arc<AppState>>();
-                if state.pipeline.is_recording() {
-                    state.pipeline_stop();
-                } else {
-                    state.pipeline_start();
-                }
+                // Recorder init can block briefly — never on the main thread.
+                let state = app.state::<Arc<AppState>>().inner().clone();
+                std::thread::spawn(move || {
+                    if state.pipeline.is_recording() {
+                        state.external_stop();
+                    } else {
+                        state.pipeline_start();
+                    }
+                });
             }
             "quit" => app.exit(0),
             _ => {}
@@ -195,9 +198,12 @@ fn spawn_platform(app: &AppHandle, state: Arc<AppState>) {
 
 /// Chord-style shortcuts (e.g. Cmd+Shift+V palette) via the portable plugin.
 /// Native-only keys (Fn, bare modifiers, Copilot) are handled by the platform
-/// listener instead.
-fn register_chord_shortcuts(app: &AppHandle, state: &Arc<AppState>) {
+/// listener instead. Safe to call repeatedly: clears previous registrations
+/// first so settings changes apply without a restart.
+pub(crate) fn register_chord_shortcuts(app: &AppHandle, state: &Arc<AppState>) {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+    let _ = app.global_shortcut().unregister_all();
 
     let bindings = {
         let s = state.settings.lock();

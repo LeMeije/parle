@@ -1,6 +1,5 @@
 //! Tauri IPC commands: everything the React UI can ask the core to do.
 
-use crate::pipeline::Pipeline;
 use crate::platform;
 use crate::state::AppState;
 use echokey_asr::download::{self, CancelToken, DownloadProgress};
@@ -11,7 +10,7 @@ use echokey_core::settings::{models_dir, settings_path, Settings};
 use echokey_core::types::{HistoryItem, HistoryKind};
 use serde::Serialize;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -27,14 +26,22 @@ pub fn get_settings(state: State<'_, Arc<AppState>>) -> Settings {
 }
 
 #[tauri::command]
-pub fn set_settings(state: State<'_, Arc<AppState>>, app: AppHandle, settings: Settings) -> Result<()> {
+pub async fn set_settings(state: State<'_, Arc<AppState>>, app: AppHandle, settings: Settings) -> Result<()> {
     {
         let mut guard = state.settings.lock();
         *guard = settings.clone();
         guard.save(&settings_path()).map_err(err)?;
     }
-    state.apply_settings(&app);
-    Ok(())
+    // apply_settings queues engine reconfiguration on the serial worker, so
+    // this never blocks behind an in-flight transcription.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.apply_settings(&app);
+        // Chord shortcuts (palette etc.) re-register so changes apply live.
+        crate::register_chord_shortcuts(&app, &state);
+    })
+    .await
+    .map_err(err)
 }
 
 // -- History -----------------------------------------------------------------
@@ -79,11 +86,13 @@ pub fn clear_history(state: State<'_, Arc<AppState>>, kind: Option<String>) -> R
 }
 
 /// Edit an item's text; feeds the auto-learn dictionary when enabled.
+/// `learn=false` for restore-raw actions: restoring must never teach the
+/// dictionary a reversed correction pair.
 #[tauri::command]
-pub fn update_item_text(state: State<'_, Arc<AppState>>, id: i64, text: String) -> Result<()> {
+pub fn update_item_text(state: State<'_, Arc<AppState>>, id: i64, text: String, learn: Option<bool>) -> Result<()> {
     let changed = state.store.lock().update_text(id, &text).map_err(err)?;
     if let Some((old, new)) = changed {
-        let auto_learn = state.settings.lock().dictionary.auto_learn;
+        let auto_learn = state.settings.lock().dictionary.auto_learn && learn.unwrap_or(true);
         if auto_learn {
             learn_from_edit(&state.store, &old, &new);
         }
@@ -99,12 +108,34 @@ pub fn copy_item(state: State<'_, Arc<AppState>>, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Copy + paste a history item into the frontmost app.
+/// Paste a history item into the PREVIOUS app: hide our window first so focus
+/// returns to it, then inject.
 #[tauri::command]
-pub fn paste_item(state: State<'_, Arc<AppState>>, id: i64) -> Result<platform::InjectionOutcome> {
+pub async fn paste_item(state: State<'_, Arc<AppState>>, app: AppHandle, id: i64) -> Result<platform::InjectionOutcome> {
     let item = state.store.lock().get(id).map_err(err)?.ok_or("not found")?;
     let s = state.settings.lock().clone();
-    Ok(platform::imp::inject_text(&item.text, s.paste.prefer_ax_insert, s.paste.restore_delay_ms))
+    if let Some(main) = app.get_webview_window(crate::hud::MAIN_LABEL) {
+        let _ = main.hide();
+    }
+    // Give the OS a beat to hand focus back to the previous app.
+    tokio_sleep(220).await;
+    Ok(platform::imp::inject_text(
+        &item.text,
+        s.paste.prefer_ax_insert,
+        s.paste.restore_delay_ms,
+        s.paste.copy_to_clipboard,
+        s.paste.restore_clipboard,
+    ))
+}
+
+async fn tokio_sleep(ms: u64) {
+    let (tx, rx) = tauri::async_runtime::channel::<()>(1);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        let _ = tx.blocking_send(());
+    });
+    let mut rx = rx;
+    let _ = rx.recv().await;
 }
 
 /// Single-word diffs between old and new become correction pairs.
@@ -183,6 +214,8 @@ pub fn download_model(state: State<'_, Arc<AppState>>, app: AppHandle, model_id:
                 let _ = app.emit("model-download-error", format!("{model_id}: {e}"));
             }
         }
+        let state = app.state::<Arc<AppState>>();
+        state.downloads.lock().remove(&model_id);
     });
     Ok(())
 }
@@ -206,21 +239,29 @@ pub fn delete_model(state: State<'_, Arc<AppState>>, model_id: String) -> Result
 }
 
 #[tauri::command]
-pub fn select_model(state: State<'_, Arc<AppState>>, app: AppHandle, model_id: String) -> Result<()> {
+pub async fn select_model(state: State<'_, Arc<AppState>>, app: AppHandle, model_id: String) -> Result<()> {
     registry::by_id(&model_id).ok_or("unknown model")?;
     {
         let mut s = state.settings.lock();
         s.models.active_model = model_id.clone();
         s.save(&settings_path()).map_err(err)?;
     }
-    state.reload_engine();
-    let _ = app.emit("engine-status", state.engine_status());
-    Ok(())
+    let state2 = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        state2.reload_engine();
+        let _ = app.emit("engine-status", state2.engine_status());
+    })
+    .await
+    .map_err(err)
 }
 
 #[tauri::command]
 pub fn engine_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
-    state.engine_status()
+    // Never block the UI behind an in-flight transcription.
+    match state.engine.try_lock() {
+        Some(e) => serde_json::to_value(e.status()).unwrap_or_default(),
+        None => serde_json::json!({ "loaded_model": null, "warm": true, "busy": true }),
+    }
 }
 
 #[tauri::command]
@@ -268,20 +309,22 @@ pub fn dict_delete(state: State<'_, Arc<AppState>>, id: i64) -> Result<()> {
 // -- Recording control (UI buttons mirror the hotkeys) -------------------------
 
 #[tauri::command]
-pub fn start_recording(state: State<'_, Arc<AppState>>) {
-    state.pipeline_start();
+pub async fn start_recording(state: State<'_, Arc<AppState>>) -> Result<()> {
+    // Recorder init can block (CoreAudio cold open) — keep it off the main thread.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || state.pipeline_start())
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
 pub fn stop_recording(state: State<'_, Arc<AppState>>) {
-    state.pipeline_stop();
+    state.external_stop();
 }
 
 #[tauri::command]
 pub fn cancel_recording(state: State<'_, Arc<AppState>>) {
-    let p: &Arc<Pipeline> = &state.pipeline;
-    p.cancel();
-    state.set_recording_flag(false);
+    state.external_cancel();
 }
 
 // -- Permissions / onboarding ---------------------------------------------------

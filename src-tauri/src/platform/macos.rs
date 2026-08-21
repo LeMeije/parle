@@ -102,14 +102,9 @@ pub fn secure_input_active() -> bool {
 
 // -- Hotkey listener --------------------------------------------------------
 
-/// Shared bindings the tap reads on every event (hot-swappable from settings).
-#[derive(Default)]
-struct TapState {
-    bindings: NativeBindings,
-    /// Whether we are currently recording (so Escape/cancel is only consumed then).
-    recording: AtomicBool,
-    fn_down: AtomicBool,
-}
+/// Set while a bound dictation modifier is physically held; any other key
+/// going down during that window aborts the gesture (Fn+C, Fn+arrow, ...).
+static BOUND_MOD_HELD: AtomicBool = AtomicBool::new(false);
 
 pub struct HotkeyListener {
     state: Arc<Mutex<NativeBindings>>,
@@ -279,6 +274,12 @@ fn handle_event(
             let keycode =
                 event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as CGKeyCode;
             let phase = if matches!(event_type, CGEventType::KeyDown) { KeyPhase::Down } else { KeyPhase::Up };
+            // Another key while the dictation modifier is held: the user is
+            // chording (Fn+C emoji, Fn+arrow paging) — abort the gesture and
+            // pass the key through so the chord still works.
+            if phase == KeyPhase::Down && BOUND_MOD_HELD.load(Ordering::SeqCst) {
+                let _ = tx.send(PlatformEvent::AbortGesture);
+            }
             if keycode == KVK_ESCAPE {
                 if is_recording {
                     if let Some(ci) = bindings.cancel.as_ref() {
@@ -305,10 +306,12 @@ fn dispatch_key(
 ) -> bool {
     let mut swallow = false;
     if bindings.dictation.as_ref() == Some(key) {
+        BOUND_MOD_HELD.store(phase == KeyPhase::Down, Ordering::SeqCst);
         let _ = tx.send(PlatformEvent::Hotkey { id: HotkeyId::Dictation, phase });
         swallow = true;
     }
     if bindings.dictation_alt.as_ref() == Some(key) {
+        BOUND_MOD_HELD.store(phase == KeyPhase::Down, Ordering::SeqCst);
         let _ = tx.send(PlatformEvent::Hotkey { id: HotkeyId::DictationAlt, phase });
         swallow = true;
     }
@@ -347,10 +350,28 @@ fn modifier_flag_present(keycode: CGKeyCode, flags: CGEventFlags) -> bool {
 
 // -- Injection --------------------------------------------------------------
 
+/// Original clipboard awaiting restoration. Chained dictations within the
+/// restore window carry the OLDEST original forward instead of restoring a
+/// transcript over the user's real clipboard.
+static PENDING_RESTORE: Mutex<Option<String>> = Mutex::new(None);
+static RESTORE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Insert `text` at the cursor in the focused app.
-pub fn inject_text(text: &str, prefer_ax: bool, restore_delay_ms: u64) -> InjectionOutcome {
+///
+/// `keep_on_clipboard` = the user's "also copy to clipboard" setting: the
+/// transcript stays on the clipboard and no restore happens.
+/// `restore` = restore the previous clipboard after paste-injection.
+pub fn inject_text(
+    text: &str,
+    prefer_ax: bool,
+    restore_delay_ms: u64,
+    keep_on_clipboard: bool,
+    restore: bool,
+) -> InjectionOutcome {
     if secure_input_active() {
-        write_clipboard(text);
+        // Concealed: other clipboard managers must not capture what may be a
+        // password-field dictation.
+        write_clipboard_marked(text, true);
         return InjectionOutcome {
             method: InjectionMethod::ClipboardOnly,
             manual_paste_required: true,
@@ -358,21 +379,43 @@ pub fn inject_text(text: &str, prefer_ax: bool, restore_delay_ms: u64) -> Inject
     }
 
     if prefer_ax && ax_insert_text(text) {
+        if keep_on_clipboard {
+            write_clipboard_marked(text, false);
+        }
         return InjectionOutcome { method: InjectionMethod::AxInsert, manual_paste_required: false };
     }
 
-    // Clipboard + Cmd-V, then restore.
+    // Clipboard + Cmd-V.
     let previous = read_clipboard();
-    let prev_change = pasteboard_change_count();
-    write_clipboard(text);
+    write_clipboard_marked(text, false);
+    let after_write = pasteboard_change_count();
     synth_cmd_v();
 
-    if let Some(prev) = previous {
+    if keep_on_clipboard {
+        // Transcript intentionally stays; drop any pending restore.
+        *PENDING_RESTORE.lock() = None;
+    } else if restore {
+        // Carry the oldest original across chained dictations.
+        {
+            let mut pending = PENDING_RESTORE.lock();
+            if pending.is_none() {
+                *pending = previous;
+            }
+        }
+        let generation = RESTORE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(restore_delay_ms));
-            // Only restore if nothing else changed the clipboard in the interim.
-            if pasteboard_change_count() == prev_change + 1 {
-                write_clipboard(&prev);
+            // A newer injection superseded this restore; it will do the work.
+            if RESTORE_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                return;
+            }
+            // Only restore if nothing else wrote to the clipboard meanwhile.
+            if pasteboard_change_count() == after_write {
+                if let Some(prev) = PENDING_RESTORE.lock().take() {
+                    write_clipboard_marked(&prev, false);
+                }
+            } else {
+                *PENDING_RESTORE.lock() = None;
             }
         });
     }
@@ -442,6 +485,17 @@ pub fn read_clipboard() -> Option<String> {
 }
 
 pub fn write_clipboard(text: &str) {
+    write_clipboard_impl(text, false, false);
+}
+
+/// Injection writes are marked org.nspasteboard.TransientType so clipboard
+/// managers (including our own monitor) skip them; `concealed` adds
+/// ConcealedType for possibly-sensitive content (secure-input path).
+pub fn write_clipboard_marked(text: &str, concealed: bool) {
+    write_clipboard_impl(text, true, concealed);
+}
+
+fn write_clipboard_impl(text: &str, transient: bool, concealed: bool) {
     use objc2_app_kit::NSPasteboard;
     use objc2_foundation::NSString;
     unsafe {
@@ -450,6 +504,14 @@ pub fn write_clipboard(text: &str) {
         let ty = NSString::from_str("public.utf8-plain-text");
         let value = NSString::from_str(text);
         pb.setString_forType(&value, &ty);
+        if transient {
+            let t = NSString::from_str("org.nspasteboard.TransientType");
+            pb.setString_forType(&NSString::from_str(""), &t);
+        }
+        if concealed {
+            let c = NSString::from_str("org.nspasteboard.ConcealedType");
+            pb.setString_forType(&NSString::from_str(""), &c);
+        }
     }
 }
 

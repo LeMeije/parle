@@ -63,3 +63,6 @@ windows = { version = "0.58", features = [
 
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
 echokey-asr = { path = "../crates/echokey-asr" }
+
+[dependencies.unicode-normalization]
+version = "0.1"

@@ -332,8 +332,22 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Upsert MERGES corrections: an auto-learned pair must never clobber a
+    /// hand-curated corrections list.
     pub fn dict_upsert(&self, term: &str, corrections: &[String], auto_learned: bool) -> Result<i64, StoreError> {
-        let corr = serde_json::to_string(corrections).unwrap_or_else(|_| "[]".into());
+        let existing: Option<String> = self
+            .conn
+            .query_row("SELECT corrections FROM dictionary WHERE term=?1", params![term], |r| r.get(0))
+            .optional()?;
+        let mut merged: Vec<String> = existing
+            .and_then(|e| serde_json::from_str(&e).ok())
+            .unwrap_or_default();
+        for c in corrections {
+            if !merged.iter().any(|m| m.eq_ignore_ascii_case(c)) {
+                merged.push(c.clone());
+            }
+        }
+        let corr = serde_json::to_string(&merged).unwrap_or_else(|_| "[]".into());
         self.conn.execute(
             "INSERT INTO dictionary (term, corrections, auto_learned, created_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(term) DO UPDATE SET corrections=?2, auto_learned=min(dictionary.auto_learned, ?3)",

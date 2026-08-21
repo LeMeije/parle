@@ -61,7 +61,13 @@ export default function HistoryView() {
       setSelected((s) => Math.max(s - 1, 0));
     } else if (e.key === 'Enter' && items[selected]) {
       e.preventDefault();
-      api.copyItem(items[selected].id);
+      // Enter pastes into the previous app (the window hides first so focus
+      // returns there); Cmd/Ctrl+Enter copies only.
+      if (e.metaKey || e.ctrlKey) {
+        api.copyItem(items[selected].id);
+      } else {
+        api.pasteItem(items[selected].id);
+      }
     }
   }
 
@@ -77,7 +83,7 @@ export default function HistoryView() {
         <input
           ref={inputRef}
           className="search"
-          placeholder="Search transcriptions and clipboard…  (↑↓ then Enter copies)"
+          placeholder="Search transcriptions and clipboard…  (↑↓ · Enter pastes · ⌘Enter copies)"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           autoFocus
@@ -200,7 +206,7 @@ function TrimBadge({ item, onRestored }: { item: HistoryItem; onRestored: () => 
           <button
             className="badge"
             onClick={() => {
-              api.updateItemText(item.id, item.raw_text!).then(() => {
+              api.updateItemText(item.id, item.raw_text!, false).then(() => {
                 setOpen(false);
                 onRestored();
               });

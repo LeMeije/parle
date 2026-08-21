@@ -18,6 +18,7 @@ parking_lot = "0.12"
 crossbeam-channel = "0.5"
 
 [profile.release]
-lto = true
+# "thin" not fat: fat LTO strips clang_rt's ___isPlatformVersionAtLeast that ggml-metal needs
+lto = "thin"
 codegen-units = 1
 strip = true

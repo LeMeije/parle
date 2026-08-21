@@ -79,9 +79,10 @@ impl Pipeline {
         self.recorder.lock().is_some()
     }
 
-    pub fn start(self: &Arc<Self>) {
+    /// Returns true when recording actually started.
+    pub fn start(self: &Arc<Self>) -> bool {
         if self.recorder.lock().is_some() {
-            return;
+            return true; // already recording
         }
         let device = self.settings.lock().audio.input_device.clone();
         *self.start_app.lock() = platform::imp::frontmost_app();
@@ -95,11 +96,13 @@ impl Pipeline {
                 if self.settings.lock().overlay.show_partial_text {
                     self.spawn_partial_loop();
                 }
+                true
             }
             Err(e) => {
                 (self.sink)(PipelineEvent::Error {
                     message: format!("Could not start microphone: {e}"),
                 });
+                false
             }
         }
     }
@@ -164,6 +167,14 @@ impl Pipeline {
         (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Idle });
     }
 
+    /// Emit Idle unless a new recording started while we were processing —
+    /// its Recording state must not be clobbered by our late Idle.
+    fn emit_idle_if_quiescent(&self) {
+        if self.recorder.lock().is_none() {
+            (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Idle });
+        }
+    }
+
     /// Stop recording and run the full pipeline (blocking; call on a worker).
     pub fn stop_and_process(&self) {
         let Some(rec) = self.recorder.lock().take() else {
@@ -175,12 +186,12 @@ impl Pipeline {
         let settings = self.settings.lock().clone();
         if recording.duration_ms < settings.audio.min_duration_ms {
             (self.sink)(PipelineEvent::Empty { reason: "Too short".into() });
-            (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Idle });
+            self.emit_idle_if_quiescent();
             return;
         }
         if is_silence(&recording.samples) {
             (self.sink)(PipelineEvent::Empty { reason: "No speech detected".into() });
-            (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Idle });
+            self.emit_idle_if_quiescent();
             return;
         }
         if recording.dropped_chunks > 0 {
@@ -226,11 +237,12 @@ impl Pipeline {
                         path.display()
                     ),
                 });
-                (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Idle });
+                self.emit_idle_if_quiescent();
                 return;
             }
         };
 
+        use unicode_normalization::UnicodeNormalization;
         let raw_text: String = asr
             .segments
             .iter()
@@ -238,7 +250,8 @@ impl Pipeline {
             .collect::<Vec<_>>()
             .join(" ")
             .trim()
-            .to_string();
+            .nfc()
+            .collect();
 
         // Tier-1 deterministic cleanup.
         let segments: Vec<Segment> = asr
@@ -267,8 +280,30 @@ impl Pipeline {
         text = text.trim().to_string();
 
         if text.is_empty() {
-            (self.sink)(PipelineEvent::Empty { reason: "No speech detected".into() });
-            (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Idle });
+            // Nothing is ever lost: cleanup may legitimately empty the text
+            // ("scratch that", pure filler) — keep the raw transcript in
+            // history without injecting anything.
+            if !raw_text.is_empty() {
+                let (app_id, app_name) = self.start_app.lock().clone();
+                let tr = TranscriptionResult {
+                    raw_text: raw_text.clone(),
+                    text: raw_text.clone(),
+                    language: asr.detected_language.clone(),
+                    model_id: model_id.clone(),
+                    duration_ms: recording.duration_ms,
+                    transcribe_ms: asr.transcribe_ms,
+                    segments: segments.clone(),
+                    trimmed: vec![],
+                    low_confidence: vec![],
+                    cleanup_tier: 0,
+                };
+                let _ = self
+                    .store
+                    .lock()
+                    .insert_transcription(&tr, app_id.as_deref(), app_name.as_deref());
+            }
+            (self.sink)(PipelineEvent::Empty { reason: "Nothing left after cleanup (kept raw in history)".into() });
+            self.emit_idle_if_quiescent();
             return;
         }
 
@@ -281,6 +316,8 @@ impl Pipeline {
                 &text,
                 settings.paste.prefer_ax_insert,
                 settings.paste.restore_delay_ms,
+                settings.paste.copy_to_clipboard,
+                settings.paste.restore_clipboard,
             ))
         } else if settings.paste.copy_to_clipboard {
             platform::imp::write_clipboard(&text);
@@ -288,11 +325,6 @@ impl Pipeline {
         } else {
             None
         };
-        // If injection used the clipboard we've already set it; otherwise honour
-        // copy_to_clipboard explicitly.
-        if injection.is_none() && settings.paste.copy_to_clipboard && !settings.paste.inject {
-            // already written above
-        }
 
         let (app_id, app_name) = self.start_app.lock().clone();
         let tr = TranscriptionResult {
@@ -322,7 +354,7 @@ impl Pipeline {
             injection,
             low_confidence_count: low_confidence.len(),
         });
-        (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Idle });
+        self.emit_idle_if_quiescent();
     }
 }
 
@@ -332,7 +364,7 @@ fn collect_low_confidence(asr: &echokey_asr::AsrOutput, final_text: &str) -> Vec
     for seg in &asr.segments {
         for (word, conf) in &seg.words {
             if *conf < 0.55 && word.len() > 1 {
-                if let Some(pos) = final_text[cursor..].find(word.as_str()) {
+                if let Some(pos) = find_word_boundary(&final_text[cursor..], word) {
                     let start = cursor + pos;
                     let end = start + word.len();
                     out.push(LowConfidenceSpan {
@@ -347,6 +379,24 @@ fn collect_low_confidence(asr: &echokey_asr::AsrOutput, final_text: &str) -> Vec
         }
     }
     out
+}
+
+/// Whole-word find: "an" must not match inside "and".
+fn find_word_boundary(haystack: &str, word: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(pos) = haystack[from..].find(word) {
+        let start = from + pos;
+        let end = start + word.len();
+        let before_ok = start == 0
+            || !haystack[..start].chars().next_back().map(|c| c.is_alphanumeric()).unwrap_or(false);
+        let after_ok = end >= haystack.len()
+            || !haystack[end..].chars().next().map(|c| c.is_alphanumeric()).unwrap_or(false);
+        if before_ok && after_ok {
+            return Some(start);
+        }
+        from = end;
+    }
+    None
 }
 
 fn now_stamp() -> u64 {

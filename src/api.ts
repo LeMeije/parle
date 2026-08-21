@@ -20,7 +20,7 @@ export const api = {
   pinItem: (id: number, pinned: boolean) => invoke<void>('pin_item', { id, pinned }),
   deleteItem: (id: number) => invoke<void>('delete_item', { id }),
   clearHistory: (kind?: string) => invoke<number>('clear_history', { kind: kind ?? null }),
-  updateItemText: (id: number, text: string) => invoke<void>('update_item_text', { id, text }),
+  updateItemText: (id: number, text: string, learn = true) => invoke<void>('update_item_text', { id, text, learn }),
   copyItem: (id: number) => invoke<void>('copy_item', { id }),
   pasteItem: (id: number) => invoke<void>('paste_item', { id }),
 

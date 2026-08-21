@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { BookA, Cpu, History as HistoryIcon, Mic, Settings as SettingsIcon } from 'lucide-react';
 import { api, onPipelineEvent } from './api';
 import type { PipelineEvent, Settings } from './types';
+import { onFocusPalette } from './api';
 import HistoryView from './views/History';
 import ModelsView from './views/Models';
 import DictionaryView from './views/Dictionary';
@@ -29,21 +30,26 @@ export default function App() {
     const un = onPipelineEvent((e: PipelineEvent) => {
       if (e.kind === 'state_changed') setRecording(e.state === 'recording');
       if (e.kind === 'completed') {
+        const preview = e.text.length > 42 ? e.text.slice(0, 42) + '…' : e.text;
         showToast(
           e.injection?.manual_paste_required
             ? 'Copied — press paste to insert (secure field)'
-            : `Inserted ${e.text.length > 42 ? e.text.slice(0, 42) + '…' : e.text ? '"' + e.text + '"' : ''}`,
+            : e.injection
+              ? `Inserted "${preview}"`
+              : `Copied "${preview}"`,
           'ok',
         );
       }
       if (e.kind === 'empty') showToast(e.reason, 'ok');
       if (e.kind === 'error') showToast(e.message, 'error');
     });
+    const unPalette = onFocusPalette(() => setTab('history'));
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const onScheme = () => api.getSettings().then(applyTheme);
     media.addEventListener('change', onScheme);
     return () => {
       un.then((f) => f());
+      unPalette.then((f) => f());
       media.removeEventListener('change', onScheme);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

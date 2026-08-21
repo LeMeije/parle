@@ -55,6 +55,10 @@ Accessibility grant on every rebuild — see HUMAN_TASKS.md §2.
 
 ## Build (Windows)
 
+Status: code-complete against researched APIs but **not yet compiled on Windows** —
+the Copilot-key, Win+V-exclusion and injection behaviour above describe the written
+implementation, pending first-build verification.
+
 See **docs/WINDOWS_HANDOFF.md** — full toolchain list, verification checklist,
 and a copy-paste Claude Code pickup prompt.
 

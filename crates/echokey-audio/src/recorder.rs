@@ -177,6 +177,10 @@ impl Drop for Recorder {
     }
 }
 
+/// Hard cap: a forgotten latched toggle must not grow without bound
+/// (~230 MB/hour) or feed whisper's ~400 s per-pass limits. 15 minutes.
+const MAX_SAMPLES: usize = 15 * 60 * ASR_SAMPLE_RATE as usize;
+
 fn consume(
     rx: Receiver<AudioChunk>,
     input_rate: u32,
@@ -185,6 +189,7 @@ fn consume(
     on_level: &mut (impl FnMut(LevelUpdate) + Send),
 ) {
     let mut resampler = StreamResampler::new(input_rate);
+    let mut capped_logged = false;
     let mut meter = LevelMeter::new();
     let mut expected_seq: u64 = 0;
     let mut samples_since_level = 0usize;
@@ -201,7 +206,12 @@ fn consume(
                 expected_seq = chunk.seq + 1;
                 let mono16k = resampler.push(&chunk.samples, chunk.channels);
                 let (rms, peak, envelope) = meter.process(&mono16k);
-                state.samples.extend_from_slice(&mono16k);
+                if state.samples.len() < MAX_SAMPLES {
+                    state.samples.extend_from_slice(&mono16k);
+                } else if !capped_logged {
+                    capped_logged = true;
+                    tracing::warn!("recording capped at 15 minutes; further audio discarded");
+                }
                 samples_since_level += mono16k.len();
                 let elapsed_ms = (state.samples.len() as u64 * 1000) / ASR_SAMPLE_RATE as u64;
                 drop(guard);

@@ -40,6 +40,9 @@ pub struct AppState {
 enum Work {
     StopAndProcess,
     Prewarm(AppHandle),
+    /// Arbitrary job on the serial worker (engine reconfiguration etc.) so it
+    /// queues after any in-flight transcription instead of blocking the caller.
+    Run(Box<dyn FnOnce() + Send>),
 }
 
 impl AppState {
@@ -69,6 +72,18 @@ impl AppState {
                 _ => "pipeline-event",
             };
             let _ = app_for_sink.emit(name, &event);
+            // Outcome messages must survive the Idle transition: the main
+            // window is usually hidden, so the HUD is the only visible surface.
+            match &event {
+                PipelineEvent::Empty { .. } => crate::hud::hold_visible(2200),
+                PipelineEvent::Error { .. } => crate::hud::hold_visible(4000),
+                PipelineEvent::Completed { injection, .. } => {
+                    if injection.as_ref().map(|i| i.manual_paste_required).unwrap_or(false) {
+                        crate::hud::hold_visible(3500);
+                    }
+                }
+                _ => {}
+            }
             // Keep the HUD visible/hidden in lockstep with state.
             if let PipelineEvent::StateChanged { state } = &event {
                 crate::hud::sync_hud(&app_for_sink, *state);
@@ -87,6 +102,7 @@ impl AppState {
                     for job in work_rx {
                         match job {
                             Work::StopAndProcess => pipeline.stop_and_process(),
+                            Work::Run(job) => job(),
                             Work::Prewarm(app) => {
                                 let state = app.state::<Arc<AppState>>();
                                 let loaded = state.engine.lock().prewarm();
@@ -132,11 +148,17 @@ impl AppState {
         serde_json::to_value(status).unwrap_or_default()
     }
 
+    /// Queue engine reconfiguration on the serial worker: it must never block
+    /// a caller (UI thread) behind an in-flight transcription.
     pub fn reload_engine(&self) {
-        let s = self.settings.lock();
-        self.engine
-            .lock()
-            .configure(&s.models.active_model, &s.models.fallback_chain);
+        let engine = self.engine.clone();
+        let (active, chain) = {
+            let s = self.settings.lock();
+            (s.models.active_model.clone(), s.models.fallback_chain.clone())
+        };
+        let _ = self.work_tx.send(Work::Run(Box::new(move || {
+            engine.lock().configure(&active, &chain);
+        })));
     }
 
     pub fn prewarm_async(&self, app: AppHandle) {
@@ -147,13 +169,39 @@ impl AppState {
     }
 
     pub fn pipeline_start(&self) {
-        self.set_recording_flag(true);
-        self.pipeline.start();
+        // Flag only reflects reality: set AFTER the recorder actually starts,
+        // and reset the gesture machines when it fails so Toggle/Hybrid can't
+        // strand in an active state (that combination once swallowed Escape
+        // system-wide).
+        let ok = self.pipeline.start();
+        self.set_recording_flag(ok);
+        if !ok {
+            self.gesture.lock().reset();
+            self.gesture_alt.lock().reset();
+        }
     }
 
     pub fn pipeline_stop(&self) {
         self.set_recording_flag(false);
         let _ = self.work_tx.send(Work::StopAndProcess);
+    }
+
+    /// Stop initiated outside the hotkey path (HUD click, tray, UI button).
+    /// Must also sync the gesture machines or they desynchronise from the
+    /// pipeline (latched machine + idle pipeline = dead hotkey press).
+    pub fn external_stop(&self) {
+        self.gesture.lock().reset();
+        self.gesture_alt.lock().reset();
+        self.pipeline_stop();
+    }
+
+    /// Cancel from any source: always clears flag and gestures, even when the
+    /// pipeline is already idle (stale-flag recovery).
+    pub fn external_cancel(&self) {
+        self.gesture.lock().reset();
+        self.gesture_alt.lock().reset();
+        self.pipeline.cancel();
+        self.set_recording_flag(false);
     }
 
     pub fn set_recording_flag(&self, on: bool) {
@@ -207,14 +255,24 @@ impl AppState {
     /// (Re)apply settings: gestures, native bindings, clipboard monitor.
     pub fn apply_settings(&self, _app: &AppHandle) {
         let s = self.settings.lock().clone();
-        self.gesture
-            .lock()
-            .set_mode(s.hotkeys.dictation.mode, s.hotkeys.latch_ms);
-        self.gesture_alt
-            .lock()
-            .set_mode(s.hotkeys.dictation_alt.mode, s.hotkeys.latch_ms);
+        // Never reset an ACTIVE gesture (a settings write mid-hold would orphan
+        // the recording: the release event would arrive in Idle and do nothing).
+        {
+            let mut g = self.gesture.lock();
+            if !g.is_active() {
+                g.set_mode(s.hotkeys.dictation.mode, s.hotkeys.latch_ms);
+            }
+        }
+        {
+            let mut g = self.gesture_alt.lock();
+            if !g.is_active() {
+                g.set_mode(s.hotkeys.dictation_alt.mode, s.hotkeys.latch_ms);
+            }
+        }
         if let Some(h) = self.hotkeys.lock().as_ref() {
             h.update_bindings(self.native_bindings());
+            #[cfg(target_os = "windows")]
+            h.set_suppress_copilot(s.hotkeys.suppress_copilot);
         }
         if let Some(m) = self.clipboard_monitor.lock().as_ref() {
             m.set_enabled(s.history.clipboard_capture);
@@ -227,15 +285,18 @@ impl AppState {
     pub fn on_platform_event(self: &Arc<Self>, app: &AppHandle, event: PlatformEvent) {
         match event {
             PlatformEvent::Hotkey { id, phase } => self.on_hotkey(app, id, phase),
+            PlatformEvent::AbortGesture => self.on_abort_gesture(),
             PlatformEvent::ClipboardChanged { text, app_id, app_name } => {
                 let s = self.settings.lock();
                 if !s.history.clipboard_capture {
                     return;
                 }
-                if let Some(ref aid) = app_id {
-                    if s.history.excluded_apps.iter().any(|x| x.eq_ignore_ascii_case(aid)) {
-                        return;
-                    }
+                let excluded = s.history.excluded_apps.iter().any(|x| {
+                    app_id.as_deref().map(|a| x.eq_ignore_ascii_case(a)).unwrap_or(false)
+                        || app_name.as_deref().map(|a| x.eq_ignore_ascii_case(a)).unwrap_or(false)
+                });
+                if excluded {
+                    return;
                 }
                 drop(s);
                 let _ = self
@@ -244,6 +305,16 @@ impl AppState {
                     .insert_clipboard(&text, app_id.as_deref(), app_name.as_deref());
                 let _ = app.emit("history-changed", ());
             }
+        }
+    }
+
+    /// Another key was pressed while a dictation modifier was held (Fn+C for
+    /// emoji, Fn+arrow for paging): the user is using the key as a modifier,
+    /// not dictating. Abort the just-started hold gesture and its recording.
+    pub fn on_abort_gesture(self: &Arc<Self>) {
+        let holding = self.gesture.lock().in_hold_phase() || self.gesture_alt.lock().in_hold_phase();
+        if holding {
+            self.external_cancel();
         }
     }
 
@@ -263,11 +334,8 @@ impl AppState {
                 }
             }
             HotkeyId::Cancel => {
-                if phase == KeyPhase::Down && self.pipeline.is_recording() {
-                    self.gesture.lock().reset();
-                    self.gesture_alt.lock().reset();
-                    self.pipeline.cancel();
-                    self.set_recording_flag(false);
+                if phase == KeyPhase::Down {
+                    self.external_cancel();
                 }
             }
             HotkeyId::Palette => {

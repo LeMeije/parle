@@ -34,7 +34,8 @@ echokey/
   incidental. Partial-pass transcriptions stream to the HUD; final pass on stop.
 - Pipeline state machine (owned by `PipelineController`): Idle -> Starting -> Listening -> Finishing -> Idle,
   with Cancelled as an exit from any active state. Hotkey events are the only inputs that start/stop it.
-- UI: ipc::Channel for high-rate streams (levels, partials); app.emit for state changes only.
+- UI: app.emit broadcasts for all pipeline events (levels are throttled to ~30 Hz with tiny
+  payloads, measured fine; migrate to ipc::Channel only if profiling ever shows IPC cost).
 
 ## Data flow on stop
 audio buffer -> final ASR pass -> Tier-1 deterministic cleanup (Rust) -> dictionary post-correction ->

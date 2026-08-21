@@ -47,6 +47,11 @@ impl GestureMachine {
         !matches!(self.state, GestureState::Idle)
     }
 
+    /// True only while the key is physically held and not yet latched.
+    pub fn in_hold_phase(&self) -> bool {
+        matches!(self.state, GestureState::HoldRecording { .. })
+    }
+
     /// External stop (Escape, HUD click, error): reset to idle.
     pub fn reset(&mut self) {
         self.state = GestureState::Idle;

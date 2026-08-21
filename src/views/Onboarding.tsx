@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { Check, ChevronRight, Download, KeyRound, Mic, ShieldCheck, Sparkles } from 'lucide-react';
-import { api, onDownloadComplete, onDownloadProgress, onPipelineEvent } from '../api';
+import { api, onDownloadComplete, onDownloadError, onDownloadProgress, onPipelineEvent } from '../api';
 import type { DownloadProgress, PermissionStatus } from '../types';
 
 const IS_MAC = navigator.userAgent.includes('Mac');
@@ -141,6 +141,7 @@ function ModelStep({ onNext }: { onNext: () => void }) {
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [done, setDone] = useState(false);
   const [started, setStarted] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     api.recommendedSetup().then((r) => {
@@ -152,9 +153,14 @@ function ModelStep({ onNext }: { onNext: () => void }) {
     });
     const un1 = onDownloadProgress(setProgress);
     const un2 = onDownloadComplete(() => setDone(true));
+    const un3 = onDownloadError((msg) => {
+      setError(msg);
+      setStarted(false);
+    });
     return () => {
       un1.then((f) => f());
       un2.then((f) => f());
+      un3.then((f) => f());
     };
   }, []);
 
@@ -171,6 +177,7 @@ function ModelStep({ onNext }: { onNext: () => void }) {
         we recommend <strong>{rec?.model.replace('whisper-', '') ?? '…'}</strong>. You can add or switch models
         any time in Settings → Models.
       </p>
+      {error && <div className="callout error">Download failed: {error}. Check your connection and retry — it resumes where it stopped.</div>}
       {done ? (
         <button className="btn primary" onClick={onNext}>
           Model ready <ChevronRight size={15} />

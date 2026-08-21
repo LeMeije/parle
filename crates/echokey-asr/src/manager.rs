@@ -131,7 +131,9 @@ impl EngineManager {
         mut on_partial: Option<PartialCallback>,
     ) -> Result<(AsrOutput, String), AsrError> {
         let mut last_err: Option<AsrError> = None;
-        for _attempt in 0..self.candidates().len().max(1) {
+        let mut retried: Option<String> = None;
+        // +1 attempt budget for the single same-model retry.
+        for _attempt in 0..(self.candidates().len() + 1).max(1) {
             if let Err(e) = self.ensure_loaded() {
                 return Err(last_err.unwrap_or(e));
             }
@@ -140,7 +142,16 @@ impl EngineManager {
             match engine.transcribe(samples, opts, on_partial.take()) {
                 Ok(out) => return Ok((out, model_id)),
                 Err(e) => {
-                    tracing::error!("transcribe failed on {model_id}: {e}; trying next rung");
+                    // Transient failures (momentary GPU pressure) deserve one
+                    // same-model retry before the model is demoted for the session.
+                    if retried.as_deref() != Some(model_id.as_str()) {
+                        tracing::warn!("transcribe failed on {model_id}: {e}; retrying same model once");
+                        retried = Some(model_id.clone());
+                        self.engine = None;
+                        last_err = Some(e);
+                        continue;
+                    }
+                    tracing::error!("transcribe failed on {model_id} twice: {e}; trying next rung");
                     // Drop the broken engine and demote the failed model so
                     // ensure_loaded picks the next candidate.
                     self.engine = None;

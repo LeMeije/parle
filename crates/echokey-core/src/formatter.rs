@@ -168,6 +168,11 @@ const PUNCT_CMDS: &[(&[&str], &str)] = &[
     (&["ellipsis"], "…"),
 ];
 
+/// Commands that render as a WORD-JOINING symbol with surrounding spaces kept
+/// simple: "dash" -> " - " handled as PunctLeft would glue wrongly, so these
+/// become standalone word tokens instead.
+const WORD_SYMBOLS: &[(&str, &str)] = &[("dash", "-"), ("hyphen", "-")];
+
 fn convert_dictated_punctuation(tokens: &mut Vec<Token>) {
     let mut i = 0;
     while i < tokens.len() {
@@ -179,12 +184,23 @@ fn convert_dictated_punctuation(tokens: &mut Vec<Token>) {
         if tokens[i].core() == "literally" {
             if let Some(next) = tokens.get(i + 1) {
                 let nc = next.core();
-                if PUNCT_CMDS.iter().any(|(words, _)| words.len() == 1 && words[0] == nc) {
+                let is_cmd_word = PUNCT_CMDS.iter().any(|(words, _)| words.len() == 1 && words[0] == nc)
+                    || WORD_SYMBOLS.iter().any(|(w, _)| *w == nc);
+                if is_cmd_word {
                     // Drop "literally", keep the word literally.
                     tokens.remove(i);
                     i += 1;
                     continue;
                 }
+            }
+        }
+        // Standalone symbol words ("dash" -> "-").
+        if tokens[i].trailing_punct().is_none() {
+            let core = tokens[i].core();
+            if let Some((_, sym)) = WORD_SYMBOLS.iter().find(|(w, _)| *w == core) {
+                tokens[i].text = sym.to_string();
+                i += 1;
+                continue;
             }
         }
         let mut matched = false;

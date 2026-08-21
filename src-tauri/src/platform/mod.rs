@@ -29,6 +29,9 @@ pub enum HotkeyId {
 #[derive(Debug, Clone)]
 pub enum PlatformEvent {
     Hotkey { id: HotkeyId, phase: KeyPhase },
+    /// A non-bound key went down while a bound modifier was held: the user is
+    /// using the modifier normally (Fn+C, Fn+arrow). Abort any hold gesture.
+    AbortGesture,
     ClipboardChanged { text: String, app_id: Option<String>, app_name: Option<String> },
 }
 

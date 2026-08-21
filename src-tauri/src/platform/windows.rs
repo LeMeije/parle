@@ -105,6 +105,10 @@ impl HotkeyListener {
         *HOOK_BINDINGS.lock() = bindings;
     }
 
+    pub fn set_suppress_copilot(&self, suppress: bool) {
+        SUPPRESS_COPILOT.store(suppress, Ordering::SeqCst);
+    }
+
     pub fn set_recording(&self, recording: bool) {
         RECORDING.store(recording, Ordering::SeqCst);
     }
@@ -295,30 +299,44 @@ fn key_input(vk: u16, up: bool) -> INPUT {
 
 // -- Injection ----------------------------------------------------------------
 
-pub fn inject_text(text: &str, _prefer_ax: bool, restore_delay_ms: u64) -> InjectionOutcome {
+pub fn inject_text(
+    text: &str,
+    _prefer_ax: bool,
+    restore_delay_ms: u64,
+    keep_on_clipboard: bool,
+    restore: bool,
+) -> InjectionOutcome {
     let previous = read_clipboard();
-    let seq_before = unsafe { GetClipboardSequenceNumber() };
     write_clipboard(text);
     let seq_after_write = unsafe { GetClipboardSequenceNumber() };
     synth_ctrl_v();
 
-    if let Some(prev) = previous {
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(restore_delay_ms));
-            // Restore only if nobody else wrote to the clipboard meanwhile.
-            let seq_now = unsafe { GetClipboardSequenceNumber() };
-            if seq_now == seq_after_write {
-                write_clipboard(&prev);
-            }
-        });
+    if !keep_on_clipboard && restore {
+        if let Some(prev) = previous {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(restore_delay_ms));
+                // Restore only if nobody else wrote to the clipboard meanwhile.
+                let seq_now = unsafe { GetClipboardSequenceNumber() };
+                if seq_now == seq_after_write {
+                    write_clipboard(&prev);
+                }
+            });
+        }
     }
-    let _ = seq_before;
     InjectionOutcome { method: InjectionMethod::ClipboardPaste, manual_paste_required: false }
 }
 
 fn synth_ctrl_v() {
     unsafe {
+        // Release any physically held modifiers first (the Copilot chord holds
+        // Shift+Win at stop time; Ctrl+Shift+Win+V is not paste). Key-ups for
+        // keys that aren't down are harmless.
         let inputs = [
+            key_input(VK_LSHIFT.0, true),
+            key_input(VK_RSHIFT.0, true),
+            key_input(VK_LWIN.0, true),
+            key_input(VK_RWIN.0, true),
+            key_input(VK_LMENU.0, true),
             key_input(VK_CONTROL.0, false),
             key_input(VK_V.0, false),
             key_input(VK_V.0, true),
