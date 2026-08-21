@@ -1,0 +1,68 @@
+{
+  "$comment": "Behavioural contract for the Tier-1 deterministic formatter. Both platform builds run these in CI. Change vectors FIRST, watch both sides fail, then make both pass. Settings default to CleanupSettings::default() unless overridden per-case.",
+  "version": 1,
+  "cases": [
+    { "name": "filler_um_removed", "input": "um so I think, uh, we should ship it", "expect": "So I think, we should ship it." },
+    { "name": "filler_at_start", "input": "um hello there", "expect": "Hello there." },
+    { "name": "weekday_correction", "input": "let's meet Thursday no actually Wednesday after lunch", "expect": "Let's meet Wednesday after lunch." },
+    { "name": "number_correction", "input": "send it at 3 no wait 4", "expect": "Send it at 4." },
+    { "name": "month_correction", "input": "the launch is in June sorry July this year", "expect": "The launch is in July this year." },
+    { "name": "fuzzy_word_correction", "input": "email Aisha I mean Aysha about it", "expect": "Email Aysha about it." },
+    { "name": "stutter_single", "input": "the the report is ready", "expect": "The report is ready." },
+    { "name": "stutter_phrase", "input": "I think I think we should go", "expect": "I think we should go." },
+    { "name": "intentional_double_very", "input": "this is very very good", "expect": "This is very very good." },
+    { "name": "intentional_double_no", "input": "no no that's fine", "expect": "No no that's fine." },
+    { "name": "scratch_that", "input": "send the report tomorrow. tell John scratch that tell Sarah about the launch", "expect": "Send the report tomorrow. Tell Sarah about the launch." },
+    { "name": "sorry_without_pair_kept", "input": "sorry I'm late to this", "expect": "Sorry I'm late to this." },
+    { "name": "i_mean_without_pair_kept", "input": "i mean it when I say this matters", "expect": "I mean it when I say this matters." },
+    { "name": "dictated_comma_period", "input": "hi dana comma hope you're well period", "expect": "Hi dana, hope you're well." },
+    { "name": "dictated_question_mark", "input": "are you coming question mark", "expect": "Are you coming?" },
+    { "name": "dictated_new_line", "input": "first item new line second item", "expect": "First item\nSecond item." },
+    { "name": "dictated_new_paragraph", "input": "first point new paragraph second point", "expect": "First point.\n\nSecond point." },
+    { "name": "literally_escape", "input": "the word literally comma is overused", "expect": "The word comma is overused." },
+    { "name": "capitalise_i", "input": "yes i think i'll go", "expect": "Yes I think I'll go." },
+    { "name": "terminal_punctuation_added", "input": "ship it tomorrow", "expect": "Ship it tomorrow." },
+    { "name": "existing_punctuation_untouched", "input": "Hello, world.", "expect": "Hello, world." },
+    { "name": "trailing_comma_becomes_period", "input": "that's all for now,", "expect": "That's all for now." },
+    { "name": "empty_input", "input": "", "expect": "" },
+    { "name": "only_fillers", "input": "um uh hmm", "expect": "" },
+    {
+      "name": "locale_spelling_au",
+      "input": "my favorite color is gray",
+      "expect": "My favourite colour is grey.",
+      "settings": { "locale_spelling": true },
+      "locale": "en-AU"
+    },
+    {
+      "name": "locale_ambiguous_check_untouched",
+      "input": "check the numbers please",
+      "expect": "Check the numbers please.",
+      "settings": { "locale_spelling": true },
+      "locale": "en-AU"
+    },
+    {
+      "name": "cleanup_disabled_passthrough",
+      "input": "um hello there",
+      "expect": "um hello there",
+      "settings": { "enabled": false }
+    },
+    {
+      "name": "fillers_off_keeps_um",
+      "input": "um hello there",
+      "expect": "Um hello there.",
+      "settings": { "remove_fillers": false }
+    },
+    {
+      "name": "hedges_on_removes_you_know",
+      "input": "it was you know quite good",
+      "expect": "It was quite good.",
+      "settings": { "remove_hedges": true }
+    },
+    {
+      "name": "corrections_off_keeps_marker",
+      "input": "let's meet Thursday no actually Wednesday",
+      "expect": "Let's meet Thursday no actually Wednesday.",
+      "settings": { "trim_self_corrections": false }
+    }
+  ]
+}

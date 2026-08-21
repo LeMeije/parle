@@ -1,0 +1,456 @@
+//! Persistent settings. One JSON file, atomically written, forward-compatible
+//! (unknown fields are dropped on save, missing fields take defaults on load).
+
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+pub const SETTINGS_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub version: u32,
+    pub onboarding_complete: bool,
+    pub models: ModelSettings,
+    pub language: LanguageSettings,
+    pub cleanup: CleanupSettings,
+    pub hotkeys: HotkeySettings,
+    pub dictionary: DictionarySettings,
+    pub appearance: AppearanceSettings,
+    pub history: HistorySettings,
+    pub audio: AudioSettings,
+    pub overlay: OverlaySettings,
+    pub paste: PasteSettings,
+    pub launch_at_login: bool,
+    pub auto_update_check: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            version: SETTINGS_VERSION,
+            onboarding_complete: false,
+            models: ModelSettings::default(),
+            language: LanguageSettings::default(),
+            cleanup: CleanupSettings::default(),
+            hotkeys: HotkeySettings::default(),
+            dictionary: DictionarySettings::default(),
+            appearance: AppearanceSettings::default(),
+            history: HistorySettings::default(),
+            audio: AudioSettings::default(),
+            overlay: OverlaySettings::default(),
+            paste: PasteSettings::default(),
+            launch_at_login: false,
+            auto_update_check: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelSettings {
+    /// Active model id from the registry (e.g. "whisper-small-q5_1").
+    /// Empty until first-launch auto-selection runs.
+    pub active_model: String,
+    /// Ordered fallback chain of model ids tried when the active model fails.
+    pub fallback_chain: Vec<String>,
+    /// "auto" | "metal" | "cuda" | "cpu"
+    pub backend: String,
+    /// Pre-load and warm the model at app startup.
+    pub prewarm: bool,
+}
+
+impl Default for ModelSettings {
+    fn default() -> Self {
+        Self {
+            active_model: String::new(),
+            fallback_chain: Vec::new(),
+            backend: "auto".into(),
+            prewarm: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LanguageSettings {
+    /// ISO 639-1 ("en", "fr", ...) or "auto".
+    pub language: String,
+    /// Locale variant affecting spelling: "en-AU", "en-GB", "en-US", or "" for none.
+    pub locale: String,
+    /// Translate-to-English mode (whisper task=translate).
+    pub translate_to_english: bool,
+}
+
+impl Default for LanguageSettings {
+    fn default() -> Self {
+        Self { language: "auto".into(), locale: String::new(), translate_to_english: false }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CleanupSettings {
+    /// Master switch for the deterministic tier.
+    pub enabled: bool,
+    pub remove_fillers: bool,
+    /// Also remove hedge phrases ("you know", "I mean", "sort of") — more aggressive.
+    pub remove_hedges: bool,
+    pub trim_self_corrections: bool,
+    pub capitalise_sentences: bool,
+    pub ensure_terminal_punctuation: bool,
+    pub dictated_punctuation: bool,
+    pub paragraph_on_long_pause: bool,
+    /// Pause length (ms) between segments that starts a new paragraph.
+    pub paragraph_pause_ms: u64,
+    /// Apply locale spelling (en-AU/en-GB vs en-US) using the built-in word map.
+    pub locale_spelling: bool,
+    /// Tier 2: local LLM cleanup.
+    pub llm_enabled: bool,
+    pub llm_model: String,
+    /// Hard deadline; on expiry the deterministic output is used.
+    pub llm_timeout_ms: u64,
+}
+
+impl Default for CleanupSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            remove_fillers: true,
+            remove_hedges: false,
+            trim_self_corrections: true,
+            capitalise_sentences: true,
+            ensure_terminal_punctuation: true,
+            dictated_punctuation: true,
+            paragraph_on_long_pause: true,
+            paragraph_pause_ms: 2200,
+            locale_spelling: false,
+            llm_enabled: false,
+            llm_model: String::new(),
+            llm_timeout_ms: 4000,
+        }
+    }
+}
+
+/// How a binding behaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotkeyMode {
+    /// Hold to record, release to stop.
+    Hold,
+    /// Tap to start, tap to stop.
+    Toggle,
+    /// Hold to record; a tap shorter than `latch_ms` latches into toggle.
+    Hybrid,
+}
+
+/// One binding. `key` uses our canonical key names; special keys the plugins
+/// can't express (Fn/Globe, bare L/R modifiers, CopilotKey) are handled by the
+/// native listeners.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HotkeyBinding {
+    /// e.g. "Fn", "RightAlt", "RightCtrl", "CopilotKey", or a chord "Alt+Space".
+    pub key: String,
+    pub mode: HotkeyMode,
+    pub enabled: bool,
+}
+
+impl Default for HotkeyBinding {
+    fn default() -> Self {
+        Self { key: String::new(), mode: HotkeyMode::Hybrid, enabled: false }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HotkeySettings {
+    pub dictation: HotkeyBinding,
+    /// Optional second binding (e.g. Copilot key on Windows alongside a chord).
+    pub dictation_alt: HotkeyBinding,
+    /// Opens the history palette.
+    pub history_palette: HotkeyBinding,
+    /// Cancel current recording without injecting.
+    pub cancel: HotkeyBinding,
+    /// Tap shorter than this latches Hybrid mode into Toggle (ms).
+    pub latch_ms: u64,
+    /// Windows: suppress the default Copilot launch when bound.
+    pub suppress_copilot: bool,
+}
+
+impl Default for HotkeySettings {
+    fn default() -> Self {
+        Self {
+            dictation: HotkeyBinding {
+                // Platform defaults applied on first launch: Fn on macOS is set by
+                // the app after checking hardware; RightCtrl on Windows (never
+                // RightAlt: that's AltGr on many layouts).
+                key: default_dictation_key().into(),
+                mode: HotkeyMode::Hybrid,
+                enabled: true,
+            },
+            dictation_alt: HotkeyBinding::default(),
+            history_palette: HotkeyBinding {
+                key: default_palette_key().into(),
+                mode: HotkeyMode::Toggle,
+                enabled: true,
+            },
+            cancel: HotkeyBinding { key: "Escape".into(), mode: HotkeyMode::Toggle, enabled: true },
+            latch_ms: 450,
+            suppress_copilot: true,
+        }
+    }
+}
+
+fn default_dictation_key() -> &'static str {
+    #[cfg(target_os = "macos")]
+    { "Fn" }
+    #[cfg(not(target_os = "macos"))]
+    { "RightCtrl" }
+}
+
+fn default_palette_key() -> &'static str {
+    #[cfg(target_os = "macos")]
+    { "Cmd+Shift+V" }
+    #[cfg(not(target_os = "macos"))]
+    { "Ctrl+Shift+V" }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DictionarySettings {
+    pub enabled: bool,
+    /// Feed terms to the engine as a bias prompt where supported.
+    pub bias_recognition: bool,
+    /// Fuzzy-correct close misspellings of terms post-transcription.
+    pub fuzzy_correct: bool,
+    /// Learn correction pairs from user edits in history.
+    pub auto_learn: bool,
+}
+
+impl Default for DictionarySettings {
+    fn default() -> Self {
+        Self { enabled: true, bias_recognition: true, fuzzy_correct: true, auto_learn: false }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppearanceSettings {
+    /// "system" | "light" | "dark"
+    pub theme_mode: String,
+    /// Palette id: "paper" | "midnight" | "pastel" | "bold" | "retro"
+    pub palette: String,
+    /// Accent colour hex, e.g. "#2b5cff".
+    pub accent: String,
+    /// App icon id.
+    pub app_icon: String,
+    pub reduce_motion: bool,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self {
+            theme_mode: "system".into(),
+            palette: "paper".into(),
+            accent: "#2b5cff".into(),
+            app_icon: "default".into(),
+            reduce_motion: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistorySettings {
+    /// Capture system clipboard into history.
+    pub clipboard_capture: bool,
+    /// Days to keep unpinned items; 0 = forever.
+    pub retention_days: u32,
+    /// App ids excluded from clipboard capture (password managers etc.).
+    pub excluded_apps: Vec<String>,
+    /// Reserved: encrypt the history DB at rest.
+    pub encrypt_at_rest: bool,
+    pub max_items: u32,
+}
+
+impl Default for HistorySettings {
+    fn default() -> Self {
+        Self {
+            clipboard_capture: true,
+            retention_days: 0,
+            excluded_apps: vec![
+                // macOS bundle ids
+                "com.1password.1password".into(),
+                "com.agilebits.onepassword7".into(),
+                "com.bitwarden.desktop".into(),
+                "com.lastpass.LastPass".into(),
+                "org.keepassxc.keepassxc".into(),
+                "com.dashlane.Dashlane".into(),
+                // Windows exe names
+                "1Password.exe".into(),
+                "Bitwarden.exe".into(),
+                "KeePassXC.exe".into(),
+                "Dashlane.exe".into(),
+            ],
+            encrypt_at_rest: false,
+            max_items: 10_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioSettings {
+    /// Input device name; empty = system default.
+    pub input_device: String,
+    /// Discard recordings shorter than this (accidental taps).
+    pub min_duration_ms: u64,
+    /// Play subtle start/stop sounds.
+    pub sounds: bool,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self { input_device: String::new(), min_duration_ms: 300, sounds: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverlaySettings {
+    /// "bottom-center" | "bottom-right" | "top-center" | "near-cursor"
+    pub position: String,
+    /// "pill" | "cassette" (retro) | "minimal"
+    pub style: String,
+    pub show_partial_text: bool,
+}
+
+impl Default for OverlaySettings {
+    fn default() -> Self {
+        Self { position: "bottom-center".into(), style: "pill".into(), show_partial_text: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PasteSettings {
+    /// Insert at cursor in the focused app on stop.
+    pub inject: bool,
+    /// Also copy the final text to the clipboard on stop.
+    pub copy_to_clipboard: bool,
+    /// Restore the previous clipboard after paste-injection.
+    pub restore_clipboard: bool,
+    /// Delay before restoring (apps read the clipboard asynchronously).
+    pub restore_delay_ms: u64,
+    /// macOS: try Accessibility text insertion before clipboard+Cmd-V.
+    pub prefer_ax_insert: bool,
+}
+
+impl Default for PasteSettings {
+    fn default() -> Self {
+        Self {
+            inject: true,
+            copy_to_clipboard: true,
+            restore_clipboard: true,
+            restore_delay_ms: 700,
+            prefer_ax_insert: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum SettingsError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("parse: {0}")]
+    Parse(#[from] serde_json::Error),
+}
+
+impl Settings {
+    pub fn load(path: &Path) -> Result<Self, SettingsError> {
+        match std::fs::read_to_string(path) {
+            Ok(s) => Ok(serde_json::from_str(&s)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Atomic write: temp file + rename, so a crash never corrupts settings.
+    pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+}
+
+/// Application data directory (settings, history DB, models).
+pub fn data_dir() -> PathBuf {
+    // %LOCALAPPDATA%\EchoKey on Windows (models must NOT live in Program Files),
+    // ~/Library/Application Support/EchoKey on macOS.
+    #[cfg(target_os = "windows")]
+    let base = dirs::data_local_dir();
+    #[cfg(not(target_os = "windows"))]
+    let base = dirs::data_dir();
+    base.unwrap_or_else(|| PathBuf::from(".")).join("EchoKey")
+}
+
+pub fn settings_path() -> PathBuf {
+    data_dir().join("settings.json")
+}
+
+pub fn models_dir() -> PathBuf {
+    data_dir().join("models")
+}
+
+pub fn history_db_path() -> PathBuf {
+    data_dir().join("history.db")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_and_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        let s = Settings::default();
+        s.save(&p).unwrap();
+        let loaded = Settings::load(&p).unwrap();
+        assert_eq!(loaded.version, SETTINGS_VERSION);
+        assert!(loaded.cleanup.enabled);
+        assert_eq!(loaded.paste.restore_delay_ms, 700);
+    }
+
+    #[test]
+    fn missing_file_gives_defaults() {
+        let s = Settings::load(Path::new("/definitely/not/here.json")).unwrap();
+        assert!(!s.onboarding_complete);
+    }
+
+    #[test]
+    fn partial_json_fills_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        std::fs::write(&p, r#"{"version":1,"launch_at_login":true}"#).unwrap();
+        let s = Settings::load(&p).unwrap();
+        assert!(s.launch_at_login);
+        assert!(s.cleanup.remove_fillers);
+    }
+
+    #[test]
+    fn windows_default_is_not_altgr() {
+        // Right Alt is AltGr on many layouts; the Windows default must be RightCtrl.
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(HotkeySettings::default().dictation.key, "RightCtrl");
+        #[cfg(target_os = "macos")]
+        assert_eq!(HotkeySettings::default().dictation.key, "Fn");
+    }
+}

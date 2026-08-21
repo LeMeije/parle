@@ -1,0 +1,82 @@
+{
+  "$comment": "Behavioural contract for the dictionary engine. Both platform builds run these in CI. entries = [{term, corrections[]}]. fuzzy defaults to true.",
+  "version": 1,
+  "cases": [
+    {
+      "name": "explicit_pair",
+      "entries": [{ "term": "Claude Code", "corrections": ["cloud code"] }],
+      "input": "I opened cloud code this morning",
+      "expect": "I opened Claude Code this morning"
+    },
+    {
+      "name": "explicit_pair_case_insensitive",
+      "entries": [{ "term": "Claude Code", "corrections": ["cloud code"] }],
+      "input": "Cloud Code is great",
+      "expect": "Claude Code is great"
+    },
+    {
+      "name": "fuzzy_misspelling",
+      "entries": [{ "term": "farsiight", "corrections": [] }],
+      "input": "the farsight team shipped it",
+      "expect": "the farsiight team shipped it"
+    },
+    {
+      "name": "casing_normalised",
+      "entries": [{ "term": "NotePlan", "corrections": [] }],
+      "input": "open noteplan now",
+      "expect": "open NotePlan now"
+    },
+    {
+      "name": "hyphen_tolerant",
+      "entries": [{ "term": "NotePlan", "corrections": [] }],
+      "input": "open note-plan now",
+      "expect": "open NotePlan now"
+    },
+    {
+      "name": "common_word_guard",
+      "entries": [{ "term": "Chack", "corrections": [] }],
+      "input": "check the numbers",
+      "expect": "check the numbers"
+    },
+    {
+      "name": "never_insert_unspoken",
+      "entries": [{ "term": "Kubernetes", "corrections": [] }],
+      "input": "deploy the app today",
+      "expect": "deploy the app today"
+    },
+    {
+      "name": "punctuation_preserved",
+      "entries": [{ "term": "Claude Code", "corrections": ["cloud code"] }],
+      "input": "Have you tried cloud code?",
+      "expect": "Have you tried Claude Code?"
+    },
+    {
+      "name": "fuzzy_off_leaves_text",
+      "fuzzy": false,
+      "entries": [{ "term": "farsiight", "corrections": [] }],
+      "input": "the farsight team",
+      "expect": "the farsight team"
+    },
+    {
+      "name": "longest_pair_wins",
+      "entries": [
+        { "term": "Claude Code", "corrections": ["cloud code"] },
+        { "term": "Claude Code Pro", "corrections": ["cloud code pro"] }
+      ],
+      "input": "try cloud code pro today",
+      "expect": "try Claude Code Pro today"
+    },
+    {
+      "name": "multiple_occurrences",
+      "entries": [{ "term": "Aysha", "corrections": ["Aisha"] }],
+      "input": "Aisha said Aisha prefers email",
+      "expect": "Aysha said Aysha prefers email"
+    },
+    {
+      "name": "nfc_normalisation",
+      "entries": [{ "term": "café", "corrections": [] }],
+      "input": "meet at the café tomorrow",
+      "expect": "meet at the café tomorrow"
+    }
+  ]
+}

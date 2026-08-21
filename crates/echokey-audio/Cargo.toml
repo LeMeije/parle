@@ -1,0 +1,15 @@
+[package]
+name = "echokey-audio"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "EchoKey audio capture and resampling"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
+cpal = "0.15"

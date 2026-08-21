@@ -1,0 +1,15 @@
+[package]
+name = "echokey-asr"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "EchoKey ASR engines, model registry, downloader"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
