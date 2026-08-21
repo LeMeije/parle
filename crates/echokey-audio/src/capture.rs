@@ -39,6 +39,11 @@ impl CaptureStream {
     pub fn dropped_chunks(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
+
+    /// Shareable handle to the drop counter (the stream itself is !Send).
+    pub fn dropped_handle(&self) -> Arc<AtomicU64> {
+        self.dropped.clone()
+    }
 }
 
 /// List input device names for the settings UI.

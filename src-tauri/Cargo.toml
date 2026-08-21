@@ -1,25 +1,65 @@
 [package]
 name = "echokey"
-version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "EchoKey — on-device AI dictation and clipboard history"
 
 [lib]
-# The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "echokey_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
-[dependencies]
-tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+[features]
+default = []
+# Windows: build whisper.cpp with CUDA (requires CUDA toolkit 12.8+).
+cuda = ["echokey-asr/cuda"]
 
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = { workspace = true }
+crossbeam-channel = { workspace = true }
+arboard = "3"
+echokey-core = { path = "../crates/echokey-core" }
+echokey-audio = { path = "../crates/echokey-audio" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+echokey-asr = { path = "../crates/echokey-asr", features = ["metal"] }
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }
+window-vibrancy = "0.8"
+core-graphics = "0.24"
+core-foundation = "0.10"
+accessibility-sys = "0.1"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSPasteboardItem", "NSWorkspace", "NSRunningApplication"] }
+objc2-foundation = "0.3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+echokey-asr = { path = "../crates/echokey-asr" }
+window-vibrancy = "0.8"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_DataExchange",
+    "Win32_System_Ole",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+] }
+
+[target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
+echokey-asr = { path = "../crates/echokey-asr" }

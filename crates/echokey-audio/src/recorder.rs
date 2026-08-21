@@ -1,14 +1,17 @@
 //! Utterance assembler: drains the capture channel IN ORDER on one thread,
 //! resamples to 16 kHz mono, accumulates the utterance buffer, and emits
 //! level updates. The audio is never discarded until the caller takes it.
+//!
+//! cpal's Stream is !Send, so a dedicated stream-owner thread creates and
+//! holds it; the Recorder handle itself is Send.
 
-use crate::capture::{self, CaptureStream};
+use crate::capture::{self};
 use crate::level::LevelMeter;
 use crate::resample::StreamResampler;
 use crate::{AudioChunk, ASR_SAMPLE_RATE};
 use crossbeam_channel::Receiver;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Emitted ~30x/sec while recording, consumed by the HUD.
@@ -31,8 +34,10 @@ pub struct Recording {
 pub struct Recorder {
     stop_flag: Arc<AtomicBool>,
     result: Arc<Mutex<Option<RecordingState>>>,
-    join: Option<std::thread::JoinHandle<()>>,
-    stream: CaptureStream,
+    consumer: Option<std::thread::JoinHandle<()>>,
+    stream_owner: Option<std::thread::JoinHandle<()>>,
+    dropped: Arc<AtomicU64>,
+    device_name: String,
 }
 
 struct RecordingState {
@@ -47,16 +52,50 @@ impl Recorder {
         mut on_level: impl FnMut(LevelUpdate) + Send + 'static,
     ) -> Result<Self, capture::CaptureError> {
         let (tx, rx) = capture::chunk_channel();
-        let stream = capture::start(device_name, tx)?;
-        let input_rate = stream.sample_rate;
-
         let stop_flag = Arc::new(AtomicBool::new(false));
+
+        // Stream-owner thread: cpal Stream is !Send, so it lives (and dies) here.
+        type InitMsg = Result<(u32, u16, String, Arc<AtomicU64>), capture::CaptureError>;
+        let (init_tx, init_rx) = crossbeam_channel::bounded::<InitMsg>(1);
+        let stream_owner = {
+            let device_name = device_name.to_string();
+            let stop_flag = stop_flag.clone();
+            std::thread::Builder::new()
+                .name("echokey-audio-stream".into())
+                .spawn(move || match capture::start(&device_name, tx) {
+                    Ok(stream) => {
+                        let _ = init_tx.send(Ok((
+                            stream.sample_rate,
+                            stream.channels,
+                            stream.device_name.clone(),
+                            stream.dropped_handle(),
+                        )));
+                        while !stop_flag.load(Ordering::SeqCst) {
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                        }
+                        drop(stream); // stops capture
+                    }
+                    Err(e) => {
+                        let _ = init_tx.send(Err(e));
+                    }
+                })
+                .expect("spawn stream owner")
+        };
+
+        let (input_rate, _channels, resolved_name, dropped) = match init_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(capture::CaptureError::Start("stream init timed out".into())),
+        };
+
         let result = Arc::new(Mutex::new(Some(RecordingState {
             samples: Vec::with_capacity(ASR_SAMPLE_RATE as usize * 30),
             out_of_order: false,
         })));
 
-        let join = {
+        let consumer = {
             let stop_flag = stop_flag.clone();
             let result = result.clone();
             std::thread::Builder::new()
@@ -67,13 +106,41 @@ impl Recorder {
                 .expect("spawn audio consumer")
         };
 
-        Ok(Self { stop_flag, result, join: Some(join), stream })
+        Ok(Self {
+            stop_flag,
+            result,
+            consumer: Some(consumer),
+            stream_owner: Some(stream_owner),
+            dropped,
+            device_name: resolved_name,
+        })
+    }
+
+    /// Copy of the samples accumulated so far (for streaming partial passes).
+    pub fn snapshot(&self) -> Vec<f32> {
+        self.result
+            .lock()
+            .as_ref()
+            .map(|s| s.samples.clone())
+            .unwrap_or_default()
+    }
+
+    /// Duration captured so far, in ms.
+    pub fn elapsed_ms(&self) -> u64 {
+        self.result
+            .lock()
+            .as_ref()
+            .map(|s| (s.samples.len() as u64 * 1000) / ASR_SAMPLE_RATE as u64)
+            .unwrap_or(0)
     }
 
     /// Stop and take the recording. Blocks briefly while the consumer drains.
     pub fn stop(mut self) -> Recording {
         self.stop_flag.store(true, Ordering::SeqCst);
-        if let Some(j) = self.join.take() {
+        if let Some(j) = self.stream_owner.take() {
+            let _ = j.join();
+        }
+        if let Some(j) = self.consumer.take() {
             let _ = j.join();
         }
         let state = self.result.lock().take().unwrap_or(RecordingState {
@@ -87,17 +154,26 @@ impl Recorder {
         Recording {
             samples: state.samples,
             duration_ms,
-            dropped_chunks: self.stream.dropped_chunks(),
-            device_name: self.stream.device_name.clone(),
+            dropped_chunks: self.dropped.load(Ordering::Relaxed),
+            device_name: self.device_name.clone(),
         }
     }
 
     /// Abort without keeping audio.
     pub fn cancel(mut self) {
         self.stop_flag.store(true, Ordering::SeqCst);
-        if let Some(j) = self.join.take() {
+        if let Some(j) = self.stream_owner.take() {
             let _ = j.join();
         }
+        if let Some(j) = self.consumer.take() {
+            let _ = j.join();
+        }
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::SeqCst);
     }
 }
 
@@ -151,7 +227,14 @@ fn consume(
                     break;
                 }
             }
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                // Stream closed: flush and exit.
+                let tail = resampler.finish();
+                if let Some(state) = result.lock().as_mut() {
+                    state.samples.extend_from_slice(&tail);
+                }
+                break;
+            }
         }
     }
 }
@@ -211,5 +294,11 @@ mod tests {
         let mut cb = |_: LevelUpdate| {};
         consume(rx, 16_000, stop, result.clone(), &mut cb);
         assert!(result.lock().take().unwrap().out_of_order);
+    }
+
+    #[test]
+    fn recorder_handle_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Recorder>();
     }
 }
