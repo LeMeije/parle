@@ -1,0 +1,240 @@
+//! Static model registry. URLs and sizes verified 21/08/2026
+//! (docs/research/ASR.md). Sizes are used for download progress and the
+//! post-download sanity check.
+
+use serde::Serialize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineKind {
+    Whisper,
+    Parakeet,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelInfo {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub engine: EngineKind,
+    pub file_name: &'static str,
+    pub size_bytes: u64,
+    /// 1 (slowest) .. 5 (fastest) on the reference machines.
+    pub speed: u8,
+    /// 1 (roughest) .. 5 (best) transcription quality.
+    pub accuracy: u8,
+    pub multilingual: bool,
+    /// Approximate resident memory when loaded (MB), for auto-selection.
+    pub ram_mb: u32,
+}
+
+const HF: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+
+pub const MODELS: &[ModelInfo] = &[
+    ModelInfo {
+        id: "whisper-tiny-q5_1",
+        display_name: "Whisper Tiny (fastest)",
+        engine: EngineKind::Whisper,
+        file_name: "ggml-tiny-q5_1.bin",
+        size_bytes: 33_770_000,
+        speed: 5,
+        accuracy: 1,
+        multilingual: true,
+        ram_mb: 120,
+    },
+    ModelInfo {
+        id: "whisper-base-q5_1",
+        display_name: "Whisper Base (fast)",
+        engine: EngineKind::Whisper,
+        file_name: "ggml-base-q5_1.bin",
+        size_bytes: 62_600_000,
+        speed: 5,
+        accuracy: 2,
+        multilingual: true,
+        ram_mb: 210,
+    },
+    ModelInfo {
+        id: "whisper-base-en-q5_1",
+        display_name: "Whisper Base English (fast)",
+        engine: EngineKind::Whisper,
+        file_name: "ggml-base.en-q5_1.bin",
+        size_bytes: 62_600_000,
+        speed: 5,
+        accuracy: 2,
+        multilingual: false,
+        ram_mb: 210,
+    },
+    ModelInfo {
+        id: "whisper-small-q5_1",
+        display_name: "Whisper Small (balanced)",
+        engine: EngineKind::Whisper,
+        file_name: "ggml-small-q5_1.bin",
+        size_bytes: 199_200_000,
+        speed: 4,
+        accuracy: 3,
+        multilingual: true,
+        ram_mb: 550,
+    },
+    ModelInfo {
+        id: "whisper-small-en-q5_1",
+        display_name: "Whisper Small English (balanced)",
+        engine: EngineKind::Whisper,
+        file_name: "ggml-small.en-q5_1.bin",
+        size_bytes: 199_200_000,
+        speed: 4,
+        accuracy: 3,
+        multilingual: false,
+        ram_mb: 550,
+    },
+    ModelInfo {
+        id: "whisper-medium-q5_0",
+        display_name: "Whisper Medium (accurate)",
+        engine: EngineKind::Whisper,
+        file_name: "ggml-medium-q5_0.bin",
+        size_bytes: 565_200_000,
+        speed: 2,
+        accuracy: 4,
+        multilingual: true,
+        ram_mb: 1400,
+    },
+    ModelInfo {
+        id: "whisper-large-v3-turbo-q5_0",
+        display_name: "Whisper Large v3 Turbo (best, compact)",
+        engine: EngineKind::Whisper,
+        file_name: "ggml-large-v3-turbo-q5_0.bin",
+        size_bytes: 601_900_000,
+        speed: 3,
+        accuracy: 5,
+        multilingual: true,
+        ram_mb: 1600,
+    },
+    ModelInfo {
+        id: "whisper-large-v3-turbo-q8_0",
+        display_name: "Whisper Large v3 Turbo (best)",
+        engine: EngineKind::Whisper,
+        file_name: "ggml-large-v3-turbo-q8_0.bin",
+        size_bytes: 916_500_000,
+        speed: 3,
+        accuracy: 5,
+        multilingual: true,
+        ram_mb: 2100,
+    },
+];
+
+/// Real download URL for a model (const tables can't concat strings).
+pub fn url_for(model: &ModelInfo) -> String {
+    format!("{HF}/{}", model.file_name)
+}
+
+pub fn by_id(id: &str) -> Option<&'static ModelInfo> {
+    MODELS.iter().find(|m| m.id == id)
+}
+
+/// Machine profile used for first-launch auto-selection.
+#[derive(Debug, Clone, Serialize)]
+pub struct MachineProfile {
+    pub os: &'static str,
+    pub total_ram_mb: u64,
+    pub gpu: &'static str, // "metal" | "cuda" | "none"
+}
+
+pub fn detect_machine() -> MachineProfile {
+    let total_ram_mb = total_ram_mb();
+    #[cfg(target_os = "macos")]
+    let (os, gpu) = ("macos", "metal");
+    #[cfg(target_os = "windows")]
+    let (os, gpu) = ("windows", if cfg!(feature = "cuda") { "cuda" } else { "none" });
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let (os, gpu) = ("linux", "none");
+    MachineProfile { os, total_ram_mb, gpu }
+}
+
+/// First-launch recommendation: (default model, fallback chain).
+/// The chain always ends in the smallest model so the failure ladder can't
+/// bottom out.
+pub fn recommend(profile: &MachineProfile) -> (&'static str, Vec<&'static str>) {
+    let default = match (profile.gpu, profile.total_ram_mb) {
+        ("cuda", _) => "whisper-large-v3-turbo-q8_0",
+        ("metal", ram) if ram >= 16_000 => "whisper-large-v3-turbo-q5_0",
+        ("metal", _) => "whisper-small-q5_1",
+        (_, ram) if ram >= 16_000 => "whisper-small-q5_1",
+        _ => "whisper-base-q5_1",
+    };
+    let chain: Vec<&'static str> = ["whisper-large-v3-turbo-q5_0", "whisper-small-q5_1", "whisper-base-q5_1", "whisper-tiny-q5_1"]
+        .into_iter()
+        .filter(|id| *id != default)
+        .collect();
+    (default, chain)
+}
+
+fn total_ram_mb() -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        // sysctl hw.memsize
+        use std::process::Command;
+        if let Ok(out) = Command::new("sysctl").args(["-n", "hw.memsize"]).output() {
+            if let Ok(s) = String::from_utf8(out.stdout) {
+                if let Ok(bytes) = s.trim().parse::<u64>() {
+                    return bytes / 1_048_576;
+                }
+            }
+        }
+        8192
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // GlobalMemoryStatusEx via the windows crate lives in the app crate; a
+        // conservative default here keeps this crate dependency-light. The app
+        // overrides with the real value before calling recommend().
+        16_384
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        8192
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_unique() {
+        let mut ids: Vec<_> = MODELS.iter().map(|m| m.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), MODELS.len());
+    }
+
+    #[test]
+    fn urls_resolve_to_hf() {
+        for m in MODELS {
+            let url = url_for(m);
+            assert!(url.starts_with("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-"), "{url}");
+        }
+    }
+
+    #[test]
+    fn recommendation_ladder() {
+        let mac16 = MachineProfile { os: "macos", total_ram_mb: 24_576, gpu: "metal" };
+        let (d, chain) = recommend(&mac16);
+        assert_eq!(d, "whisper-large-v3-turbo-q5_0");
+        assert!(!chain.contains(&d));
+        assert_eq!(*chain.last().unwrap(), "whisper-tiny-q5_1");
+
+        let mac8 = MachineProfile { os: "macos", total_ram_mb: 8_192, gpu: "metal" };
+        assert_eq!(recommend(&mac8).0, "whisper-small-q5_1");
+
+        let win = MachineProfile { os: "windows", total_ram_mb: 65_536, gpu: "cuda" };
+        assert_eq!(recommend(&win).0, "whisper-large-v3-turbo-q8_0");
+    }
+
+    #[test]
+    fn all_models_have_positive_metadata() {
+        for m in MODELS {
+            assert!(m.size_bytes > 10_000_000);
+            assert!((1..=5).contains(&m.speed));
+            assert!((1..=5).contains(&m.accuracy));
+            assert!(by_id(m.id).is_some());
+        }
+    }
+}

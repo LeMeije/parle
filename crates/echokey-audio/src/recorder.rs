@@ -1,0 +1,215 @@
+//! Utterance assembler: drains the capture channel IN ORDER on one thread,
+//! resamples to 16 kHz mono, accumulates the utterance buffer, and emits
+//! level updates. The audio is never discarded until the caller takes it.
+
+use crate::capture::{self, CaptureStream};
+use crate::level::LevelMeter;
+use crate::resample::StreamResampler;
+use crate::{AudioChunk, ASR_SAMPLE_RATE};
+use crossbeam_channel::Receiver;
+use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+/// Emitted ~30x/sec while recording, consumed by the HUD.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LevelUpdate {
+    pub rms: f32,
+    pub peak: f32,
+    pub envelope: f32,
+    pub elapsed_ms: u64,
+}
+
+pub struct Recording {
+    /// 16 kHz mono f32.
+    pub samples: Vec<f32>,
+    pub duration_ms: u64,
+    pub dropped_chunks: u64,
+    pub device_name: String,
+}
+
+pub struct Recorder {
+    stop_flag: Arc<AtomicBool>,
+    result: Arc<Mutex<Option<RecordingState>>>,
+    join: Option<std::thread::JoinHandle<()>>,
+    stream: CaptureStream,
+}
+
+struct RecordingState {
+    samples: Vec<f32>,
+    out_of_order: bool,
+}
+
+impl Recorder {
+    /// Start capturing. `on_level` is called from the consumer thread.
+    pub fn start(
+        device_name: &str,
+        mut on_level: impl FnMut(LevelUpdate) + Send + 'static,
+    ) -> Result<Self, capture::CaptureError> {
+        let (tx, rx) = capture::chunk_channel();
+        let stream = capture::start(device_name, tx)?;
+        let input_rate = stream.sample_rate;
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let result = Arc::new(Mutex::new(Some(RecordingState {
+            samples: Vec::with_capacity(ASR_SAMPLE_RATE as usize * 30),
+            out_of_order: false,
+        })));
+
+        let join = {
+            let stop_flag = stop_flag.clone();
+            let result = result.clone();
+            std::thread::Builder::new()
+                .name("echokey-audio-consumer".into())
+                .spawn(move || {
+                    consume(rx, input_rate, stop_flag, result, &mut on_level);
+                })
+                .expect("spawn audio consumer")
+        };
+
+        Ok(Self { stop_flag, result, join: Some(join), stream })
+    }
+
+    /// Stop and take the recording. Blocks briefly while the consumer drains.
+    pub fn stop(mut self) -> Recording {
+        self.stop_flag.store(true, Ordering::SeqCst);
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
+        }
+        let state = self.result.lock().take().unwrap_or(RecordingState {
+            samples: Vec::new(),
+            out_of_order: false,
+        });
+        if state.out_of_order {
+            tracing::error!("audio chunks arrived out of order — transcript may be corrupted");
+        }
+        let duration_ms = (state.samples.len() as u64 * 1000) / ASR_SAMPLE_RATE as u64;
+        Recording {
+            samples: state.samples,
+            duration_ms,
+            dropped_chunks: self.stream.dropped_chunks(),
+            device_name: self.stream.device_name.clone(),
+        }
+    }
+
+    /// Abort without keeping audio.
+    pub fn cancel(mut self) {
+        self.stop_flag.store(true, Ordering::SeqCst);
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
+        }
+    }
+}
+
+fn consume(
+    rx: Receiver<AudioChunk>,
+    input_rate: u32,
+    stop_flag: Arc<AtomicBool>,
+    result: Arc<Mutex<Option<RecordingState>>>,
+    on_level: &mut (impl FnMut(LevelUpdate) + Send),
+) {
+    let mut resampler = StreamResampler::new(input_rate);
+    let mut meter = LevelMeter::new();
+    let mut expected_seq: u64 = 0;
+    let mut samples_since_level = 0usize;
+    let level_interval = ASR_SAMPLE_RATE as usize / 30;
+
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(chunk) => {
+                let mut guard = result.lock();
+                let Some(state) = guard.as_mut() else { break };
+                if chunk.seq != expected_seq {
+                    state.out_of_order = true;
+                }
+                expected_seq = chunk.seq + 1;
+                let mono16k = resampler.push(&chunk.samples, chunk.channels);
+                let (rms, peak, envelope) = meter.process(&mono16k);
+                state.samples.extend_from_slice(&mono16k);
+                samples_since_level += mono16k.len();
+                let elapsed_ms = (state.samples.len() as u64 * 1000) / ASR_SAMPLE_RATE as u64;
+                drop(guard);
+                if samples_since_level >= level_interval {
+                    samples_since_level = 0;
+                    on_level(LevelUpdate { rms, peak, envelope, elapsed_ms });
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if stop_flag.load(Ordering::SeqCst) {
+                    // Drain whatever is still queued, in order, then flush.
+                    while let Ok(chunk) = rx.try_recv() {
+                        let mut guard = result.lock();
+                        if let Some(state) = guard.as_mut() {
+                            let mono16k = resampler.push(&chunk.samples, chunk.channels);
+                            state.samples.extend_from_slice(&mono16k);
+                        }
+                    }
+                    let tail = resampler.finish();
+                    if let Some(state) = result.lock().as_mut() {
+                        state.samples.extend_from_slice(&tail);
+                    }
+                    break;
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Feed synthetic chunks through the consumer logic without a real device.
+    #[test]
+    fn ordered_assembly_and_flush() {
+        let (tx, rx) = capture::chunk_channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let result = Arc::new(Mutex::new(Some(RecordingState {
+            samples: Vec::new(),
+            out_of_order: false,
+        })));
+        let levels = Arc::new(Mutex::new(Vec::new()));
+
+        // 1 second of 48 kHz stereo in 20 ms chunks.
+        for seq in 0..50u64 {
+            let samples: Vec<f32> = (0..1920)
+                .map(|i| ((seq * 960 + i / 2) as f32 * 0.01).sin() * 0.4)
+                .collect();
+            tx.send(AudioChunk { seq, samples, channels: 2, sample_rate: 48_000 }).unwrap();
+        }
+        drop(tx);
+
+        {
+            let levels = levels.clone();
+            let mut cb = move |u: LevelUpdate| levels.lock().push(u);
+            consume(rx, 48_000, stop, result.clone(), &mut cb);
+        }
+
+        let state = result.lock().take().unwrap();
+        assert!(!state.out_of_order);
+        // ~1 s at 16 kHz (sinc latency tolerance).
+        assert!(
+            (state.samples.len() as i64 - 16_000).unsigned_abs() < 1200,
+            "got {}",
+            state.samples.len()
+        );
+        assert!(!levels.lock().is_empty());
+    }
+
+    #[test]
+    fn out_of_order_detected() {
+        let (tx, rx) = capture::chunk_channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let result = Arc::new(Mutex::new(Some(RecordingState {
+            samples: Vec::new(),
+            out_of_order: false,
+        })));
+        tx.send(AudioChunk { seq: 1, samples: vec![0.0; 320], channels: 1, sample_rate: 16_000 }).unwrap();
+        tx.send(AudioChunk { seq: 0, samples: vec![0.0; 320], channels: 1, sample_rate: 16_000 }).unwrap();
+        drop(tx);
+        let mut cb = |_: LevelUpdate| {};
+        consume(rx, 16_000, stop, result.clone(), &mut cb);
+        assert!(result.lock().take().unwrap().out_of_order);
+    }
+}

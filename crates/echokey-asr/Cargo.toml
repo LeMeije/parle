@@ -4,12 +4,25 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "EchoKey ASR engines, model registry, downloader"
+description = "EchoKey ASR: engine trait, whisper.cpp backend, model registry, downloader"
+
+[features]
+default = ["whisper"]
+whisper = ["dep:whisper-rs"]
+metal = ["whisper-rs/metal"]
+cuda = ["whisper-rs/cuda"]
+# Parakeet via the official sherpa-onnx crate. Off by default: its build script
+# fetches prebuilt libs unless SHERPA_ONNX_LIB_DIR is set. Enable on Windows.
+parakeet = []
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-crossbeam-channel = { workspace = true }
 parking_lot = { workspace = true }
+whisper-rs = { version = "0.16", optional = true }
+ureq = "2"
+
+[dev-dependencies]
+tempfile = "3"
