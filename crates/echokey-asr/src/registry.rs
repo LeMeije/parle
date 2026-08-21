@@ -152,9 +152,12 @@ pub fn detect_machine() -> MachineProfile {
 /// The chain always ends in the smallest model so the failure ladder can't
 /// bottom out.
 pub fn recommend(profile: &MachineProfile) -> (&'static str, Vec<&'static str>) {
+    // Measured on an M2 (docs/BENCHMARKS.md): turbo has a ~2.6 s fixed cost per
+    // utterance on Metal — too slow for short dictations — while small-q5_1 is
+    // 8-24x realtime with full accuracy on the fixtures. Small is the Metal
+    // default at any RAM size; turbo stays available as the quality option.
     let default = match (profile.gpu, profile.total_ram_mb) {
         ("cuda", _) => "whisper-large-v3-turbo-q8_0",
-        ("metal", ram) if ram >= 16_000 => "whisper-large-v3-turbo-q5_0",
         ("metal", _) => "whisper-small-q5_1",
         (_, ram) if ram >= 16_000 => "whisper-small-q5_1",
         _ => "whisper-base-q5_1",
@@ -217,7 +220,7 @@ mod tests {
     fn recommendation_ladder() {
         let mac16 = MachineProfile { os: "macos", total_ram_mb: 24_576, gpu: "metal" };
         let (d, chain) = recommend(&mac16);
-        assert_eq!(d, "whisper-large-v3-turbo-q5_0");
+        assert_eq!(d, "whisper-small-q5_1");
         assert!(!chain.contains(&d));
         assert_eq!(*chain.last().unwrap(), "whisper-tiny-q5_1");
 

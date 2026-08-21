@@ -79,7 +79,7 @@ impl Pipeline {
         self.recorder.lock().is_some()
     }
 
-    pub fn start(&self) {
+    pub fn start(self: &Arc<Self>) {
         if self.recorder.lock().is_some() {
             return;
         }
@@ -92,6 +92,9 @@ impl Pipeline {
             Ok(rec) => {
                 *self.recorder.lock() = Some(rec);
                 (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Recording });
+                if self.settings.lock().overlay.show_partial_text {
+                    self.spawn_partial_loop();
+                }
             }
             Err(e) => {
                 (self.sink)(PipelineEvent::Error {
@@ -99,6 +102,59 @@ impl Pipeline {
                 });
             }
         }
+    }
+
+    /// Live partial transcripts while still speaking: every couple of seconds,
+    /// transcribe a snapshot of the audio so far. Best-effort by design —
+    /// engine `try_lock` means partials NEVER queue behind (or delay) the final
+    /// pass, and the loop exits the moment the recorder is taken for stop.
+    fn spawn_partial_loop(self: &Arc<Self>) {
+        let this = self.clone();
+        std::thread::Builder::new()
+            .name("echokey-partials".into())
+            .spawn(move || {
+                const MAX_PARTIAL_SECS: usize = 30 * 16_000;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(2000));
+                    let snapshot = {
+                        let guard = this.recorder.lock();
+                        match guard.as_ref() {
+                            Some(rec) => rec.snapshot(),
+                            None => break, // stopped or cancelled
+                        }
+                    };
+                    if snapshot.len() < 24_000 || snapshot.len() > MAX_PARTIAL_SECS {
+                        continue; // too short to bother, or too long to keep cheap
+                    }
+                    if is_silence(&snapshot) {
+                        continue;
+                    }
+                    let Some(mut engine) = this.engine.try_lock() else {
+                        continue; // engine busy (prewarm/final pass) — skip this tick
+                    };
+                    let opts = TranscribeOptions {
+                        language: this.settings.lock().language.language.clone(),
+                        ..Default::default()
+                    };
+                    if let Ok((out, _)) = engine.transcribe(&snapshot, &opts, None) {
+                        drop(engine);
+                        // Recorder may have been taken while we transcribed.
+                        if this.recorder.lock().is_none() {
+                            break;
+                        }
+                        let text: String = out
+                            .segments
+                            .iter()
+                            .map(|s| s.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if !text.trim().is_empty() {
+                            (this.sink)(PipelineEvent::Partial { text: text.trim().to_string() });
+                        }
+                    }
+                }
+            })
+            .expect("spawn partial loop");
     }
 
     pub fn cancel(&self) {
