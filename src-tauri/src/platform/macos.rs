@@ -226,10 +226,11 @@ fn run_tap(
     while !stop.load(Ordering::SeqCst) {
         unsafe {
             // Run the loop in short bursts so we notice the stop flag and can
-            // re-enable the tap if the OS disabled it.
+            // re-enable the tap if the OS disabled it. (Common modes is a
+            // pseudo-mode invalid for RunInMode; default mode is correct here.)
             let _ = CFRunLoopRun;
             core_foundation::runloop::CFRunLoopRunInMode(
-                kCFRunLoopCommonModes,
+                core_foundation::runloop::kCFRunLoopDefaultMode,
                 0.25,
                 false as u8,
             );

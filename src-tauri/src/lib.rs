@@ -22,7 +22,11 @@ pub fn run() {
         )
         .init();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+
+    builder
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // Second launch: surface the main window.
             hud::show_main(app);
@@ -147,13 +151,16 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 fn spawn_platform(app: &AppHandle, state: Arc<AppState>) {
     let (tx, rx) = crossbeam_channel::unbounded::<platform::PlatformEvent>();
 
+    *state.platform_tx.lock() = Some(tx.clone());
     #[cfg(target_os = "macos")]
     {
-        if platform::macos::accessibility_trusted() {
+        // The native listener swallows bound keys system-wide, so it must never
+        // arm before the user has completed onboarding and chosen a key.
+        if state.settings.lock().onboarding_complete && platform::macos::accessibility_trusted() {
             let listener = platform::macos::HotkeyListener::start(state.native_bindings(), tx.clone());
             *state.hotkeys.lock() = Some(listener);
         } else {
-            tracing::warn!("Accessibility not granted — native hotkeys disabled until onboarding");
+            tracing::info!("native hotkeys not armed (onboarding incomplete or no Accessibility)");
         }
         let enabled = state.settings.lock().history.clipboard_capture;
         let monitor = platform::macos_clipboard::ClipboardMonitor::start(tx.clone(), enabled);
@@ -162,12 +169,14 @@ fn spawn_platform(app: &AppHandle, state: Arc<AppState>) {
 
     #[cfg(target_os = "windows")]
     {
-        let listener = platform::windows::HotkeyListener::start(
-            state.native_bindings(),
-            state.settings.lock().hotkeys.suppress_copilot,
-            tx.clone(),
-        );
-        *state.hotkeys.lock() = Some(listener);
+        if state.settings.lock().onboarding_complete {
+            let listener = platform::windows::HotkeyListener::start(
+                state.native_bindings(),
+                state.settings.lock().hotkeys.suppress_copilot,
+                tx.clone(),
+            );
+            *state.hotkeys.lock() = Some(listener);
+        }
         let enabled = state.settings.lock().history.clipboard_capture;
         let monitor = platform::windows::ClipboardMonitor::start(tx.clone(), enabled);
         *state.clipboard_monitor.lock() = Some(monitor);

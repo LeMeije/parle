@@ -24,6 +24,9 @@ pub struct AppState {
     recording_flag: Arc<AtomicBool>,
     /// Worker that runs stop_and_process off the event thread, strictly serial.
     work_tx: crossbeam_channel::Sender<Work>,
+    /// Channel into the dispatcher, kept so listeners can be armed later
+    /// (the native listener only starts after onboarding completes).
+    pub platform_tx: Mutex<Option<crossbeam_channel::Sender<PlatformEvent>>>,
     #[cfg(target_os = "macos")]
     pub hotkeys: Mutex<Option<platform::macos::HotkeyListener>>,
     #[cfg(target_os = "macos")]
@@ -118,6 +121,7 @@ impl AppState {
             gesture_alt: Mutex::new(GestureMachine::new(mode_alt, latch)),
             recording_flag: Arc::new(AtomicBool::new(false)),
             work_tx,
+            platform_tx: Mutex::new(None),
             hotkeys: Mutex::new(None),
             clipboard_monitor: Mutex::new(None),
         })
@@ -176,6 +180,30 @@ impl AppState {
         }
     }
 
+    /// Arm the native hotkey listener if it isn't running yet (called after
+    /// onboarding completes; never before — it swallows keys system-wide).
+    pub fn ensure_hotkey_listener(&self) {
+        if self.hotkeys.lock().is_some() || !self.settings.lock().onboarding_complete {
+            return;
+        }
+        let Some(tx) = self.platform_tx.lock().clone() else { return };
+        #[cfg(target_os = "macos")]
+        {
+            if platform::macos::accessibility_trusted() {
+                let listener = platform::macos::HotkeyListener::start(self.native_bindings(), tx);
+                *self.hotkeys.lock() = Some(listener);
+                tracing::info!("native hotkey listener armed");
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let suppress = self.settings.lock().hotkeys.suppress_copilot;
+            let listener = platform::windows::HotkeyListener::start(self.native_bindings(), suppress, tx);
+            *self.hotkeys.lock() = Some(listener);
+            tracing::info!("native hotkey listener armed");
+        }
+    }
+
     /// (Re)apply settings: gestures, native bindings, clipboard monitor.
     pub fn apply_settings(&self, _app: &AppHandle) {
         let s = self.settings.lock().clone();
@@ -191,6 +219,7 @@ impl AppState {
         if let Some(m) = self.clipboard_monitor.lock().as_ref() {
             m.set_enabled(s.history.clipboard_capture);
         }
+        self.ensure_hotkey_listener();
         self.reload_engine();
     }
 

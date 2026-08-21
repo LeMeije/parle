@@ -22,12 +22,12 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 // -- Settings ----------------------------------------------------------------
 
 #[tauri::command]
-pub fn get_settings(state: State<AppState>) -> Settings {
+pub fn get_settings(state: State<'_, Arc<AppState>>) -> Settings {
     state.settings.lock().clone()
 }
 
 #[tauri::command]
-pub fn set_settings(state: State<AppState>, app: AppHandle, settings: Settings) -> Result<()> {
+pub fn set_settings(state: State<'_, Arc<AppState>>, app: AppHandle, settings: Settings) -> Result<()> {
     {
         let mut guard = state.settings.lock();
         *guard = settings.clone();
@@ -41,7 +41,7 @@ pub fn set_settings(state: State<AppState>, app: AppHandle, settings: Settings) 
 
 #[tauri::command]
 pub fn search_history(
-    state: State<AppState>,
+    state: State<'_, Arc<AppState>>,
     query: String,
     kind: Option<String>,
     limit: Option<u32>,
@@ -59,17 +59,17 @@ pub fn search_history(
 }
 
 #[tauri::command]
-pub fn pin_item(state: State<AppState>, id: i64, pinned: bool) -> Result<()> {
+pub fn pin_item(state: State<'_, Arc<AppState>>, id: i64, pinned: bool) -> Result<()> {
     state.store.lock().set_pinned(id, pinned).map_err(err)
 }
 
 #[tauri::command]
-pub fn delete_item(state: State<AppState>, id: i64) -> Result<()> {
+pub fn delete_item(state: State<'_, Arc<AppState>>, id: i64) -> Result<()> {
     state.store.lock().delete(id).map_err(err)
 }
 
 #[tauri::command]
-pub fn clear_history(state: State<AppState>, kind: Option<String>) -> Result<usize> {
+pub fn clear_history(state: State<'_, Arc<AppState>>, kind: Option<String>) -> Result<usize> {
     let kind = match kind.as_deref() {
         Some("transcription") => Some(HistoryKind::Transcription),
         Some("clipboard") => Some(HistoryKind::Clipboard),
@@ -80,7 +80,7 @@ pub fn clear_history(state: State<AppState>, kind: Option<String>) -> Result<usi
 
 /// Edit an item's text; feeds the auto-learn dictionary when enabled.
 #[tauri::command]
-pub fn update_item_text(state: State<AppState>, id: i64, text: String) -> Result<()> {
+pub fn update_item_text(state: State<'_, Arc<AppState>>, id: i64, text: String) -> Result<()> {
     let changed = state.store.lock().update_text(id, &text).map_err(err)?;
     if let Some((old, new)) = changed {
         let auto_learn = state.settings.lock().dictionary.auto_learn;
@@ -93,7 +93,7 @@ pub fn update_item_text(state: State<AppState>, id: i64, text: String) -> Result
 
 /// Copy a history item back to the clipboard (palette Enter action).
 #[tauri::command]
-pub fn copy_item(state: State<AppState>, id: i64) -> Result<()> {
+pub fn copy_item(state: State<'_, Arc<AppState>>, id: i64) -> Result<()> {
     let item = state.store.lock().get(id).map_err(err)?.ok_or("not found")?;
     platform::imp::write_clipboard(&item.text);
     Ok(())
@@ -101,7 +101,7 @@ pub fn copy_item(state: State<AppState>, id: i64) -> Result<()> {
 
 /// Copy + paste a history item into the frontmost app.
 #[tauri::command]
-pub fn paste_item(state: State<AppState>, id: i64) -> Result<platform::InjectionOutcome> {
+pub fn paste_item(state: State<'_, Arc<AppState>>, id: i64) -> Result<platform::InjectionOutcome> {
     let item = state.store.lock().get(id).map_err(err)?.ok_or("not found")?;
     let s = state.settings.lock().clone();
     Ok(platform::imp::inject_text(&item.text, s.paste.prefer_ax_insert, s.paste.restore_delay_ms))
@@ -147,7 +147,7 @@ pub struct ModelRow {
 }
 
 #[tauri::command]
-pub fn list_models(state: State<AppState>) -> Vec<ModelRow> {
+pub fn list_models(state: State<'_, Arc<AppState>>) -> Vec<ModelRow> {
     let dir = models_dir();
     let active = state.settings.lock().models.active_model.clone();
     registry::MODELS
@@ -166,7 +166,7 @@ pub fn list_models(state: State<AppState>) -> Vec<ModelRow> {
 }
 
 #[tauri::command]
-pub fn download_model(state: State<AppState>, app: AppHandle, model_id: String) -> Result<()> {
+pub fn download_model(state: State<'_, Arc<AppState>>, app: AppHandle, model_id: String) -> Result<()> {
     let info = registry::by_id(&model_id).ok_or("unknown model")?;
     let token = CancelToken::default();
     state.downloads.lock().insert(model_id.clone(), token.clone());
@@ -188,7 +188,7 @@ pub fn download_model(state: State<AppState>, app: AppHandle, model_id: String) 
 }
 
 #[tauri::command]
-pub fn cancel_download(state: State<AppState>, model_id: String) -> Result<()> {
+pub fn cancel_download(state: State<'_, Arc<AppState>>, model_id: String) -> Result<()> {
     if let Some(t) = state.downloads.lock().get(&model_id) {
         t.cancel();
     }
@@ -196,7 +196,7 @@ pub fn cancel_download(state: State<AppState>, model_id: String) -> Result<()> {
 }
 
 #[tauri::command]
-pub fn delete_model(state: State<AppState>, model_id: String) -> Result<()> {
+pub fn delete_model(state: State<'_, Arc<AppState>>, model_id: String) -> Result<()> {
     let info = registry::by_id(&model_id).ok_or("unknown model")?;
     let active = state.settings.lock().models.active_model.clone();
     if active == model_id {
@@ -206,7 +206,7 @@ pub fn delete_model(state: State<AppState>, model_id: String) -> Result<()> {
 }
 
 #[tauri::command]
-pub fn select_model(state: State<AppState>, app: AppHandle, model_id: String) -> Result<()> {
+pub fn select_model(state: State<'_, Arc<AppState>>, app: AppHandle, model_id: String) -> Result<()> {
     registry::by_id(&model_id).ok_or("unknown model")?;
     {
         let mut s = state.settings.lock();
@@ -219,7 +219,7 @@ pub fn select_model(state: State<AppState>, app: AppHandle, model_id: String) ->
 }
 
 #[tauri::command]
-pub fn engine_status(state: State<AppState>) -> serde_json::Value {
+pub fn engine_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
     state.engine_status()
 }
 
@@ -231,7 +231,7 @@ pub fn machine_profile() -> registry::MachineProfile {
 // -- Dictionary ---------------------------------------------------------------
 
 #[tauri::command]
-pub fn dict_list(state: State<AppState>) -> Result<Vec<echokey_core::dictionary::DictEntry>> {
+pub fn dict_list(state: State<'_, Arc<AppState>>) -> Result<Vec<echokey_core::dictionary::DictEntry>> {
     state.store.lock().dict_entries().map_err(err)
 }
 
@@ -243,7 +243,7 @@ pub struct DictAddResult {
 
 #[tauri::command]
 pub fn dict_add(
-    state: State<AppState>,
+    state: State<'_, Arc<AppState>>,
     term: String,
     corrections: Vec<String>,
 ) -> Result<DictAddResult> {
@@ -256,29 +256,29 @@ pub fn dict_add(
 }
 
 #[tauri::command]
-pub fn dict_set_enabled(state: State<AppState>, id: i64, enabled: bool) -> Result<()> {
+pub fn dict_set_enabled(state: State<'_, Arc<AppState>>, id: i64, enabled: bool) -> Result<()> {
     state.store.lock().dict_set_enabled(id, enabled).map_err(err)
 }
 
 #[tauri::command]
-pub fn dict_delete(state: State<AppState>, id: i64) -> Result<()> {
+pub fn dict_delete(state: State<'_, Arc<AppState>>, id: i64) -> Result<()> {
     state.store.lock().dict_delete(id).map_err(err)
 }
 
 // -- Recording control (UI buttons mirror the hotkeys) -------------------------
 
 #[tauri::command]
-pub fn start_recording(state: State<AppState>) {
+pub fn start_recording(state: State<'_, Arc<AppState>>) {
     state.pipeline_start();
 }
 
 #[tauri::command]
-pub fn stop_recording(state: State<AppState>) {
+pub fn stop_recording(state: State<'_, Arc<AppState>>) {
     state.pipeline_stop();
 }
 
 #[tauri::command]
-pub fn cancel_recording(state: State<AppState>) {
+pub fn cancel_recording(state: State<'_, Arc<AppState>>) {
     let p: &Arc<Pipeline> = &state.pipeline;
     p.cancel();
     state.set_recording_flag(false);
@@ -320,7 +320,7 @@ pub fn recommended_setup() -> serde_json::Value {
 }
 
 #[tauri::command]
-pub fn complete_onboarding(state: State<AppState>, app: AppHandle) -> Result<()> {
+pub fn complete_onboarding(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<()> {
     {
         let mut s = state.settings.lock();
         s.onboarding_complete = true;
