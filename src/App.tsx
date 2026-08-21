@@ -1,51 +1,137 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { useCallback, useEffect, useState } from 'react';
+import { BookA, Cpu, History as HistoryIcon, Mic, Settings as SettingsIcon } from 'lucide-react';
+import { api, onPipelineEvent } from './api';
+import type { PipelineEvent, Settings } from './types';
+import HistoryView from './views/History';
+import ModelsView from './views/Models';
+import DictionaryView from './views/Dictionary';
+import SettingsView from './views/SettingsView';
+import Onboarding from './views/Onboarding';
+import './app.css';
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+type Tab = 'history' | 'dictionary' | 'models' | 'settings';
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+export default function App() {
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [tab, setTab] = useState<Tab>('history');
+  const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'error' } | null>(null);
+  const [recording, setRecording] = useState(false);
+
+  const reload = useCallback(() => {
+    api.getSettings().then((s) => {
+      applyTheme(s);
+      setSettings(s);
+    });
+  }, []);
+
+  useEffect(() => {
+    reload();
+    const un = onPipelineEvent((e: PipelineEvent) => {
+      if (e.kind === 'state_changed') setRecording(e.state === 'recording');
+      if (e.kind === 'completed') {
+        showToast(
+          e.injection?.manual_paste_required
+            ? 'Copied — press paste to insert (secure field)'
+            : `Inserted ${e.text.length > 42 ? e.text.slice(0, 42) + '…' : e.text ? '"' + e.text + '"' : ''}`,
+          'ok',
+        );
+      }
+      if (e.kind === 'empty') showToast(e.reason, 'ok');
+      if (e.kind === 'error') showToast(e.message, 'error');
+    });
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const onScheme = () => api.getSettings().then(applyTheme);
+    media.addEventListener('change', onScheme);
+    return () => {
+      un.then((f) => f());
+      media.removeEventListener('change', onScheme);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function showToast(text: string, kind: 'ok' | 'error') {
+    setToast({ text, kind });
+    window.setTimeout(() => setToast(null), kind === 'error' ? 6000 : 2800);
+  }
+
+  const save = useCallback(
+    async (next: Settings) => {
+      applyTheme(next);
+      setSettings(next);
+      await api.setSettings(next);
+    },
+    [],
+  );
+
+  if (!settings) return null;
+  if (!settings.onboarding_complete) {
+    return <Onboarding onDone={reload} />;
   }
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    <div className="app">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">
+            <Mic size={17} strokeWidth={2.4} />
+          </div>
+          <span>EchoKey</span>
+        </div>
+        <nav>
+          <NavItem icon={<HistoryIcon size={17} />} label="History" active={tab === 'history'} onClick={() => setTab('history')} />
+          <NavItem icon={<BookA size={17} />} label="Dictionary" active={tab === 'dictionary'} onClick={() => setTab('dictionary')} />
+          <NavItem icon={<Cpu size={17} />} label="Models" active={tab === 'models'} onClick={() => setTab('models')} />
+          <NavItem icon={<SettingsIcon size={17} />} label="Settings" active={tab === 'settings'} onClick={() => setTab('settings')} />
+        </nav>
+        <button
+          className={`record-btn ${recording ? 'recording' : ''}`}
+          onClick={() => (recording ? api.stopRecording() : api.startRecording())}
+        >
+          <span className="record-dot" />
+          {recording ? 'Stop dictation' : 'Start dictation'}
+        </button>
+      </aside>
+      <main className="content">
+        {tab === 'history' && <HistoryView />}
+        {tab === 'dictionary' && <DictionaryView />}
+        {tab === 'models' && <ModelsView />}
+        {tab === 'settings' && <SettingsView settings={settings} onSave={save} />}
+      </main>
+      {toast && <div className={`toast toast-${toast.kind}`}>{toast.text}</div>}
+    </div>
   );
 }
 
-export default App;
+function NavItem({
+  icon,
+  label,
+  active,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick}>
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+export function applyTheme(s: Settings): Settings {
+  const root = document.documentElement;
+  root.dataset.palette = s.appearance.palette;
+  const mode =
+    s.appearance.theme_mode === 'system'
+      ? window.matchMedia('(prefers-color-scheme: dark)').matches
+        ? 'dark'
+        : 'light'
+      : s.appearance.theme_mode;
+  root.dataset.mode = mode;
+  root.dataset.reduceMotion = String(s.appearance.reduce_motion);
+  root.style.setProperty('--accent', s.appearance.accent);
+  return s;
+}

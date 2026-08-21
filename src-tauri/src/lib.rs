@@ -68,7 +68,9 @@ pub fn run() {
             let state = AppState::new(&handle);
             app.manage(state.clone());
 
-            hud::create_hud(&handle)?;
+            if let Err(e) = hud::create_hud(&handle) {
+                tracing::error!("HUD creation failed (continuing without overlay): {e}");
+            }
             setup_tray(&handle)?;
             spawn_platform(&handle, state.clone());
             register_chord_shortcuts(&handle, &state);

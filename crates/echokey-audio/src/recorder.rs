@@ -83,7 +83,7 @@ impl Recorder {
         };
 
         let (input_rate, _channels, resolved_name, dropped) = match init_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(std::time::Duration::from_secs(10))
         {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => return Err(e),

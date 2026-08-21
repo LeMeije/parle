@@ -1150,6 +1150,7 @@ dependencies = [
 name = "echokey-asr"
 version = "0.1.0"
 dependencies = [
+ "echokey-audio",
  "parking_lot",
  "serde",
  "serde_json",
