@@ -162,7 +162,12 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building Parle")
-        .run(|_handle, event| {
+        .run(|handle, event| {
+            // Dock icon click / `open` on a running instance: bring the window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                hud::show_main(handle);
+            }
             if let tauri::RunEvent::Exit = event {
                 // whisper.cpp's ggml-metal static device destructor calls
                 // ggml_abort during atexit (upstream teardown bug), turning
@@ -188,10 +193,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     TrayIconBuilder::with_id("echokey-tray")
         // Menu-bar template glyph (alpha-only); the full-colour app icon reads
         // as a solid white square in template mode.
-        .icon(
-            tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))
-                .unwrap_or_else(|_| app.default_window_icon().unwrap().clone()),
-        )
+        .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?)
         .icon_as_template(true)
         .menu(&menu)
         .show_menu_on_left_click(true)

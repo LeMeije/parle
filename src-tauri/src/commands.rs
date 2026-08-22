@@ -116,11 +116,7 @@ pub async fn paste_item(state: State<'_, Arc<AppState>>, app: AppHandle, id: i64
     let item = state.store.lock().get(id).map_err(err)?.ok_or("not found")?;
     let s = state.settings.lock().clone();
     let target = state.previous_app.lock().clone();
-    if let Some(main) = app.get_webview_window(crate::hud::MAIN_LABEL) {
-        let _ = main.hide();
-    }
-    #[cfg(target_os = "macos")]
-    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    crate::hud::hide_main_to_tray(&app);
     tauri::async_runtime::spawn_blocking(move || {
         // Hand focus back explicitly, then wait for it to actually land.
         #[cfg(target_os = "macos")]

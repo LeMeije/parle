@@ -150,43 +150,68 @@ fn capture_previous_app(app: &AppHandle) {
 
 /// While the main window is visible the app behaves like a normal app
 /// (Dock tile, Cmd+Tab entry); hidden again = menu-bar-only.
-fn set_regular(app: &AppHandle, regular: bool) {
+/// MUST run on the main thread: AppKit wedges window ordering when the
+/// activation policy is flipped from a background thread (the app stays
+/// alive but every window becomes unshowable).
+fn set_regular_on_main(app: &AppHandle, regular: bool) {
     #[cfg(target_os = "macos")]
     {
-        let policy = if regular {
-            tauri::ActivationPolicy::Regular
-        } else {
-            tauri::ActivationPolicy::Accessory
-        };
-        let _ = app.set_activation_policy(policy);
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let policy = if regular {
+                tauri::ActivationPolicy::Regular
+            } else {
+                tauri::ActivationPolicy::Accessory
+            };
+            let _ = handle.set_activation_policy(policy);
+        });
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (app, regular);
+}
+
+/// Hide the main window and return to menu-bar-only, safely from ANY thread.
+pub fn hide_main_to_tray(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(main) = handle.get_webview_window(MAIN_LABEL) {
+            let _ = main.hide();
+        }
+        #[cfg(target_os = "macos")]
+        let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    });
 }
 
 /// The history palette is the main window pre-focused on search.
 pub fn toggle_palette(app: &AppHandle) {
     if let Some(main) = app.get_webview_window(MAIN_LABEL) {
         if main.is_visible().unwrap_or(false) && main.is_focused().unwrap_or(false) {
-            let _ = main.hide();
-            set_regular(app, false);
+            hide_main_to_tray(app);
         } else {
             capture_previous_app(app);
-            set_regular(app, true);
-            let _ = main.show();
-            let _ = main.set_focus();
-            let _ = main.emit("focus-palette", ());
+            set_regular_on_main(app, true);
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if let Some(main) = handle.get_webview_window(MAIN_LABEL) {
+                    let _ = main.show();
+                    let _ = main.set_focus();
+                    let _ = main.emit("focus-palette", ());
+                }
+            });
         }
     }
 }
 
 pub fn show_main(app: &AppHandle) {
     capture_previous_app(app);
-    set_regular(app, true);
-    if let Some(main) = app.get_webview_window(MAIN_LABEL) {
-        let _ = main.show();
-        let _ = main.set_focus();
-    }
+    set_regular_on_main(app, true);
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(main) = handle.get_webview_window(MAIN_LABEL) {
+            let _ = main.show();
+            let _ = main.set_focus();
+        }
+    });
 }
 
 use tauri::Emitter;
