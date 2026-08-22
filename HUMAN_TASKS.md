@@ -27,12 +27,14 @@ using the machine):
 5. Copy a few things in different apps -> open EchoKey -> History: entries
    appear with the source app. Copy something from 1Password: must NOT appear.
 
-## 1b. Spotlight shows two EchoKeys
-The canonical app now lives at /Applications/Parle.app (launch that one; display name is now Parle).
-The copy under the repo's target/ folder regenerates on every build; to hide
-it from Spotlight: System Settings -> Siri & Spotlight -> Spotlight Privacy ->
-add the repo's `target` folder. Refresh the /Applications copy any time with
-`scripts/install-local.sh`.
+## 1b. Duplicate Parle in Spotlight/Launchpad
+FIXED automatically: `scripts/install-local.sh` now deletes the build-output
+bundle after copying it to /Applications, so only one Parle is ever indexed.
+
+If a duplicate ever reappears (e.g. after running `npm run tauri build`
+directly instead of the script), just delete it:
+`rm -rf target/debug/bundle/macos/Parle.app target/release/bundle/macos/Parle.app`
+The canonical app is always /Applications/Parle.app — launch that one.
 
 ## 2. Stable dev signing (5 minutes, once) — needed before rebuilding often
 

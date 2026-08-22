@@ -10,4 +10,10 @@ pkill -x echokey 2>/dev/null || true
 rm -rf /Applications/Parle.app
 cp -R target/debug/bundle/macos/Parle.app /Applications/
 open /Applications/Parle.app
-echo "Installed and launched /Applications/Parle.app"
+
+# Remove the build-output bundle: otherwise Spotlight/Launchpad/Raycast index
+# TWO Parle apps and you can launch the stale one by accident. /Applications
+# is the only copy that should ever be visible.
+rm -rf target/debug/bundle/macos/Parle.app target/release/bundle/macos/Parle.app
+
+echo "Installed and launched /Applications/Parle.app (build bundle cleaned up)"
