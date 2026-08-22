@@ -408,6 +408,7 @@ pub fn inject_text(
     restore_delay_ms: u64,
     keep_on_clipboard: bool,
     restore: bool,
+    press_enter: bool,
 ) -> InjectionOutcome {
     if secure_input_active() {
         // Concealed: other clipboard managers must not capture what may be a
@@ -423,6 +424,9 @@ pub fn inject_text(
         if keep_on_clipboard {
             write_clipboard_marked(text, false);
         }
+        if press_enter {
+            synth_return();
+        }
         return InjectionOutcome { method: InjectionMethod::AxInsert, manual_paste_required: false };
     }
 
@@ -431,6 +435,11 @@ pub fn inject_text(
     write_clipboard_marked(text, false);
     let after_write = pasteboard_change_count();
     synth_cmd_v();
+    if press_enter {
+        // Let the app consume the paste before the Return arrives.
+        std::thread::sleep(std::time::Duration::from_millis(160));
+        synth_return();
+    }
 
     if keep_on_clipboard {
         // Transcript intentionally stays; drop any pending restore.
@@ -496,6 +505,20 @@ fn ax_insert_text(text: &str) -> bool {
         );
         CFRelease(focused);
         set_err == kAXErrorSuccess
+    }
+}
+
+const KVK_RETURN: CGKeyCode = 36;
+
+fn synth_return() {
+    let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        return;
+    };
+    if let Ok(down) = CGEvent::new_keyboard_event(src.clone(), KVK_RETURN, true) {
+        down.post(CGEventTapLocation::HID);
+    }
+    if let Ok(up) = CGEvent::new_keyboard_event(src, KVK_RETURN, false) {
+        up.post(CGEventTapLocation::HID);
     }
 }
 

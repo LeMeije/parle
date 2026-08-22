@@ -73,6 +73,7 @@ export interface Settings {
     restore_clipboard: boolean;
     restore_delay_ms: number;
     prefer_ax_insert: boolean;
+    press_enter: boolean;
   };
   launch_at_login: boolean;
   auto_update_check: boolean;

@@ -207,6 +207,12 @@ export default function SettingsView({
         {IS_MAC && (
           <Toggle label="Prefer direct insertion" hint="Try Accessibility text insertion before clipboard-paste" value={s.paste.prefer_ax_insert} onChange={(v) => set((d) => (d.paste.prefer_ax_insert = v))} />
         )}
+        <Toggle
+          label="Press Enter after inserting"
+          hint="Sends the message right after pasting — handy for chat apps. Never fires on secure fields."
+          value={s.paste.press_enter}
+          onChange={(v) => set((d) => (d.paste.press_enter = v))}
+        />
       </Section>
 
       <Section title="Appearance">

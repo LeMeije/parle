@@ -125,6 +125,7 @@ pub async fn paste_item(state: State<'_, Arc<AppState>>, app: AppHandle, id: i64
         s.paste.restore_delay_ms,
         s.paste.copy_to_clipboard,
         s.paste.restore_clipboard,
+        s.paste.press_enter,
     ))
 }
 

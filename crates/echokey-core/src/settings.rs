@@ -349,6 +349,8 @@ pub struct PasteSettings {
     pub restore_delay_ms: u64,
     /// macOS: try Accessibility text insertion before clipboard+Cmd-V.
     pub prefer_ax_insert: bool,
+    /// Press Enter after inserting (send-the-message mode). Off by default.
+    pub press_enter: bool,
 }
 
 impl Default for PasteSettings {
@@ -359,6 +361,7 @@ impl Default for PasteSettings {
             restore_clipboard: true,
             restore_delay_ms: 700,
             prefer_ax_insert: true,
+            press_enter: false,
         }
     }
 }

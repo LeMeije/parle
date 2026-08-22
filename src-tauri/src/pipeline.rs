@@ -410,6 +410,7 @@ impl Pipeline {
                 settings.paste.restore_delay_ms,
                 settings.paste.copy_to_clipboard,
                 settings.paste.restore_clipboard,
+                settings.paste.press_enter,
             ))
         } else if settings.paste.copy_to_clipboard {
             platform::imp::write_clipboard(&text);
@@ -593,6 +594,7 @@ impl Pipeline {
                 settings.paste.restore_delay_ms,
                 settings.paste.copy_to_clipboard,
                 settings.paste.restore_clipboard,
+                settings.paste.press_enter,
             ))
         } else if settings.paste.copy_to_clipboard {
             platform::imp::write_clipboard(&text);

@@ -311,11 +311,20 @@ pub fn inject_text(
     restore_delay_ms: u64,
     keep_on_clipboard: bool,
     restore: bool,
+    press_enter: bool,
 ) -> InjectionOutcome {
     let previous = read_clipboard();
     write_clipboard(text);
     let seq_after_write = unsafe { GetClipboardSequenceNumber() };
     synth_ctrl_v();
+    if press_enter {
+        std::thread::sleep(std::time::Duration::from_millis(160));
+        unsafe {
+            const VK_RETURN: u16 = 0x0D;
+            let inputs = [key_input(VK_RETURN, false), key_input(VK_RETURN, true)];
+            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        }
+    }
 
     if !keep_on_clipboard && restore {
         if let Some(prev) = previous {
