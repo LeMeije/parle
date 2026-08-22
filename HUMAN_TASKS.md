@@ -27,6 +27,13 @@ using the machine):
 5. Copy a few things in different apps -> open EchoKey -> History: entries
    appear with the source app. Copy something from 1Password: must NOT appear.
 
+## 1b. Spotlight shows two EchoKeys
+The canonical app now lives at /Applications/EchoKey.app (launch that one).
+The copy under the repo's target/ folder regenerates on every build; to hide
+it from Spotlight: System Settings -> Siri & Spotlight -> Spotlight Privacy ->
+add the repo's `target` folder. Refresh the /Applications copy any time with
+`scripts/install-local.sh`.
+
 ## 2. Stable dev signing (5 minutes, once) — needed before rebuilding often
 
 TCC ties permission grants to the code signature; unsigned rebuilds lose the
