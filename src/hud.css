@@ -5,13 +5,18 @@ body[data-window='hud'] {
   overflow: hidden;
 }
 
+body[data-window='hud'] #root {
+  height: 100vh;
+  display: grid;
+  place-items: center;
+}
+
 .hud {
   display: flex;
   align-items: center;
   gap: 10px;
   width: 320px;
   height: 64px;
-  margin: 4px;
   padding: 0 14px;
   border-radius: 32px;
   background: color-mix(in srgb, var(--bg-raised) 92%, transparent);

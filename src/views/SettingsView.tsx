@@ -74,20 +74,27 @@ export default function SettingsView({
             )}
           </select>
         </Field>
-        <Field label="Gesture" hint="Hybrid: hold to talk; a quick tap latches until the next tap">
+        <Field
+          label="Gesture"
+          hint={
+            s.hotkeys.dictation.mode === 'double_tap'
+              ? 'Double-tap starts, single tap stops. The key is never intercepted, so its normal system behaviour keeps working.'
+              : 'Hybrid: hold to talk; a quick tap latches until the next tap'
+          }
+        >
           <div className="seg">
-            {(['hold', 'toggle', 'hybrid'] as const).map((m) => (
+            {(['hold', 'toggle', 'hybrid', 'double_tap'] as const).map((m) => (
               <button
                 key={m}
                 className={s.hotkeys.dictation.mode === m ? 'active' : ''}
                 onClick={() => set((d) => (d.hotkeys.dictation.mode = m))}
               >
-                {m === 'hold' ? 'Hold' : m === 'toggle' ? 'Toggle' : 'Hybrid'}
+                {m === 'hold' ? 'Hold' : m === 'toggle' ? 'Toggle' : m === 'hybrid' ? 'Hybrid' : 'Double tap'}
               </button>
             ))}
           </div>
         </Field>
-        <Field label="Latch window" hint="Taps shorter than this latch Hybrid into toggle">
+        <Field label="Latch window" hint="Hybrid: taps shorter than this latch into toggle. Double tap: max gap between taps">
           <NumberInput value={s.hotkeys.latch_ms} min={150} max={900} step={50} suffix="ms" onChange={(v) => set((d) => (d.hotkeys.latch_ms = v))} />
         </Field>
         <Field label="History palette" hint="Chord shortcut for search">

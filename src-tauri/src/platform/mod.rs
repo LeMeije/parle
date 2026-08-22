@@ -75,11 +75,19 @@ impl NativeKey {
     }
 }
 
+/// One watched key + whether its events are swallowed. DoubleTap bindings
+/// never swallow: single taps must keep their normal system behaviour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchedKey {
+    pub key: NativeKey,
+    pub swallow: bool,
+}
+
 /// Bindings the native listener should watch: (key, which action it maps to).
 #[derive(Debug, Clone, Default)]
 pub struct NativeBindings {
-    pub dictation: Option<NativeKey>,
-    pub dictation_alt: Option<NativeKey>,
+    pub dictation: Option<WatchedKey>,
+    pub dictation_alt: Option<WatchedKey>,
     /// Cancel key (consumed only while recording).
     pub cancel: Option<NativeKey>,
 }

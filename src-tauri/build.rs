@@ -14,6 +14,9 @@ fn main() {
             println!("cargo:rustc-link-search=native={dir}/lib/darwin");
             println!("cargo:rustc-link-lib=static=clang_rt.osx");
         }
+        // AVCaptureDevice (mic permission status + request) needs the framework
+        // actually loaded; nothing else pulls it in.
+        println!("cargo:rustc-link-lib=framework=AVFoundation");
     }
     tauri_build::build()
 }

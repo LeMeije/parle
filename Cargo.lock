@@ -1120,6 +1120,7 @@ version = "0.1.0"
 dependencies = [
  "accessibility-sys",
  "arboard",
+ "block2",
  "core-foundation",
  "core-graphics 0.24.0",
  "crossbeam-channel",

@@ -80,7 +80,7 @@ export interface Settings {
 
 export interface HotkeyBinding {
   key: string;
-  mode: 'hold' | 'toggle' | 'hybrid';
+  mode: 'hold' | 'toggle' | 'hybrid' | 'double_tap';
   enabled: boolean;
 }
 

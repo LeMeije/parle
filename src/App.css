@@ -33,15 +33,13 @@
   letter-spacing: -0.01em;
 }
 
-.brand-mark {
-  width: 28px;
-  height: 28px;
+.brand-mark-img {
+  width: 30px;
+  height: 30px;
   border-radius: 8px;
-  background: var(--accent);
-  color: var(--accent-text, #fff);
-  display: grid;
-  place-items: center;
   box-shadow: var(--shadow-1);
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .sidebar nav {

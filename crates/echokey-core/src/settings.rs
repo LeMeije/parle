@@ -142,6 +142,10 @@ pub enum HotkeyMode {
     Toggle,
     /// Hold to record; a tap shorter than `latch_ms` latches into toggle.
     Hybrid,
+    /// Double-tap to start, single tap to stop. The key is NEVER swallowed in
+    /// this mode, so its normal system behaviour keeps working — the
+    /// no-conflict option.
+    DoubleTap,
 }
 
 /// One binding. `key` uses our canonical key names; special keys the plugins

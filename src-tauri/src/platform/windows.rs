@@ -162,11 +162,11 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
         let bindings = HOOK_BINDINGS.lock();
         let bound = binding_for(&bindings, &NativeKey::CopilotKey);
         drop(bindings);
-        if let Some(id) = bound {
+        if let Some((id, swallow)) = bound {
             if is_down && !COPILOT_ACTIVE.load(Ordering::SeqCst) {
                 COPILOT_ACTIVE.store(true, Ordering::SeqCst);
                 send_event(id, KeyPhase::Down);
-                if is_copilot_f23 {
+                if is_copilot_f23 && swallow {
                     // Mark Win as "used as modifier" so releasing it doesn't
                     // open the Start menu after we swallow F23.
                     inject_dummy_key();
@@ -175,8 +175,11 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 COPILOT_ACTIVE.store(false, Ordering::SeqCst);
                 send_event(id, KeyPhase::Up);
             }
-            // Swallow BOTH down and up (never split a swallow).
-            return LRESULT(1);
+            if swallow {
+                // Swallow BOTH down and up (never split a swallow).
+                return LRESULT(1);
+            }
+            return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
         }
         if SUPPRESS_COPILOT.load(Ordering::SeqCst) && is_copilot_f23 {
             // Not bound but suppression requested: still swallow the launch.
@@ -194,13 +197,16 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
         let bound = binding_for(&bindings, &key);
         let cancel_bound = bindings.cancel.as_ref() == Some(&key);
         drop(bindings);
-        if let Some(id) = bound {
+        if let Some((id, swallow)) = bound {
             // Auto-repeat suppression for held modifiers: Windows repeats
             // key-down; forward only transitions.
             send_event(id, phase);
-            // Swallow the bare-modifier binding completely so it stops acting
-            // as a modifier while bound (both down and up — never split).
-            return LRESULT(1);
+            if swallow {
+                // Swallow the bare-modifier binding completely so it stops acting
+                // as a modifier while bound (both down and up — never split).
+                return LRESULT(1);
+            }
+            return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
         }
         if cancel_bound && RECORDING.load(Ordering::SeqCst) {
             if is_down {
@@ -226,11 +232,11 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
     CallNextHookEx(HHOOK::default(), code, wparam, lparam)
 }
 
-fn binding_for(b: &NativeBindings, key: &NativeKey) -> Option<HotkeyId> {
-    if b.dictation.as_ref() == Some(key) {
-        Some(HotkeyId::Dictation)
-    } else if b.dictation_alt.as_ref() == Some(key) {
-        Some(HotkeyId::DictationAlt)
+fn binding_for(b: &NativeBindings, key: &NativeKey) -> Option<(HotkeyId, bool)> {
+    if let Some(w) = b.dictation.as_ref().filter(|w| &w.key == key) {
+        Some((HotkeyId::Dictation, w.swallow))
+    } else if let Some(w) = b.dictation_alt.as_ref().filter(|w| &w.key == key) {
+        Some((HotkeyId::DictationAlt, w.swallow))
     } else {
         None
     }

@@ -92,6 +92,24 @@ fn microphone_status() -> String {
     }
 }
 
+/// Fire the system microphone prompt (no-op once the status is determined).
+/// The onboarding UI polls permission_status, so no completion plumbing needed.
+pub fn request_microphone_access() {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, Bool};
+    unsafe {
+        let Some(cls) = AnyClass::get(c"AVCaptureDevice") else {
+            tracing::error!("AVCaptureDevice class missing — AVFoundation not linked");
+            return;
+        };
+        let media = objc2_foundation::NSString::from_str("soun");
+        let handler = block2::RcBlock::new(move |granted: Bool| {
+            tracing::info!("microphone permission response: granted={}", granted.as_bool());
+        });
+        let _: () = msg_send![cls, requestAccessForMediaType: &*media, completionHandler: &*handler];
+    }
+}
+
 extern "C" {
     fn IsSecureEventInputEnabled() -> bool;
 }
@@ -305,15 +323,21 @@ fn dispatch_key(
     tx: &Sender<PlatformEvent>,
 ) -> bool {
     let mut swallow = false;
-    if bindings.dictation.as_ref() == Some(key) {
-        BOUND_MOD_HELD.store(phase == KeyPhase::Down, Ordering::SeqCst);
+    if let Some(w) = bindings.dictation.as_ref().filter(|w| &w.key == key) {
+        // Hold/hybrid gestures need the other-key abort; DoubleTap taps are
+        // too brief to matter and must not suppress normal chording.
+        if w.swallow {
+            BOUND_MOD_HELD.store(phase == KeyPhase::Down, Ordering::SeqCst);
+        }
         let _ = tx.send(PlatformEvent::Hotkey { id: HotkeyId::Dictation, phase });
-        swallow = true;
+        swallow |= w.swallow;
     }
-    if bindings.dictation_alt.as_ref() == Some(key) {
-        BOUND_MOD_HELD.store(phase == KeyPhase::Down, Ordering::SeqCst);
+    if let Some(w) = bindings.dictation_alt.as_ref().filter(|w| &w.key == key) {
+        if w.swallow {
+            BOUND_MOD_HELD.store(phase == KeyPhase::Down, Ordering::SeqCst);
+        }
         let _ = tx.send(PlatformEvent::Hotkey { id: HotkeyId::DictationAlt, phase });
-        swallow = true;
+        swallow |= w.swallow;
     }
     if bindings.cancel.as_ref() == Some(key) && is_recording {
         let _ = tx.send(PlatformEvent::Hotkey { id: HotkeyId::Cancel, phase });

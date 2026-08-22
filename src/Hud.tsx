@@ -44,7 +44,16 @@ export default function Hud() {
       envelopeRef.current = u.envelope;
       setElapsed(u.elapsed_ms);
       const bars = barsRef.current;
-      bars.push(Math.min(1, u.envelope * 5.5 + u.peak * 0.4));
+      // Perceptual mapping: speech RMS spans a narrow linear range, so a raw
+      // mapping looks flat. dB scale (-44dB floor .. -12dB ceiling) with a
+      // contrast power makes speech visibly dramatic against pauses.
+      const db = 20 * Math.log10(Math.max(u.rms, 1e-6));
+      let v = (db + 44) / 32;
+      v = Math.pow(Math.max(0, Math.min(1, v)), 1.7);
+      // A touch of peak keeps plosives snappy.
+      const peakDb = 20 * Math.log10(Math.max(u.peak, 1e-6));
+      const p = Math.max(0, Math.min(1, (peakDb + 40) / 34));
+      bars.push(Math.min(1, v * 0.85 + p * 0.25));
       if (bars.length > BAR_COUNT) bars.shift();
       force((n) => n + 1);
     });
@@ -141,7 +150,7 @@ function Cassette({ recording, envelope, time }: { recording: boolean; envelope:
       </div>
       <div className="cassette-mid">
         <div className="vu">
-          <div className="vu-fill" style={{ width: `${Math.min(100, envelope * 450)}%` }} />
+          <div className="vu-fill" style={{ width: `${Math.min(100, Math.pow(Math.max(0, (20 * Math.log10(Math.max(envelope, 1e-6)) + 44) / 32), 1.5) * 100)}%` }} />
         </div>
         <div className="cassette-label">
           {recording ? 'REC' : 'PROC'} <span className="cassette-time">{time}</span>

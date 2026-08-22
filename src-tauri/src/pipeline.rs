@@ -160,6 +160,42 @@ impl Pipeline {
             .expect("spawn partial loop");
     }
 
+    /// One ASR pass per speech chunk, timestamps re-based, languages collected
+    /// in speaking order ("fr+en"). The engine lock is taken per chunk so a
+    /// cancel/settings change can interleave.
+    fn transcribe_chunked(
+        &self,
+        samples: &[f32],
+        chunks: &[std::ops::Range<usize>],
+        opts: &TranscribeOptions,
+    ) -> Result<(echokey_asr::AsrOutput, String), echokey_asr::AsrError> {
+        let mut segments = Vec::new();
+        let mut langs: Vec<String> = Vec::new();
+        let mut transcribe_ms = 0u64;
+        let mut model_id = String::new();
+        for r in chunks {
+            let offset_ms = (r.start as u64 * 1000) / echokey_audio::ASR_SAMPLE_RATE as u64;
+            let (out, mid) = self.engine.lock().transcribe(&samples[r.clone()], opts, None)?;
+            model_id = mid;
+            transcribe_ms += out.transcribe_ms;
+            if let Some(l) = out.detected_language {
+                if langs.last() != Some(&l) {
+                    langs.push(l);
+                }
+            }
+            for mut seg in out.segments {
+                seg.start_ms += offset_ms;
+                seg.end_ms += offset_ms;
+                segments.push(seg);
+            }
+        }
+        let detected_language = if langs.is_empty() { None } else { Some(langs.join("+")) };
+        Ok((
+            echokey_asr::AsrOutput { segments, detected_language, transcribe_ms },
+            model_id,
+        ))
+    }
+
     pub fn cancel(&self) {
         if let Some(rec) = self.recorder.lock().take() {
             rec.cancel();
@@ -220,7 +256,25 @@ impl Pipeline {
             sink(PipelineEvent::Partial { text: t.to_string() });
         });
 
-        let result = self.engine.lock().transcribe(&recording.samples, &opts, Some(on_partial));
+        // Code-switching: whisper detects ONE language per pass, so with
+        // language=auto we split at natural pauses and let every stretch
+        // detect its own language ("parle français", pause, "then English").
+        let chunks = if settings.language.language == "auto" {
+            echokey_asr::split_on_speech(&recording.samples, echokey_audio::ASR_SAMPLE_RATE)
+        } else {
+            vec![0..recording.samples.len()]
+        };
+
+        let result = if chunks.len() >= 2 {
+            self.transcribe_chunked(&recording.samples, &chunks, &opts)
+                // Any per-chunk failure falls back to one whole-buffer pass.
+                .or_else(|e| {
+                    tracing::warn!("chunked transcription failed ({e}); falling back to single pass");
+                    self.engine.lock().transcribe(&recording.samples, &opts, None)
+                })
+        } else {
+            self.engine.lock().transcribe(&recording.samples, &opts, Some(on_partial))
+        };
         let (asr, model_id) = match result {
             Ok(v) => v,
             Err(e) => {

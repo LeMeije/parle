@@ -62,6 +62,7 @@ pub fn run() {
             commands::stop_recording,
             commands::cancel_recording,
             commands::permission_status,
+            commands::request_microphone,
             commands::open_permission_settings,
             commands::list_audio_devices,
             commands::recommended_setup,

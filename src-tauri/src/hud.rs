@@ -28,8 +28,10 @@ fn now_ms() -> u64 {
 pub const HUD_LABEL: &str = "hud";
 pub const MAIN_LABEL: &str = "main";
 
-pub const HUD_WIDTH: f64 = 320.0;
-pub const HUD_HEIGHT: f64 = 72.0;
+// Window is deliberately larger than the pill: the transparent margin gives
+// the drop shadow room to render instead of clipping at the window edge.
+pub const HUD_WIDTH: f64 = 424.0;
+pub const HUD_HEIGHT: f64 = 152.0;
 
 #[cfg(target_os = "macos")]
 mod panel {
@@ -77,7 +79,7 @@ pub fn create_hud(app: &AppHandle) -> tauri::Result<()> {
         _ => (1440.0, 900.0, 1.0),
     };
     let x = (screen_w / scale - HUD_WIDTH) / 2.0;
-    let y = screen_h / scale - HUD_HEIGHT - 96.0;
+    let y = screen_h / scale - HUD_HEIGHT - 56.0;
 
     let window = WebviewWindowBuilder::new(app, HUD_LABEL, WebviewUrl::App("index.html#/hud".into()))
         .title("EchoKey HUD")

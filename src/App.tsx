@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { BookA, Cpu, History as HistoryIcon, Mic, Settings as SettingsIcon } from 'lucide-react';
+import { BookA, Cpu, History as HistoryIcon, Settings as SettingsIcon } from 'lucide-react';
+import appIcon from './assets/icon.png';
 import { api, onPipelineEvent } from './api';
 import type { PipelineEvent, Settings } from './types';
 import { onFocusPalette } from './api';
@@ -78,9 +79,7 @@ export default function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">
-            <Mic size={17} strokeWidth={2.4} />
-          </div>
+          <img className="brand-mark-img" src={appIcon} alt="" draggable={false} />
           <span>EchoKey</span>
         </div>
         <nav>

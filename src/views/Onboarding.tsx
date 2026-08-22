@@ -58,8 +58,11 @@ function Permissions({ onNext }: { onNext: () => void }) {
   }, []);
 
   const micOk = perms?.microphone === 'granted';
+  const micUnknown = perms?.microphone === 'unknown';
   const axOk = perms?.accessibility ?? false;
-  const allOk = IS_MAC ? micOk && axOk : true;
+  // "unknown" = the status API is unavailable on this build; don't dead-end
+  // the user — recording itself will surface a real failure if any.
+  const allOk = IS_MAC ? (micOk || micUnknown) && axOk : true;
 
   return (
     <>
@@ -73,10 +76,7 @@ function Permissions({ onNext }: { onNext: () => void }) {
           ok={micOk}
           title="Microphone"
           desc="To hear your dictation"
-          action={() => {
-            // Trigger the system prompt by opening a capture stream briefly.
-            api.startRecording().then(() => setTimeout(() => api.cancelRecording(), 400));
-          }}
+          action={() => api.requestMicrophone()}
           settingsAction={() => api.openPermissionSettings('microphone')}
         />
         {IS_MAC && (

@@ -24,6 +24,8 @@ enum GestureState {
     HoldRecording { down_at_ms: u64 },
     /// Latched into toggle (short tap in Hybrid, or Toggle mode).
     ToggleRecording,
+    /// DoubleTap mode: one tap seen, waiting for the second.
+    PendingTap { down_at_ms: u64 },
 }
 
 pub struct GestureMachine {
@@ -101,12 +103,43 @@ impl GestureMachine {
                 StopRecording
             }
 
+            // -- DoubleTap: two quick taps start, one tap stops. Key passes
+            // through to the OS in this mode (never swallowed).
+            (HotkeyMode::DoubleTap, Idle, KeyPhase::Down) => {
+                self.state = PendingTap { down_at_ms: now_ms };
+                Nothing
+            }
+            (HotkeyMode::DoubleTap, PendingTap { down_at_ms }, KeyPhase::Down) => {
+                if now_ms.saturating_sub(down_at_ms) <= self.latch_ms {
+                    self.state = ToggleRecording;
+                    StartRecording
+                } else {
+                    // Too slow: treat as a fresh first tap.
+                    self.state = PendingTap { down_at_ms: now_ms };
+                    Nothing
+                }
+            }
+            (HotkeyMode::DoubleTap, ToggleRecording, KeyPhase::Down) => {
+                self.state = Idle;
+                StopRecording
+            }
+            (HotkeyMode::DoubleTap, PendingTap { .. }, KeyPhase::Up) => Nothing,
+
             // Repeats and stray events.
+            (HotkeyMode::DoubleTap, HoldRecording { .. }, _) => {
+                // Unreachable (DoubleTap never enters hold), but total.
+                self.state = Idle;
+                Nothing
+            }
             (_, HoldRecording { .. }, KeyPhase::Down) => Nothing, // key auto-repeat
             (_, Idle, KeyPhase::Up) => Nothing,
             (HotkeyMode::Hybrid, ToggleRecording, KeyPhase::Up) => Nothing,
             // Unreachable in practice (mode changes reset state), but total.
             (_, ToggleRecording, _) => Nothing,
+            (_, PendingTap { .. }, _) => {
+                self.state = Idle;
+                Nothing
+            }
         }
     }
 }
@@ -150,6 +183,34 @@ mod tests {
         assert!(m.is_active());
         assert_eq!(m.on_key(Down, 5000), StopRecording);
         assert_eq!(m.on_key(Up, 5100), Nothing);
+    }
+
+    #[test]
+    fn double_tap_starts_single_tap_stops() {
+        let mut m = GestureMachine::new(HotkeyMode::DoubleTap, 400);
+        // First tap: nothing (passes through to the OS).
+        assert_eq!(m.on_key(Down, 0), Nothing);
+        assert_eq!(m.on_key(Up, 60), Nothing);
+        // Second tap within the window: start.
+        assert_eq!(m.on_key(Down, 250), StartRecording);
+        assert_eq!(m.on_key(Up, 310), Nothing);
+        assert!(m.is_active());
+        // Single tap while recording: stop.
+        assert_eq!(m.on_key(Down, 4000), StopRecording);
+        assert_eq!(m.on_key(Up, 4060), Nothing);
+        assert!(!m.is_active());
+    }
+
+    #[test]
+    fn double_tap_too_slow_restarts_window() {
+        let mut m = GestureMachine::new(HotkeyMode::DoubleTap, 400);
+        assert_eq!(m.on_key(Down, 0), Nothing);
+        assert_eq!(m.on_key(Up, 60), Nothing);
+        // 900 ms later: too slow, counts as a new first tap.
+        assert_eq!(m.on_key(Down, 900), Nothing);
+        assert_eq!(m.on_key(Up, 960), Nothing);
+        // Quick second tap now starts.
+        assert_eq!(m.on_key(Down, 1150), StartRecording);
     }
 
     #[test]

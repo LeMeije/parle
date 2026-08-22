@@ -42,6 +42,7 @@ export const api = {
   cancelRecording: () => invoke<void>('cancel_recording'),
 
   permissionStatus: () => invoke<PermissionStatus>('permission_status'),
+  requestMicrophone: () => invoke<void>('request_microphone'),
   openPermissionSettings: (which: string) => invoke<void>('open_permission_settings', { which }),
   listAudioDevices: () => invoke<string[]>('list_audio_devices'),
   recommendedSetup: () =>

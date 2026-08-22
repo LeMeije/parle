@@ -334,6 +334,14 @@ pub fn permission_status() -> platform::PermissionStatus {
     platform::imp::permission_status()
 }
 
+/// Trigger the OS microphone permission prompt (macOS; no-op elsewhere —
+/// Windows 11 gates mic per-app in Settings without a runtime prompt API here).
+#[tauri::command]
+pub fn request_microphone() {
+    #[cfg(target_os = "macos")]
+    platform::imp::request_microphone_access();
+}
+
 #[tauri::command]
 pub fn open_permission_settings(which: String) {
     #[cfg(target_os = "macos")]

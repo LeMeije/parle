@@ -212,11 +212,17 @@ impl AppState {
     }
 
     /// Build native bindings from settings (only keys the native layer owns).
+    /// DoubleTap bindings are watch-only: the key keeps its normal system
+    /// behaviour (that's the whole point of the mode).
     pub fn native_bindings(&self) -> NativeBindings {
+        use echokey_core::settings::HotkeyMode;
         let s = self.settings.lock();
         let parse = |b: &echokey_core::settings::HotkeyBinding| {
             if b.enabled {
-                NativeKey::parse(&b.key)
+                NativeKey::parse(&b.key).map(|key| platform::WatchedKey {
+                    key,
+                    swallow: b.mode != HotkeyMode::DoubleTap,
+                })
             } else {
                 None
             }
@@ -224,7 +230,11 @@ impl AppState {
         NativeBindings {
             dictation: parse(&s.hotkeys.dictation),
             dictation_alt: parse(&s.hotkeys.dictation_alt),
-            cancel: parse(&s.hotkeys.cancel),
+            cancel: if s.hotkeys.cancel.enabled {
+                NativeKey::parse(&s.hotkeys.cancel.key)
+            } else {
+                None
+            },
         }
     }
 
