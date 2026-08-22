@@ -1,7 +1,7 @@
 // Model manager: browse, download (with progress), delete, switch.
 
 import { useCallback, useEffect, useState } from 'react';
-import { Check, Download, Gauge, Globe2, Target, Trash2, X } from 'lucide-react';
+import { Check, Cpu, Download, Gauge, Globe2, Target, Trash2, X } from 'lucide-react';
 import { api, onDownloadComplete, onDownloadError, onDownloadProgress } from '../api';
 import type { DownloadProgress, ModelRow } from '../types';
 
@@ -69,7 +69,12 @@ export default function ModelsView() {
                   {m.active && <span className="pill accent">Active</span>}
                 </div>
                 <div className="model-meta">
-                  <span className="pill">{m.backend}</span>
+                  <span
+                    className={`backend-pill ${m.backend.includes('CUDA') ? 'cuda' : m.backend.includes('Metal') ? 'metal' : 'cpu'}`}
+                    title="The hardware this model runs on"
+                  >
+                    <Cpu size={12} strokeWidth={2.2} /> {m.backend}
+                  </span>
                   <span>{formatBytes(m.size_bytes)}</span>
                   <Rating icon={<Gauge size={13} />} label="speed" value={m.speed} />
                   <Rating icon={<Target size={13} />} label="accuracy" value={m.accuracy} />

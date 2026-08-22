@@ -851,3 +851,37 @@ textarea:focus {
 [data-palette='bold'][data-mode='dark'] .seg button.active {
   box-shadow: 2px 2px 0 rgba(245, 245, 245, 0.7);
 }
+
+
+/* ---------- Backend pill: hardware at a glance ---------- */
+
+.backend-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+.backend-pill.metal {
+  color: #4756d6;
+  background: color-mix(in srgb, #5a6cff 13%, transparent);
+  border-color: color-mix(in srgb, #5a6cff 36%, transparent);
+}
+[data-mode='dark'] .backend-pill.metal { color: #9daaff; }
+
+.backend-pill.cuda {
+  color: #3d8b2f;
+  background: color-mix(in srgb, #76b900 15%, transparent);
+  border-color: color-mix(in srgb, #76b900 40%, transparent);
+}
+[data-mode='dark'] .backend-pill.cuda { color: #a4d96c; }
+
+.backend-pill.cpu {
+  color: #8a6420;
+  background: color-mix(in srgb, #c8922a 14%, transparent);
+  border-color: color-mix(in srgb, #c8922a 38%, transparent);
+}
+[data-mode='dark'] .backend-pill.cpu { color: #e2b56c; }
