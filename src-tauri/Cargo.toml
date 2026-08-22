@@ -32,6 +32,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = { workspace = true }
 crossbeam-channel = { workspace = true }
 arboard = "3"
+libc = "0.2"
 echokey-core = { path = "../crates/echokey-core" }
 echokey-audio = { path = "../crates/echokey-audio" }
 

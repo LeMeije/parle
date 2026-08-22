@@ -172,6 +172,7 @@ export default function HistoryView() {
                   </button>
                 </div>
               </div>
+            </div>
           </div>
         ))}
       </div>

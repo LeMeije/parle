@@ -150,8 +150,18 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Parle");
+        .build(tauri::generate_context!())
+        .expect("error while building Parle")
+        .run(|_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                // whisper.cpp's ggml-metal static device destructor calls
+                // ggml_abort during atexit (upstream teardown bug), turning
+                // every normal quit into a "quit unexpectedly" dialog. All our
+                // state is already durable (settings write atomically, SQLite
+                // is WAL); skip C/C++ atexit handlers entirely.
+                unsafe { libc::_exit(0) };
+            }
+        });
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {

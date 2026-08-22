@@ -621,3 +621,9 @@ pub fn secure_input_active() -> bool {
 
 pub fn open_accessibility_settings() {}
 pub fn open_microphone_settings() {}
+
+/// Windows: hiding our window returns focus automatically; explicit
+/// activation of another process is restricted (SetForegroundWindow rules).
+pub fn activate_app(_bundle_id: &str) -> bool {
+    false
+}

@@ -27,6 +27,9 @@ pub struct AppState {
     /// Channel into the dispatcher, kept so listeners can be armed later
     /// (the native listener only starts after onboarding completes).
     pub platform_tx: Mutex<Option<crossbeam_channel::Sender<PlatformEvent>>>,
+    /// The app that was frontmost before OUR window took focus — the paste
+    /// target for "paste into previous app".
+    pub previous_app: Mutex<Option<String>>,
     #[cfg(target_os = "macos")]
     pub hotkeys: Mutex<Option<platform::macos::HotkeyListener>>,
     #[cfg(target_os = "macos")]
@@ -138,6 +141,7 @@ impl AppState {
             recording_flag: Arc::new(AtomicBool::new(false)),
             work_tx,
             platform_tx: Mutex::new(None),
+            previous_app: Mutex::new(None),
             hotkeys: Mutex::new(None),
             clipboard_monitor: Mutex::new(None),
         })

@@ -108,35 +108,47 @@ pub fn copy_item(state: State<'_, Arc<AppState>>, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Paste a history item into the PREVIOUS app: hide our window first so focus
-/// returns to it, then inject.
+/// Paste a history item into the PREVIOUS app: hide our window, explicitly
+/// re-activate the app that was frontmost before us, wait until it actually
+/// holds focus, then inject. Runs entirely off the main thread.
 #[tauri::command]
 pub async fn paste_item(state: State<'_, Arc<AppState>>, app: AppHandle, id: i64) -> Result<platform::InjectionOutcome> {
     let item = state.store.lock().get(id).map_err(err)?.ok_or("not found")?;
     let s = state.settings.lock().clone();
+    let target = state.previous_app.lock().clone();
     if let Some(main) = app.get_webview_window(crate::hud::MAIN_LABEL) {
         let _ = main.hide();
     }
-    // Give the OS a beat to hand focus back to the previous app.
-    tokio_sleep(220).await;
-    Ok(platform::imp::inject_text(
-        &item.text,
-        s.paste.prefer_ax_insert,
-        s.paste.restore_delay_ms,
-        s.paste.copy_to_clipboard,
-        s.paste.restore_clipboard,
-        s.paste.press_enter,
-    ))
-}
-
-async fn tokio_sleep(ms: u64) {
-    let (tx, rx) = tauri::async_runtime::channel::<()>(1);
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(ms));
-        let _ = tx.blocking_send(());
-    });
-    let mut rx = rx;
-    let _ = rx.recv().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        // Hand focus back explicitly, then wait for it to actually land.
+        #[cfg(target_os = "macos")]
+        if let Some(ref bundle) = target {
+            platform::imp::activate_app(bundle);
+        }
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let (front, _) = platform::imp::frontmost_app();
+            match front.as_deref() {
+                Some("com.novaire.echokey") | None => continue,
+                Some(f) => {
+                    if target.as_deref().map(|t| t == f).unwrap_or(true) {
+                        break; // the right app (or at least not us) is frontmost
+                    }
+                    break;
+                }
+            }
+        }
+        platform::imp::inject_text(
+            &item.text,
+            s.paste.prefer_ax_insert,
+            s.paste.restore_delay_ms,
+            s.paste.copy_to_clipboard,
+            s.paste.restore_clipboard,
+            s.paste.press_enter,
+        )
+    })
+    .await
+    .map_err(err)
 }
 
 /// Single-word diffs between old and new become correction pairs.

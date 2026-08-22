@@ -584,6 +584,21 @@ pub fn pasteboard_change_count() -> i64 {
     unsafe { NSPasteboard::generalPasteboard().changeCount() as i64 }
 }
 
+/// Bring another app to the front by bundle id (paste-back target).
+pub fn activate_app(bundle_id: &str) -> bool {
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
+    use objc2_foundation::NSString;
+    unsafe {
+        let id = NSString::from_str(bundle_id);
+        let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&id);
+        if let Some(app) = apps.iter().next() {
+            return app.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
+        }
+        let _ = NSWorkspace::sharedWorkspace();
+        false
+    }
+}
+
 /// (bundle_id, app_name) of the frontmost application.
 pub fn frontmost_app() -> (Option<String>, Option<String>) {
     use objc2_app_kit::NSWorkspace;

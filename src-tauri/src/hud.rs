@@ -136,12 +136,25 @@ pub fn sync_hud(app: &AppHandle, state: PipelineState) {
     }
 }
 
+/// Remember whichever app is frontmost right now (unless it's us) as the
+/// paste-back target.
+fn capture_previous_app(app: &AppHandle) {
+    let state = app.state::<std::sync::Arc<crate::state::AppState>>();
+    let (bundle_id, _) = crate::platform::imp::frontmost_app();
+    if let Some(id) = bundle_id {
+        if id != "com.novaire.echokey" {
+            *state.previous_app.lock() = Some(id);
+        }
+    }
+}
+
 /// The history palette is the main window pre-focused on search.
 pub fn toggle_palette(app: &AppHandle) {
     if let Some(main) = app.get_webview_window(MAIN_LABEL) {
         if main.is_visible().unwrap_or(false) && main.is_focused().unwrap_or(false) {
             let _ = main.hide();
         } else {
+            capture_previous_app(app);
             let _ = main.show();
             let _ = main.set_focus();
             let _ = main.emit("focus-palette", ());
@@ -150,6 +163,7 @@ pub fn toggle_palette(app: &AppHandle) {
 }
 
 pub fn show_main(app: &AppHandle) {
+    capture_previous_app(app);
     if let Some(main) = app.get_webview_window(MAIN_LABEL) {
         let _ = main.show();
         let _ = main.set_focus();
