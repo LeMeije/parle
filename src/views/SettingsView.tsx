@@ -4,6 +4,19 @@ import { useEffect, useState } from 'react';
 import { enable as enableAutostart, disable as disableAutostart } from '@tauri-apps/plugin-autostart';
 import { api } from '../api';
 import type { Settings } from '../types';
+import iconDefault from '../assets/icons/default.png';
+import iconKeycap from '../assets/icons/keycap.png';
+import iconWaveform from '../assets/icons/waveform.png';
+import iconEchoRings from '../assets/icons/echo-rings.png';
+import iconCassette from '../assets/icons/cassette.png';
+
+const APP_ICONS: [string, string, string][] = [
+  ['default', iconDefault, 'EchoKey'],
+  ['keycap', iconKeycap, 'Keycap'],
+  ['waveform', iconWaveform, 'Waveform'],
+  ['echo-rings', iconEchoRings, 'Echo rings'],
+  ['cassette', iconCassette, 'Cassette'],
+];
 
 const LANGUAGES: [string, string][] = [
   ['auto', 'Auto-detect'],
@@ -42,9 +55,15 @@ export default function SettingsView({
   const [devices, setDevices] = useState<string[]>([]);
   const [perms, setPerms] = useState<{ accessibility: boolean; microphone: string } | null>(null);
 
+  const [needsRestart, setNeedsRestart] = useState(false);
+
   useEffect(() => {
     api.listAudioDevices().then(setDevices);
-    api.permissionStatus().then(setPerms);
+    // Poll: permissions can change in System Settings while this page is open.
+    const poll = () => api.permissionStatus().then(setPerms);
+    poll();
+    const t = window.setInterval(poll, 2000);
+    return () => window.clearInterval(t);
   }, []);
 
   const s = settings;
@@ -115,6 +134,7 @@ export default function SettingsView({
         {perms && !perms.accessibility && IS_MAC && (
           <div className="callout warn">
             Accessibility permission is missing — special keys and paste-at-cursor won't work.{' '}
+            <button onClick={() => api.requestAccessibility()}>Grant</button>
             <button onClick={() => api.openPermissionSettings('accessibility')}>Open System Settings</button>
           </div>
         )}
@@ -216,8 +236,38 @@ export default function SettingsView({
                 onClick={() => set((d) => (d.appearance.accent = c))}
               />
             ))}
+            <input
+              type="color"
+              className="accent-custom"
+              title="Custom colour"
+              value={s.appearance.accent}
+              onChange={(e) => set((d) => (d.appearance.accent = e.target.value))}
+            />
           </div>
         </Field>
+        <Field label="App icon" hint="Applies immediately in-app; the Finder icon updates after a restart">
+          <div className="icon-picker">
+            {APP_ICONS.map(([id, src, name]) => (
+              <button
+                key={id}
+                className={`icon-choice ${s.appearance.app_icon === id ? 'active' : ''}`}
+                title={name}
+                onClick={() => {
+                  set((d) => (d.appearance.app_icon = id));
+                  api.setAppIcon(id).then(setNeedsRestart).catch(() => {});
+                }}
+              >
+                <img src={src} alt={name} draggable={false} />
+              </button>
+            ))}
+          </div>
+        </Field>
+        {needsRestart && (
+          <div className="callout warn">
+            Icon updated. Restart to refresh the Finder and Dock icon.{' '}
+            <button onClick={() => api.restartApp()}>Restart EchoKey</button>
+          </div>
+        )}
         <Field label="Overlay style" hint="Cassette pairs beautifully with the Retro palette">
           <div className="seg">
             {['pill', 'cassette', 'minimal'].map((st) => (

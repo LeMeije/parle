@@ -342,6 +342,42 @@ pub fn request_microphone() {
     platform::imp::request_microphone_access();
 }
 
+/// Register this binary in the Accessibility list and show the grant prompt.
+/// Fixes the stale-entry trap after rebuilds (toggle looks on, does nothing).
+#[tauri::command]
+pub fn request_accessibility() {
+    #[cfg(target_os = "macos")]
+    platform::imp::request_accessibility_access();
+}
+
+/// Switch the app icon: persists the choice, applies it to the running app
+/// where the OS allows, and swaps the bundle's icon.icns when writable.
+/// Returns true when a restart is needed for the change to fully land.
+#[tauri::command]
+pub async fn set_app_icon(state: State<'_, Arc<AppState>>, app: AppHandle, icon_id: String) -> Result<bool> {
+    const VALID: [&str; 5] = ["default", "keycap", "waveform", "echo-rings", "cassette"];
+    if !VALID.contains(&icon_id.as_str()) {
+        return Err("unknown icon id".into());
+    }
+    {
+        let mut s = state.settings.lock();
+        s.appearance.app_icon = icon_id.clone();
+        s.save(&settings_path()).map_err(err)?;
+    }
+    crate::icons::apply_app_icon(&app, &icon_id)
+}
+
+#[tauri::command]
+pub fn restart_app(app: AppHandle) {
+    app.restart();
+}
+
+/// Pin pasted/typed content to the current moment of the active recording.
+#[tauri::command]
+pub fn insert_mark(state: State<'_, Arc<AppState>>, text: String) -> Result<u64> {
+    state.pipeline.add_mark(&text)
+}
+
 #[tauri::command]
 pub fn open_permission_settings(which: String) {
     #[cfg(target_os = "macos")]

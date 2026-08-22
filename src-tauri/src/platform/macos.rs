@@ -57,6 +57,23 @@ pub fn accessibility_trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
 }
 
+/// Ask macOS to register THIS binary in the Accessibility list and show the
+/// system grant prompt. Crucial after rebuilds: a stale list entry bound to an
+/// old signature makes the toggle a no-op; this call creates a fresh entry
+/// bound to the current binary.
+pub fn request_accessibility_access() {
+    use accessibility_sys::{kAXTrustedCheckOptionPrompt, AXIsProcessTrustedWithOptions};
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+    unsafe {
+        let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
+        let dict = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), CFBoolean::true_value().as_CFType())]);
+        let _ = AXIsProcessTrustedWithOptions(dict.as_concrete_TypeRef());
+    }
+}
+
 /// Open System Settings at the Accessibility pane (best-effort).
 pub fn open_accessibility_settings() {
     let _ = std::process::Command::new("open")

@@ -128,6 +128,7 @@ export interface LevelUpdate {
 export type PipelineEvent =
   | { kind: 'state_changed'; state: 'idle' | 'recording' | 'transcribing' }
   | { kind: 'partial'; text: string }
+  | { kind: 'mark_added'; at_ms: number; text: string }
   | {
       kind: 'completed';
       item_id: number;

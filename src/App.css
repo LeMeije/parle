@@ -282,6 +282,10 @@ textarea:focus {
 .pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
 .pill.accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft); }
 
+.section-body .callout {
+  margin: 10px 12px;
+}
+
 .callout {
   padding: 10px 14px;
   border-radius: var(--radius-s);
@@ -681,4 +685,104 @@ textarea:focus {
   font-size: 14px;
   user-select: text;
   animation: ob-in 260ms var(--ease-spring);
+}
+
+
+/* ---------- Icon picker ---------- */
+
+.icon-picker { display: flex; gap: 10px; }
+.icon-choice {
+  width: 52px;
+  height: 52px;
+  padding: 4px;
+  border-radius: 14px;
+  border: 2px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  transition: transform 120ms var(--ease-spring), border-color 120ms ease;
+}
+.icon-choice img { width: 100%; height: 100%; border-radius: 10px; display: block; }
+.icon-choice:hover { transform: scale(1.08); }
+.icon-choice.active { border-color: var(--accent); }
+
+.accent-custom {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px dashed var(--border-strong);
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+
+/* ---------- Compose ---------- */
+
+.compose { max-width: 760px; }
+
+.compose-stage {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  background: var(--bg-raised);
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.compose-wave {
+  height: 72px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px;
+}
+.compose-wave .wave-bar { flex: 1; border-radius: 3px; background: var(--wave, var(--accent)); opacity: 0.9; transition: height 60ms linear; min-height: 4%; }
+
+.compose-controls { display: flex; align-items: center; gap: 12px; }
+.compose-time { font-family: var(--font-mono); font-size: 13px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+.compose-partial {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  min-height: 20px;
+  user-select: text;
+}
+
+.mark-input { display: flex; gap: 8px; }
+.mark-input input { flex: 1; }
+
+.mark-chips { display: flex; flex-direction: column; gap: 6px; }
+.mark-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-radius: var(--radius-s);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  font-size: 12.5px;
+  animation: ob-in 200ms var(--ease-spring);
+}
+.mark-chip .mark-time { font-family: var(--font-mono); font-size: 11px; color: var(--accent); flex: 0 0 auto; }
+.mark-chip .mark-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; }
+
+.compose-result {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--bg-sunken);
+  padding: 16px;
+  font-size: 14px;
+  line-height: 1.6;
+  user-select: text;
+  white-space: pre-wrap;
+  animation: ob-in 240ms var(--ease-spring);
+}
+
+/* Bold palette: the hard offset shadow must fit inside the seg's 3px padding. */
+[data-palette='bold'] .seg button.active {
+  box-shadow: 2px 2px 0 rgba(17, 17, 17, 0.9);
+}
+[data-palette='bold'][data-mode='dark'] .seg button.active {
+  box-shadow: 2px 2px 0 rgba(245, 245, 245, 0.7);
 }

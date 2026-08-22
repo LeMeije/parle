@@ -43,6 +43,10 @@ export const api = {
 
   permissionStatus: () => invoke<PermissionStatus>('permission_status'),
   requestMicrophone: () => invoke<void>('request_microphone'),
+  requestAccessibility: () => invoke<void>('request_accessibility'),
+  setAppIcon: (iconId: string) => invoke<boolean>('set_app_icon', { iconId }),
+  restartApp: () => invoke<void>('restart_app'),
+  insertMark: (text: string) => invoke<number>('insert_mark', { text }),
   openPermissionSettings: (which: string) => invoke<void>('open_permission_settings', { which }),
   listAudioDevices: () => invoke<string[]>('list_audio_devices'),
   recommendedSetup: () =>

@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useState } from 'react';
-import { BookA, Cpu, History as HistoryIcon, Settings as SettingsIcon } from 'lucide-react';
+import { AudioLines, BookA, Cpu, History as HistoryIcon, Settings as SettingsIcon } from 'lucide-react';
 import appIcon from './assets/icon.png';
 import { api, onPipelineEvent } from './api';
 import type { PipelineEvent, Settings } from './types';
 import { onFocusPalette } from './api';
 import HistoryView from './views/History';
+import ComposeView from './views/Compose';
 import ModelsView from './views/Models';
 import DictionaryView from './views/Dictionary';
 import SettingsView from './views/SettingsView';
 import Onboarding from './views/Onboarding';
 import './app.css';
 
-type Tab = 'history' | 'dictionary' | 'models' | 'settings';
+type Tab = 'history' | 'compose' | 'dictionary' | 'models' | 'settings';
 
 export default function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -84,6 +85,7 @@ export default function App() {
         </div>
         <nav>
           <NavItem icon={<HistoryIcon size={17} />} label="History" active={tab === 'history'} onClick={() => setTab('history')} />
+          <NavItem icon={<AudioLines size={17} />} label="Compose" active={tab === 'compose'} onClick={() => setTab('compose')} />
           <NavItem icon={<BookA size={17} />} label="Dictionary" active={tab === 'dictionary'} onClick={() => setTab('dictionary')} />
           <NavItem icon={<Cpu size={17} />} label="Models" active={tab === 'models'} onClick={() => setTab('models')} />
           <NavItem icon={<SettingsIcon size={17} />} label="Settings" active={tab === 'settings'} onClick={() => setTab('settings')} />
@@ -98,6 +100,7 @@ export default function App() {
       </aside>
       <main className="content">
         {tab === 'history' && <HistoryView />}
+        {tab === 'compose' && <ComposeView />}
         {tab === 'dictionary' && <DictionaryView />}
         {tab === 'models' && <ModelsView />}
         {tab === 'settings' && <SettingsView settings={settings} onSave={save} />}

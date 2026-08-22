@@ -32,6 +32,8 @@ pub enum PipelineEvent {
     StateChanged { state: PipelineState },
     Level(LevelUpdate),
     Partial { text: String },
+    /// User pasted/typed content mid-recording; spliced in at this timestamp.
+    MarkAdded { at_ms: u64, text: String },
     Completed {
         item_id: i64,
         text: String,
@@ -53,6 +55,8 @@ pub struct Pipeline {
     store: Arc<Mutex<Store>>,
     settings: Arc<Mutex<Settings>>,
     recorder: Mutex<Option<Recorder>>,
+    /// (audio position ms, verbatim text) inserted while recording.
+    marks: Mutex<Vec<(u64, String)>>,
     sink: EventSink,
     /// Latched app id/name captured at recording START (focus may move later).
     start_app: Mutex<(Option<String>, Option<String>)>,
@@ -70,6 +74,7 @@ impl Pipeline {
             store,
             settings,
             recorder: Mutex::new(None),
+            marks: Mutex::new(Vec::new()),
             sink,
             start_app: Mutex::new((None, None)),
         }
@@ -89,6 +94,7 @@ impl Pipeline {
 
         let sink = self.sink.clone();
         let on_level = move |u: LevelUpdate| sink(PipelineEvent::Level(u));
+        self.marks.lock().clear();
         match Recorder::start(&device, on_level) {
             Ok(rec) => {
                 *self.recorder.lock() = Some(rec);
@@ -196,6 +202,24 @@ impl Pipeline {
         ))
     }
 
+    /// Insert verbatim content (pasted link, typed text) at the CURRENT moment
+    /// of the recording. Returns the audio timestamp it was pinned to.
+    pub fn add_mark(&self, text: &str) -> Result<u64, String> {
+        let guard = self.recorder.lock();
+        let Some(rec) = guard.as_ref() else {
+            return Err("Not recording".into());
+        };
+        let at_ms = rec.elapsed_ms();
+        drop(guard);
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return Err("Nothing to insert".into());
+        }
+        self.marks.lock().push((at_ms, text.clone()));
+        (self.sink)(PipelineEvent::MarkAdded { at_ms, text });
+        Ok(at_ms)
+    }
+
     pub fn cancel(&self) {
         if let Some(rec) = self.recorder.lock().take() {
             rec.cancel();
@@ -256,15 +280,29 @@ impl Pipeline {
             sink(PipelineEvent::Partial { text: t.to_string() });
         });
 
+        // Insert marks (pasted links/text mid-recording): split the audio at
+        // each mark's timestamp so speech on either side is transcribed and
+        // cleaned separately, and the mark text is spliced in verbatim.
+        let marks = std::mem::take(&mut *self.marks.lock());
+
         // Code-switching: whisper detects ONE language per pass, so with
         // language=auto we split at natural pauses and let every stretch
         // detect its own language ("parle français", pause, "then English").
-        let chunks = if settings.language.language == "auto" {
-            echokey_asr::split_on_speech(&recording.samples, echokey_audio::ASR_SAMPLE_RATE)
-        } else {
-            vec![0..recording.samples.len()]
+        let auto_lang = settings.language.language == "auto";
+        let lang_chunks = |samples: &[f32]| {
+            if auto_lang {
+                echokey_asr::split_on_speech(samples, echokey_audio::ASR_SAMPLE_RATE)
+            } else {
+                vec![0..samples.len()]
+            }
         };
 
+        if !marks.is_empty() {
+            self.process_with_marks(recording, marks, &opts, &settings, &dict);
+            return;
+        }
+
+        let chunks = lang_chunks(&recording.samples);
         let result = if chunks.len() >= 2 {
             self.transcribe_chunked(&recording.samples, &chunks, &opts)
                 // Any per-chunk failure falls back to one whole-buffer pass.
@@ -407,6 +445,162 @@ impl Pipeline {
             model_id,
             injection,
             low_confidence_count: low_confidence.len(),
+        });
+        self.emit_idle_if_quiescent();
+    }
+}
+
+impl Pipeline {
+    /// Mark-splice flow: audio split at mark timestamps; each speech piece is
+    /// transcribed (with per-piece language auto-detection) and cleaned
+    /// independently; mark text goes in verbatim — URLs never touch cleanup.
+    fn process_with_marks(
+        &self,
+        recording: echokey_audio::recorder::Recording,
+        mut marks: Vec<(u64, String)>,
+        opts: &TranscribeOptions,
+        settings: &Settings,
+        dict: &Dictionary,
+    ) {
+        use crate::pipeline::PipelineState;
+        marks.sort_by_key(|(ms, _)| *ms);
+        let sr = echokey_audio::ASR_SAMPLE_RATE as u64;
+        let total = recording.samples.len();
+
+        // Piece boundaries in samples.
+        let mut boundaries: Vec<usize> = vec![0];
+        for (ms, _) in &marks {
+            boundaries.push(((ms * sr / 1000) as usize).min(total));
+        }
+        boundaries.push(total);
+
+        let mut final_parts: Vec<String> = Vec::new();
+        let mut raw_parts: Vec<String> = Vec::new();
+        let mut all_segments: Vec<Segment> = Vec::new();
+        let mut langs: Vec<String> = Vec::new();
+        let mut transcribe_ms = 0u64;
+        let mut model_id = String::new();
+
+        for i in 0..boundaries.len() - 1 {
+            let range = boundaries[i]..boundaries[i + 1];
+            if range.len() > (sr as usize / 4) && !is_silence(&recording.samples[range.clone()]) {
+                let piece = &recording.samples[range.clone()];
+                let chunks = if settings.language.language == "auto" {
+                    echokey_asr::split_on_speech(piece, echokey_audio::ASR_SAMPLE_RATE)
+                } else {
+                    vec![0..piece.len()]
+                };
+                let result = if chunks.len() >= 2 {
+                    self.transcribe_chunked(piece, &chunks, opts)
+                } else {
+                    self.engine.lock().transcribe(piece, opts, None)
+                };
+                match result {
+                    Ok((out, mid)) => {
+                        model_id = mid;
+                        transcribe_ms += out.transcribe_ms;
+                        if let Some(l) = &out.detected_language {
+                            if langs.last() != Some(l) {
+                                langs.push(l.clone());
+                            }
+                        }
+                        use unicode_normalization::UnicodeNormalization;
+                        let raw: String = out
+                            .segments
+                            .iter()
+                            .map(|s| s.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .trim()
+                            .nfc()
+                            .collect();
+                        let segs: Vec<Segment> = out
+                            .segments
+                            .iter()
+                            .map(|s| Segment {
+                                text: s.text.clone(),
+                                start_ms: s.start_ms + (range.start as u64 * 1000 / sr),
+                                end_ms: s.end_ms + (range.start as u64 * 1000 / sr),
+                                confidence: s.confidence,
+                            })
+                            .collect();
+                        let formatted = formatter::format(&raw, &segs, &settings.cleanup, &settings.language.locale);
+                        let (text, _) = if settings.dictionary.enabled {
+                            dict.apply(&formatted.text, settings.dictionary.fuzzy_correct)
+                        } else {
+                            (formatted.text.clone(), vec![])
+                        };
+                        all_segments.extend(segs);
+                        if !text.trim().is_empty() {
+                            final_parts.push(text.trim().to_string());
+                        }
+                        if !raw.is_empty() {
+                            raw_parts.push(raw);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("mark-piece transcription failed: {e}");
+                    }
+                }
+            }
+            // The mark that follows this piece (none after the last piece).
+            if let Some((_, mark_text)) = marks.get(i) {
+                final_parts.push(mark_text.clone());
+                raw_parts.push(mark_text.clone());
+            }
+        }
+
+        let text = final_parts.join(" ").trim().to_string();
+        let raw_text = raw_parts.join(" ").trim().to_string();
+        if text.is_empty() {
+            (self.sink)(PipelineEvent::Empty { reason: "No speech detected".into() });
+            self.emit_idle_if_quiescent();
+            return;
+        }
+
+        let injection = if settings.paste.inject {
+            Some(platform::imp::inject_text(
+                &text,
+                settings.paste.prefer_ax_insert,
+                settings.paste.restore_delay_ms,
+                settings.paste.copy_to_clipboard,
+                settings.paste.restore_clipboard,
+            ))
+        } else if settings.paste.copy_to_clipboard {
+            platform::imp::write_clipboard(&text);
+            None
+        } else {
+            None
+        };
+
+        let (app_id, app_name) = self.start_app.lock().clone();
+        let detected_language = if langs.is_empty() { None } else { Some(langs.join("+")) };
+        let tr = TranscriptionResult {
+            raw_text,
+            text: text.clone(),
+            language: detected_language,
+            model_id: model_id.clone(),
+            duration_ms: recording.duration_ms,
+            transcribe_ms,
+            segments: all_segments,
+            trimmed: vec![], // per-piece offsets don't map onto the joined raw; deferred
+            low_confidence: vec![],
+            cleanup_tier: if settings.cleanup.enabled { 1 } else { 0 },
+        };
+        let item_id = self
+            .store
+            .lock()
+            .insert_transcription(&tr, app_id.as_deref(), app_name.as_deref())
+            .unwrap_or(-1);
+
+        (self.sink)(PipelineEvent::Completed {
+            item_id,
+            text,
+            duration_ms: recording.duration_ms,
+            transcribe_ms,
+            model_id,
+            injection,
+            low_confidence_count: 0,
         });
         self.emit_idle_if_quiescent();
     }

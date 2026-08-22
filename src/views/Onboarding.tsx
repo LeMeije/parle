@@ -84,7 +84,7 @@ function Permissions({ onNext }: { onNext: () => void }) {
             ok={axOk}
             title="Accessibility"
             desc="To watch your hotkey and paste at the cursor"
-            action={() => api.openPermissionSettings('accessibility')}
+            action={() => api.requestAccessibility()}
             settingsAction={() => api.openPermissionSettings('accessibility')}
           />
         )}

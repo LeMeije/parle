@@ -3,6 +3,7 @@
 mod commands;
 mod hotkey_logic;
 mod hud;
+mod icons;
 mod pipeline;
 mod platform;
 mod state;
@@ -63,6 +64,10 @@ pub fn run() {
             commands::cancel_recording,
             commands::permission_status,
             commands::request_microphone,
+            commands::request_accessibility,
+            commands::set_app_icon,
+            commands::restart_app,
+            commands::insert_mark,
             commands::open_permission_settings,
             commands::list_audio_devices,
             commands::recommended_setup,
@@ -83,6 +88,38 @@ pub fn run() {
             // Pre-warm the model so the first dictation is instant.
             if state.settings.lock().onboarding_complete {
                 state.prewarm_async(handle.clone());
+            }
+
+            // Apply the chosen app icon (runtime surfaces only at startup).
+            {
+                let icon_id = state.settings.lock().appearance.app_icon.clone();
+                if icon_id != "default" {
+                    let _ = icons::apply_app_icon(&handle, &icon_id);
+                }
+            }
+
+            // Accessibility can be granted while we're running (onboarding, or
+            // a re-grant after a rebuild). Poll until the listener arms so the
+            // user never needs an app restart after granting.
+            {
+                let state = state.clone();
+                let handle2 = handle.clone();
+                std::thread::Builder::new()
+                    .name("echokey-perm-watch".into())
+                    .spawn(move || loop {
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        if state.hotkeys.lock().is_some() {
+                            break; // armed; job done
+                        }
+                        if state.settings.lock().onboarding_complete {
+                            state.ensure_hotkey_listener();
+                            if state.hotkeys.lock().is_some() {
+                                let _ = handle2.emit("permissions-changed", ());
+                                break;
+                            }
+                        }
+                    })
+                    .expect("spawn perm watcher");
             }
 
             // Retention pruning at startup.

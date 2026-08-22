@@ -8,7 +8,7 @@ use crate::types::{HistoryItem, HistoryKind, TranscriptionResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -56,7 +56,8 @@ impl Store {
                     language TEXT,
                     app_id TEXT,
                     app_name TEXT,
-                    meta TEXT
+                    meta TEXT,
+                    source_machine TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_items_kind ON items(kind, created_at DESC);
@@ -84,6 +85,12 @@ impl Store {
                     created_at INTEGER NOT NULL
                 );
                 "#,
+            )?;
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        } else if version < 2 {
+            // v2: cross-machine sync groundwork — every row knows its origin.
+            conn.execute_batch(
+                "ALTER TABLE items ADD COLUMN source_machine TEXT;",
             )?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
