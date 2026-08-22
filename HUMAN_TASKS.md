@@ -28,7 +28,7 @@ using the machine):
    appear with the source app. Copy something from 1Password: must NOT appear.
 
 ## 1b. Spotlight shows two EchoKeys
-The canonical app now lives at /Applications/EchoKey.app (launch that one).
+The canonical app now lives at /Applications/Parle.app (launch that one; display name is now Parle).
 The copy under the repo's target/ folder regenerates on every build; to hide
 it from Spotlight: System Settings -> Siri & Spotlight -> Spotlight Privacy ->
 add the repo's `target` folder. Refresh the /Applications copy any time with
