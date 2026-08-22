@@ -141,15 +141,18 @@ export default function HistoryView() {
                 {item.app_name && <span>· {item.app_name}</span>}
                 {item.duration_ms != null && <span>· {(item.duration_ms / 1000).toFixed(1)}s</span>}
                 {item.model_id && <span>· {shortModel(item.model_id)}</span>}
+                {item.language && item.kind === 'transcription' && (
+                  <span className="badge badge-lang">{item.language}</span>
+                )}
                 <TrimBadge item={item} onRestored={refresh} />
               </div>
             </div>
             <div className="row-actions">
-              <button title="Paste into the previous app" onClick={(e) => { e.stopPropagation(); api.pasteItem(item.id); }}>
-                <CornerDownLeft size={14} />
+              <button className="primary" title="Paste into the previous app (Enter)" onClick={(e) => { e.stopPropagation(); api.pasteItem(item.id); }}>
+                <CornerDownLeft size={15} />
               </button>
-              <button title="Copy" onClick={(e) => { e.stopPropagation(); api.copyItem(item.id); }}>
-                <Copy size={14} />
+              <button className="primary" title="Copy (⌘Enter)" onClick={(e) => { e.stopPropagation(); api.copyItem(item.id); }}>
+                <Copy size={15} />
               </button>
               <button
                 title="Edit (feeds auto-learn)"
@@ -193,7 +196,7 @@ function TrimBadge({ item, onRestored }: { item: HistoryItem; onRestored: () => 
   return (
     <>
       {trimmed.length > 0 && (
-        <button className="badge" onClick={(e) => { e.stopPropagation(); setOpen(!open); }}>
+        <button className="badge badge-trim" onClick={(e) => { e.stopPropagation(); setOpen(!open); }}>
           {trimmed.length} trimmed
         </button>
       )}
@@ -204,7 +207,7 @@ function TrimBadge({ item, onRestored }: { item: HistoryItem; onRestored: () => 
             <s key={i}>{t.text}</s>
           ))}
           <button
-            className="badge"
+            className="badge badge-trim"
             onClick={() => {
               api.updateItemText(item.id, item.raw_text!, false).then(() => {
                 setOpen(false);

@@ -429,11 +429,36 @@ textarea:focus {
   color: var(--text-dim);
   border-radius: 999px;
   font-size: 10.5px;
-  padding: 1px 8px;
+  padding: 2px 9px;
   cursor: pointer;
   font-family: var(--font-ui);
+  font-weight: 550;
 }
-.badge-warn { color: var(--warn); }
+
+/* Each badge kind carries its own pastel hue: pill AND text in one family. */
+.badge-warn {
+  color: #9a6a00;
+  background: color-mix(in srgb, #e8a417 14%, transparent);
+  border-color: color-mix(in srgb, #e8a417 38%, transparent);
+}
+[data-mode='dark'] .badge-warn { color: #f0c268; }
+
+.badge-trim {
+  color: #6d43d8;
+  background: color-mix(in srgb, #8b5cf6 13%, transparent);
+  border-color: color-mix(in srgb, #8b5cf6 36%, transparent);
+}
+[data-mode='dark'] .badge-trim { color: #bda4ff; }
+
+.badge-lang {
+  color: #0b7d88;
+  background: color-mix(in srgb, #0d9aa8 13%, transparent);
+  border-color: color-mix(in srgb, #0d9aa8 36%, transparent);
+  cursor: default;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+[data-mode='dark'] .badge-lang { color: #6fd3dd; }
 
 .trim-review {
   display: inline-flex;
@@ -445,12 +470,41 @@ textarea:focus {
 
 .row-actions {
   display: flex;
-  gap: 2px;
+  align-items: center;
+  gap: 6px;
   opacity: 0;
   transition: opacity 120ms ease;
 }
 .row:hover .row-actions,
 .row.selected .row-actions { opacity: 1; }
+
+.row-actions button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, transform 120ms var(--ease-spring);
+}
+.row-actions button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+  transform: scale(1.06);
+}
+.row-actions button.primary {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.row-actions button.primary:hover {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: var(--accent);
+}
+.row-actions button.danger:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
 
 /* ---------- Models ---------- */
 
