@@ -378,6 +378,17 @@ pub fn insert_mark(state: State<'_, Arc<AppState>>, text: String) -> Result<u64>
     state.pipeline.add_mark(&text)
 }
 
+/// Current pipeline state, for views that mount mid-recording (a hotkey can
+/// start dictation before the Compose screen exists).
+#[tauri::command]
+pub fn pipeline_state(state: State<'_, Arc<AppState>>) -> &'static str {
+    if state.pipeline.is_recording() {
+        "recording"
+    } else {
+        "idle"
+    }
+}
+
 #[tauri::command]
 pub fn open_permission_settings(which: String) {
     #[cfg(target_os = "macos")]

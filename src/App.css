@@ -706,12 +706,23 @@ textarea:focus {
 .icon-choice.active { border-color: var(--accent); }
 
 .accent-custom {
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: 1px dashed var(--border-strong);
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
-  background: transparent;
+  cursor: pointer;
+  display: inline-block;
+  background: conic-gradient(#d5382f, #b06a00, #178a50, #0d9aa8, #2b5cff, #8b5cf6, #d6336c, #d5382f);
+  border: 2px solid var(--bg-raised);
+  box-shadow: 0 0 0 1px var(--border-strong);
+  transition: transform 120ms var(--ease-spring);
+  position: relative;
+  overflow: hidden;
+}
+.accent-custom:hover { transform: scale(1.15); }
+.accent-custom input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
   cursor: pointer;
 }
 

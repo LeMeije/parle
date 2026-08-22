@@ -47,6 +47,7 @@ export const api = {
   setAppIcon: (iconId: string) => invoke<boolean>('set_app_icon', { iconId }),
   restartApp: () => invoke<void>('restart_app'),
   insertMark: (text: string) => invoke<number>('insert_mark', { text }),
+  pipelineState: () => invoke<'recording' | 'idle'>('pipeline_state'),
   openPermissionSettings: (which: string) => invoke<void>('open_permission_settings', { which }),
   listAudioDevices: () => invoke<string[]>('list_audio_devices'),
   recommendedSetup: () =>

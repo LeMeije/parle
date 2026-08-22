@@ -26,6 +26,10 @@ export default function ComposeView() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    // A hotkey may have started recording before this view mounted.
+    api.pipelineState().then((st) => {
+      if (st === 'recording') setState('recording');
+    });
     const un1 = onPipelineEvent((e) => {
       if (e.kind === 'state_changed') {
         setState(e.state);

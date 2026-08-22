@@ -68,6 +68,7 @@ pub fn run() {
             commands::set_app_icon,
             commands::restart_app,
             commands::insert_mark,
+            commands::pipeline_state,
             commands::open_permission_settings,
             commands::list_audio_devices,
             commands::recommended_setup,

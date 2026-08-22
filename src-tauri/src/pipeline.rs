@@ -403,7 +403,7 @@ impl Pipeline {
         let low_confidence = collect_low_confidence(&asr, &text);
 
         // Output: inject + clipboard + history, simultaneously in intent.
-        let injection = if settings.paste.inject {
+        let injection = if settings.paste.inject && !frontmost_is_self() {
             Some(platform::imp::inject_text(
                 &text,
                 settings.paste.prefer_ax_insert,
@@ -558,7 +558,7 @@ impl Pipeline {
             return;
         }
 
-        let injection = if settings.paste.inject {
+        let injection = if settings.paste.inject && !frontmost_is_self() {
             Some(platform::imp::inject_text(
                 &text,
                 settings.paste.prefer_ax_insert,
@@ -645,6 +645,18 @@ fn find_word_boundary(haystack: &str, word: &str) -> Option<usize> {
         from = end;
     }
     None
+}
+
+/// True when EchoKey itself is the frontmost app: pasting the result into our
+/// own Compose window would be absurd — the result panel and clipboard cover it.
+fn frontmost_is_self() -> bool {
+    let (app_id, _) = platform::imp::frontmost_app();
+    app_id.as_deref() == Some("com.novaire.echokey")
+        || std::env::current_exe()
+            .ok()
+            .and_then(|e| e.to_str().map(|p| p.contains("EchoKey.app")))
+            .map(|in_bundle| in_bundle && app_id.is_none())
+            .unwrap_or(false)
 }
 
 fn now_stamp() -> u64 {

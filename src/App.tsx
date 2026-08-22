@@ -29,6 +29,7 @@ export default function App() {
 
   useEffect(() => {
     reload();
+    api.pipelineState().then((st) => setRecording(st === 'recording'));
     const un = onPipelineEvent((e: PipelineEvent) => {
       if (e.kind === 'state_changed') setRecording(e.state === 'recording');
       if (e.kind === 'completed') {

@@ -236,13 +236,13 @@ export default function SettingsView({
                 onClick={() => set((d) => (d.appearance.accent = c))}
               />
             ))}
-            <input
-              type="color"
-              className="accent-custom"
-              title="Custom colour"
-              value={s.appearance.accent}
-              onChange={(e) => set((d) => (d.appearance.accent = e.target.value))}
-            />
+            <label className="accent-custom" title="Custom colour">
+              <input
+                type="color"
+                value={s.appearance.accent}
+                onChange={(e) => set((d) => (d.appearance.accent = e.target.value))}
+              />
+            </label>
           </div>
         </Field>
         <Field label="App icon" hint="Applies immediately in-app; the Finder icon updates after a restart">
