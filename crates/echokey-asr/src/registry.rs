@@ -17,6 +17,8 @@ pub struct ModelInfo {
     pub display_name: &'static str,
     pub engine: EngineKind,
     pub file_name: &'static str,
+    /// Full download URL when the model lives outside ggerganov/whisper.cpp.
+    pub url_override: Option<&'static str>,
     pub size_bytes: u64,
     /// 1 (slowest) .. 5 (fastest) on the reference machines.
     pub speed: u8,
@@ -34,6 +36,7 @@ pub const MODELS: &[ModelInfo] = &[
         id: "whisper-tiny-q5_1",
         display_name: "Whisper Tiny (fastest)",
         engine: EngineKind::Whisper,
+        url_override: None,
         file_name: "ggml-tiny-q5_1.bin",
         size_bytes: 33_770_000,
         speed: 5,
@@ -45,6 +48,7 @@ pub const MODELS: &[ModelInfo] = &[
         id: "whisper-base-q5_1",
         display_name: "Whisper Base (fast)",
         engine: EngineKind::Whisper,
+        url_override: None,
         file_name: "ggml-base-q5_1.bin",
         size_bytes: 62_600_000,
         speed: 5,
@@ -56,6 +60,7 @@ pub const MODELS: &[ModelInfo] = &[
         id: "whisper-base-en-q5_1",
         display_name: "Whisper Base English (fast)",
         engine: EngineKind::Whisper,
+        url_override: None,
         file_name: "ggml-base.en-q5_1.bin",
         size_bytes: 62_600_000,
         speed: 5,
@@ -67,6 +72,7 @@ pub const MODELS: &[ModelInfo] = &[
         id: "whisper-small-q5_1",
         display_name: "Whisper Small (balanced)",
         engine: EngineKind::Whisper,
+        url_override: None,
         file_name: "ggml-small-q5_1.bin",
         size_bytes: 199_200_000,
         speed: 4,
@@ -78,6 +84,7 @@ pub const MODELS: &[ModelInfo] = &[
         id: "whisper-small-en-q5_1",
         display_name: "Whisper Small English (balanced)",
         engine: EngineKind::Whisper,
+        url_override: None,
         file_name: "ggml-small.en-q5_1.bin",
         size_bytes: 199_200_000,
         speed: 4,
@@ -89,6 +96,7 @@ pub const MODELS: &[ModelInfo] = &[
         id: "whisper-medium-q5_0",
         display_name: "Whisper Medium (accurate)",
         engine: EngineKind::Whisper,
+        url_override: None,
         file_name: "ggml-medium-q5_0.bin",
         size_bytes: 565_200_000,
         speed: 2,
@@ -100,6 +108,7 @@ pub const MODELS: &[ModelInfo] = &[
         id: "whisper-large-v3-turbo-q5_0",
         display_name: "Whisper Large v3 Turbo (best, compact)",
         engine: EngineKind::Whisper,
+        url_override: None,
         file_name: "ggml-large-v3-turbo-q5_0.bin",
         size_bytes: 601_900_000,
         speed: 3,
@@ -108,9 +117,58 @@ pub const MODELS: &[ModelInfo] = &[
         ram_mb: 1600,
     },
     ModelInfo {
+        id: "whisper-tiny-en-q5_1",
+        display_name: "Whisper Tiny English (instant)",
+        engine: EngineKind::Whisper,
+        url_override: None,
+        file_name: "ggml-tiny.en-q5_1.bin",
+        size_bytes: 32_166_155,
+        speed: 5,
+        accuracy: 1,
+        multilingual: false,
+        ram_mb: 110,
+    },
+    ModelInfo {
+        id: "whisper-medium-en-q5_0",
+        display_name: "Whisper Medium English (accurate)",
+        engine: EngineKind::Whisper,
+        url_override: None,
+        file_name: "ggml-medium.en-q5_0.bin",
+        size_bytes: 539_225_533,
+        speed: 2,
+        accuracy: 4,
+        multilingual: false,
+        ram_mb: 1400,
+    },
+    ModelInfo {
+        id: "whisper-large-v3-q5_0",
+        display_name: "Whisper Large v3 (maximum quality)",
+        engine: EngineKind::Whisper,
+        url_override: None,
+        file_name: "ggml-large-v3-q5_0.bin",
+        size_bytes: 1_081_140_203,
+        speed: 1,
+        accuracy: 5,
+        multilingual: true,
+        ram_mb: 2600,
+    },
+    ModelInfo {
+        id: "distil-large-v3.5",
+        display_name: "Distil-Whisper Large v3.5 (English, fast+accurate)",
+        engine: EngineKind::Whisper,
+        url_override: Some("https://huggingface.co/distil-whisper/distil-large-v3.5-ggml/resolve/main/ggml-model.bin"),
+        file_name: "ggml-distil-large-v3.5.bin",
+        size_bytes: 1_519_521_155,
+        speed: 3,
+        accuracy: 5,
+        multilingual: false,
+        ram_mb: 3200,
+    },
+    ModelInfo {
         id: "whisper-large-v3-turbo-q8_0",
         display_name: "Whisper Large v3 Turbo (best)",
         engine: EngineKind::Whisper,
+        url_override: None,
         file_name: "ggml-large-v3-turbo-q8_0.bin",
         size_bytes: 916_500_000,
         speed: 3,
@@ -122,7 +180,10 @@ pub const MODELS: &[ModelInfo] = &[
 
 /// Real download URL for a model (const tables can't concat strings).
 pub fn url_for(model: &ModelInfo) -> String {
-    format!("{HF}/{}", model.file_name)
+    match model.url_override {
+        Some(u) => u.to_string(),
+        None => format!("{HF}/{}", model.file_name),
+    }
 }
 
 pub fn by_id(id: &str) -> Option<&'static ModelInfo> {
@@ -212,7 +273,8 @@ mod tests {
     fn urls_resolve_to_hf() {
         for m in MODELS {
             let url = url_for(m);
-            assert!(url.starts_with("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-"), "{url}");
+            assert!(url.starts_with("https://huggingface.co/"), "{url}");
+            assert!(url.contains("/resolve/main/"), "{url}");
         }
     }
 
