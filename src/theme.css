@@ -52,22 +52,25 @@
   --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.5), 0 12px 40px rgba(0, 0, 0, 0.4);
 }
 
-/* ---------- Pastel ---------- */
+/* ---------- Pastel: the wash derives from the accent colour, so every
+   accent (including custom) yields its own pastel theme. ---------- */
 [data-palette='pastel'] {
-  --bg: #f7f4fb;
-  --bg-raised: #ffffff;
-  --bg-sunken: #eee9f6;
-  --bg-hover: #ece6f5;
-  --border: #e2dbee;
-  --border-strong: #cfc5e2;
+  --bg: color-mix(in srgb, var(--accent) 8%, #fdfdfd);
+  --bg-raised: color-mix(in srgb, var(--accent) 3%, #ffffff);
+  --bg-sunken: color-mix(in srgb, var(--accent) 14%, #f5f4f4);
+  --bg-hover: color-mix(in srgb, var(--accent) 18%, #f1f0f0);
+  --border: color-mix(in srgb, var(--accent) 20%, #e7e5e5);
+  --border-strong: color-mix(in srgb, var(--accent) 34%, #d2cfcf);
+  --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 [data-palette='pastel'][data-mode='dark'] {
-  --bg: #191625;
-  --bg-raised: #221e31;
-  --bg-sunken: #131020;
-  --bg-hover: #2b2640;
-  --border: #322c48;
-  --border-strong: #443c60;
+  --bg: color-mix(in srgb, var(--accent) 11%, #15131c);
+  --bg-raised: color-mix(in srgb, var(--accent) 9%, #1f1c28);
+  --bg-sunken: color-mix(in srgb, var(--accent) 8%, #0f0d15);
+  --bg-hover: color-mix(in srgb, var(--accent) 16%, #292537);
+  --border: color-mix(in srgb, var(--accent) 22%, #2e2a3c);
+  --border-strong: color-mix(in srgb, var(--accent) 34%, #423c55);
+  --accent-soft: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
 /* ---------- Bold ---------- */

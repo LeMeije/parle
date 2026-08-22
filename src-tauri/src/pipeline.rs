@@ -474,7 +474,12 @@ impl Pipeline {
         }
         boundaries.push(total);
 
-        let mut final_parts: Vec<String> = Vec::new();
+        // (text, starts_lowercase_in_raw) for speech, or a verbatim mark.
+        enum Part {
+            Speech { text: String, raw_lower_start: bool },
+            Mark(String),
+        }
+        let mut parts: Vec<Part> = Vec::new();
         let mut raw_parts: Vec<String> = Vec::new();
         let mut all_segments: Vec<Segment> = Vec::new();
         let mut langs: Vec<String> = Vec::new();
@@ -483,6 +488,7 @@ impl Pipeline {
 
         for i in 0..boundaries.len() - 1 {
             let range = boundaries[i]..boundaries[i + 1];
+            let is_last_piece = i == boundaries.len() - 2;
             if range.len() > (sr as usize / 4) && !is_silence(&recording.samples[range.clone()]) {
                 let piece = &recording.samples[range.clone()];
                 let chunks = if settings.language.language == "auto" {
@@ -524,7 +530,13 @@ impl Pipeline {
                                 confidence: s.confidence,
                             })
                             .collect();
-                        let formatted = formatter::format(&raw, &segs, &settings.cleanup, &settings.language.locale);
+                        // Pieces that run into a mark must not be closed with an
+                        // artificial full stop: the pasted link continues the sentence.
+                        let mut piece_cfg = settings.cleanup.clone();
+                        if !is_last_piece {
+                            piece_cfg.ensure_terminal_punctuation = false;
+                        }
+                        let formatted = formatter::format(&raw, &segs, &piece_cfg, &settings.language.locale);
                         let (text, _) = if settings.dictionary.enabled {
                             dict.apply(&formatted.text, settings.dictionary.fuzzy_correct)
                         } else {
@@ -532,7 +544,12 @@ impl Pipeline {
                         };
                         all_segments.extend(segs);
                         if !text.trim().is_empty() {
-                            final_parts.push(text.trim().to_string());
+                            let raw_lower_start = raw
+                                .chars()
+                                .find(|c| c.is_alphabetic())
+                                .map(|c| c.is_lowercase())
+                                .unwrap_or(false);
+                            parts.push(Part::Speech { text: text.trim().to_string(), raw_lower_start });
                         }
                         if !raw.is_empty() {
                             raw_parts.push(raw);
@@ -545,12 +562,23 @@ impl Pipeline {
             }
             // The mark that follows this piece (none after the last piece).
             if let Some((_, mark_text)) = marks.get(i) {
-                final_parts.push(mark_text.clone());
+                parts.push(Part::Mark(mark_text.clone()));
                 raw_parts.push(mark_text.clone());
             }
         }
 
-        let text = final_parts.join(" ").trim().to_string();
+        let text = join_marked_parts(
+            parts
+                .iter()
+                .map(|p| match p {
+                    Part::Speech { text, raw_lower_start } => JoinPart::Speech {
+                        text: text.clone(),
+                        raw_lower_start: *raw_lower_start,
+                    },
+                    Part::Mark(m) => JoinPart::Mark(m.clone()),
+                })
+                .collect(),
+        );
         let raw_text = raw_parts.join(" ").trim().to_string();
         if text.is_empty() {
             (self.sink)(PipelineEvent::Empty { reason: "No speech detected".into() });
@@ -657,6 +685,111 @@ fn frontmost_is_self() -> bool {
             .and_then(|e| e.to_str().map(|p| p.contains("EchoKey.app")))
             .map(|in_bundle| in_bundle && app_id.is_none())
             .unwrap_or(false)
+}
+
+/// A speech stretch or a verbatim inserted mark, in speaking order.
+pub enum JoinPart {
+    Speech { text: String, raw_lower_start: bool },
+    Mark(String),
+}
+
+/// Sentence-continuity joining: a pause taken to paste a link must not break
+/// the sentence. Before a mark, soft trailing punctuation (. , ; :) is
+/// stripped (question/exclamation marks are kept — they're intentional).
+/// After a mark, a continuation that the ASR heard starting lowercase gets its
+/// artificial capitalisation undone (except the pronoun "I").
+pub fn join_marked_parts(parts: Vec<JoinPart>) -> String {
+    let mut out = String::new();
+    let mut prev_was_mark = false;
+    for part in parts {
+        match part {
+            JoinPart::Mark(m) => {
+                while out.ends_with(' ') {
+                    out.pop();
+                }
+                while out.ends_with(['.', ',', ';', ':']) {
+                    out.pop();
+                }
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(&m);
+                prev_was_mark = true;
+            }
+            JoinPart::Speech { mut text, raw_lower_start } => {
+                if prev_was_mark && raw_lower_start && !out.ends_with(['.', '!', '?']) {
+                    let keep_capital = text == "I" || text.starts_with("I ") || text.starts_with("I'");
+                    if !keep_capital {
+                        let mut cs = text.chars();
+                        if let Some(f) = cs.next() {
+                            text = f.to_lowercase().collect::<String>() + cs.as_str();
+                        }
+                    }
+                }
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(&text);
+                prev_was_mark = false;
+            }
+        }
+    }
+    out.trim().to_string()
+}
+
+#[cfg(test)]
+mod join_tests {
+    use super::{join_marked_parts, JoinPart};
+
+    fn speech(t: &str, lower: bool) -> JoinPart {
+        JoinPart::Speech { text: t.to_string(), raw_lower_start: lower }
+    }
+
+    #[test]
+    fn link_flows_inside_sentence() {
+        let out = join_marked_parts(vec![
+            speech("You can check this link.", false),
+            JoinPart::Mark("https://example.com".into()),
+            speech("And it explains everything.", true),
+        ]);
+        assert_eq!(out, "You can check this link https://example.com and it explains everything.");
+    }
+
+    #[test]
+    fn question_before_mark_is_kept() {
+        let out = join_marked_parts(vec![
+            speech("Have you seen this?", false),
+            JoinPart::Mark("https://example.com".into()),
+        ]);
+        assert_eq!(out, "Have you seen this? https://example.com");
+    }
+
+    #[test]
+    fn pronoun_i_stays_capital() {
+        let out = join_marked_parts(vec![
+            speech("Check this out.", false),
+            JoinPart::Mark("https://example.com".into()),
+            speech("I think it's great.", true),
+        ]);
+        assert_eq!(out, "Check this out https://example.com I think it's great.");
+    }
+
+    #[test]
+    fn genuine_new_sentence_after_mark_keeps_capital() {
+        // ASR heard a capital start (real sentence boundary): keep it.
+        let out = join_marked_parts(vec![
+            speech("Here's the report.", false),
+            JoinPart::Mark("https://example.com".into()),
+            speech("Next topic is the budget.", false),
+        ]);
+        assert_eq!(out, "Here's the report https://example.com Next topic is the budget.");
+    }
+
+    #[test]
+    fn mark_only() {
+        let out = join_marked_parts(vec![JoinPart::Mark("https://example.com".into())]);
+        assert_eq!(out, "https://example.com");
+    }
 }
 
 fn now_stamp() -> u64 {

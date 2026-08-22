@@ -217,7 +217,7 @@ export default function SettingsView({
             ))}
           </div>
         </Field>
-        <Field label="Palette">
+        <Field label="Palette" hint="Pastel tints itself from your accent colour — try it with the custom wheel">
           <div className="seg">
             {['paper', 'pastel', 'bold', 'retro'].map((p) => (
               <button key={p} className={s.appearance.palette === p ? 'active' : ''} onClick={() => set((d) => (d.appearance.palette = p))}>
@@ -346,7 +346,7 @@ export default function SettingsView({
       </Section>
 
       <footer className="settings-footer">
-        parle · on-device dictation · <span className="faint">nothing ever leaves this machine</span>
+        Parle · on-device dictation · <span className="faint">nothing ever leaves this machine</span>
       </footer>
     </div>
   );
