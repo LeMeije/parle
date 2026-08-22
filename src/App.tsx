@@ -16,7 +16,7 @@ type Tab = 'history' | 'compose' | 'dictionary' | 'models' | 'settings';
 
 export default function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [tab, setTab] = useState<Tab>('history');
+  const [tab, setTab] = useState<Tab>('compose');
   const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'error' } | null>(null);
   const [recording, setRecording] = useState(false);
 
@@ -85,8 +85,8 @@ export default function App() {
           <span>Parle</span>
         </div>
         <nav>
-          <NavItem icon={<HistoryIcon size={17} />} label="History" active={tab === 'history'} onClick={() => setTab('history')} />
           <NavItem icon={<AudioLines size={17} />} label="Compose" active={tab === 'compose'} onClick={() => setTab('compose')} />
+          <NavItem icon={<HistoryIcon size={17} />} label="History" active={tab === 'history'} onClick={() => setTab('history')} />
           <NavItem icon={<BookA size={17} />} label="Dictionary" active={tab === 'dictionary'} onClick={() => setTab('dictionary')} />
           <NavItem icon={<Cpu size={17} />} label="Models" active={tab === 'models'} onClick={() => setTab('models')} />
           <NavItem icon={<SettingsIcon size={17} />} label="Settings" active={tab === 'settings'} onClick={() => setTab('settings')} />

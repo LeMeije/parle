@@ -133,8 +133,10 @@ export default function SettingsView({
         )}
         {perms && !perms.accessibility && IS_MAC && (
           <div className="callout warn">
-            Accessibility permission is missing — special keys and paste-at-cursor won't work.{' '}
+            Accessibility permission is missing — special keys and paste-at-cursor won't work. If you
+            already granted it and this warning stays, the entry went stale after a rebuild: use Repair.{' '}
             <button onClick={() => api.requestAccessibility()}>Grant</button>
+            <button onClick={() => api.repairAccessibility()}>Repair permission</button>
             <button onClick={() => api.openPermissionSettings('accessibility')}>Open System Settings</button>
           </div>
         )}

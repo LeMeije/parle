@@ -169,6 +169,9 @@ fn learn_from_edit(store: &parking_lot::Mutex<Store>, old: &str, new: &str) {
 pub struct ModelRow {
     pub id: String,
     pub display_name: String,
+    /// Where inference runs for this model in THIS build: "Metal GPU",
+    /// "CUDA GPU" or "CPU".
+    pub backend: String,
     pub size_bytes: u64,
     pub speed: u8,
     pub accuracy: u8,
@@ -186,6 +189,18 @@ pub fn list_models(state: State<'_, Arc<AppState>>) -> Vec<ModelRow> {
         .map(|m| ModelRow {
             id: m.id.to_string(),
             display_name: m.display_name.to_string(),
+            backend: match m.engine {
+                registry::EngineKind::Whisper => {
+                    if cfg!(target_os = "macos") {
+                        "Metal GPU".to_string()
+                    } else if cfg!(feature = "cuda") {
+                        "CUDA GPU".to_string()
+                    } else {
+                        "CPU".to_string()
+                    }
+                }
+                registry::EngineKind::Parakeet => "CPU".to_string(),
+            },
             size_bytes: m.size_bytes,
             speed: m.speed,
             accuracy: m.accuracy,
@@ -348,6 +363,21 @@ pub fn request_microphone() {
 pub fn request_accessibility() {
     #[cfg(target_os = "macos")]
     platform::imp::request_accessibility_access();
+}
+
+/// Nuclear option for the rebuild-orphaned grant: drop OUR stale TCC entry
+/// (tccutil is per-bundle and needs no sudo) and re-register this binary so
+/// the System Settings toggle points at something real again.
+#[tauri::command]
+pub fn repair_accessibility() {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("tccutil")
+            .args(["reset", "Accessibility", "com.novaire.echokey"])
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        platform::imp::request_accessibility_access();
+    }
 }
 
 /// Switch the app icon: persists the choice, applies it to the running app

@@ -178,7 +178,7 @@ pub const MODELS: &[ModelInfo] = &[
     },
     ModelInfo {
         id: "parakeet-tdt-v3-int8",
-        display_name: "Parakeet TDT v3 (fastest, 25 languages, CPU)",
+        display_name: "Parakeet TDT v3 (fastest, 25 languages)",
         engine: EngineKind::Parakeet,
         url_override: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2"),
         file_name: "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",

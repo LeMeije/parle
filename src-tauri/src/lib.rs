@@ -65,6 +65,7 @@ pub fn run() {
             commands::permission_status,
             commands::request_microphone,
             commands::request_accessibility,
+            commands::repair_accessibility,
             commands::set_app_icon,
             commands::restart_app,
             commands::insert_mark,

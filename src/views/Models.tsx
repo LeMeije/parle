@@ -69,12 +69,13 @@ export default function ModelsView() {
                   {m.active && <span className="pill accent">Active</span>}
                 </div>
                 <div className="model-meta">
+                  <span className="pill">{m.backend}</span>
                   <span>{formatBytes(m.size_bytes)}</span>
                   <Rating icon={<Gauge size={13} />} label="speed" value={m.speed} />
                   <Rating icon={<Target size={13} />} label="accuracy" value={m.accuracy} />
                   {m.multilingual && (
                     <span className="model-langs">
-                      <Globe2 size={13} /> 99 languages
+                      <Globe2 size={13} /> {m.id.startsWith('parakeet') ? '25 languages' : '99 languages'}
                     </span>
                   )}
                 </div>
@@ -118,7 +119,7 @@ export default function ModelsView() {
         })}
       </div>
       <p className="hint">
-        If the active model fails to load (for example under memory pressure), EchoKey automatically falls
+        If the active model fails to load (for example under memory pressure), Parle automatically falls
         back down the ladder — your recording is never lost.
       </p>
     </div>

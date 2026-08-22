@@ -102,6 +102,7 @@ export interface HistoryItem {
 export interface ModelRow {
   id: string;
   display_name: string;
+  backend: string;
   size_bytes: number;
   speed: number;
   accuracy: number;
