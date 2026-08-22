@@ -1,4 +1,4 @@
-# EchoKey
+# Parle
 
 On-device AI dictation + unified transcription/clipboard history for macOS and
 Windows 11. Hold a key, speak, release — your words appear where your cursor
@@ -53,6 +53,9 @@ cargo test --workspace     # 74 tests incl. behavioural contract vectors
 Dev note: sign dev builds with one stable certificate or macOS TCC forgets the
 Accessibility grant on every rebuild — see HUMAN_TASKS.md §2.
 
+Internal crate names and the bundle identifier still read `echokey`, the
+project's original name; only the product name changed.
+
 ## Build (Windows)
 
 Status: code-complete against researched APIs but **not yet compiled on Windows** —
@@ -81,9 +84,14 @@ See docs/BENCHMARKS.md. Headline (MacBook Air-class M2, Metal): 10 s of live
 microphone audio transcribed in **382 ms** (base-q5_1, warm); 6.1 s fixture in
 **240 ms**. Idle footprint is the model + tens of MB — no bundled Chromium.
 
-## Licence notes
+## Licence
 
-EchoKey's cleanup-prompt design draws on freeflow (MIT, © 2026 Zach Latta) —
-see docs/research/. murmur-youtube informed platform lessons only (no licence,
-no code reused). LocalFlow's warmup/restore ideas were reimplemented clean-room
-(non-commercial licence, no code reused).
+MIT — see [LICENSE](LICENSE). Use it, modify it, ship it, commercially or not;
+just keep the copyright notice.
+
+Third-party work this builds on, and how each was used, is recorded in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). In short: Parle's cleanup
+contract references freeflow (MIT, © 2026 Zach Latta); murmur-youtube informed
+platform lessons only (no code reused); LocalFlow's warmup and clipboard-restore
+ideas were reimplemented clean-room. Model weights are downloaded at runtime
+under their own licences.
