@@ -46,6 +46,10 @@ pub fn model_path(models_dir: &Path, model: &ModelInfo) -> PathBuf {
 }
 
 pub fn is_downloaded(models_dir: &Path, model: &ModelInfo) -> bool {
+    // Archive models count as downloaded once EXTRACTED (tokens.txt present).
+    if let Some(dir) = crate::registry::extracted_dir(model) {
+        return models_dir.join(dir).join("tokens.txt").exists();
+    }
     model_path(models_dir, model)
         .metadata()
         .map(|m| plausible_size(m.len(), model.size_bytes))
@@ -132,11 +136,35 @@ pub fn download(
         return Err(DownloadError::SizeMismatch { expected: model.size_bytes, got });
     }
     std::fs::rename(&part_path, &final_path)?;
+
+    // Archive models: extract in place, then drop the archive.
+    #[cfg(feature = "parakeet")]
+    if crate::registry::extracted_dir(model).is_some() {
+        extract_tar_bz2(&final_path, models_dir)?;
+        let _ = std::fs::remove_file(&final_path);
+    }
+
     on_progress(DownloadProgress { model_id: model.id.to_string(), downloaded: got, total: got });
     Ok(final_path)
 }
 
+#[cfg(feature = "parakeet")]
+fn extract_tar_bz2(archive: &Path, into: &Path) -> Result<(), DownloadError> {
+    let file = std::fs::File::open(archive)?;
+    let decompressed = bzip2::read::BzDecoder::new(std::io::BufReader::new(file));
+    let mut tar = tar::Archive::new(decompressed);
+    // tar's unpack sanitises paths (no absolute/.. traversal).
+    tar.unpack(into)?;
+    Ok(())
+}
+
 pub fn delete(models_dir: &Path, model: &ModelInfo) -> std::io::Result<()> {
+    if let Some(dir) = crate::registry::extracted_dir(model) {
+        let d = models_dir.join(dir);
+        if d.exists() {
+            std::fs::remove_dir_all(&d)?;
+        }
+    }
     let p = model_path(models_dir, model);
     if p.exists() {
         std::fs::remove_file(&p)?;

@@ -6,6 +6,8 @@ pub mod manager;
 pub mod registry;
 #[cfg(feature = "whisper")]
 pub mod whisper;
+#[cfg(feature = "parakeet")]
+pub mod parakeet;
 
 use serde::{Deserialize, Serialize};
 

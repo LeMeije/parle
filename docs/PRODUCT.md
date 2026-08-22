@@ -119,8 +119,11 @@ merge-safe), model manager with measured auto-selection + retry-then-demote ladd
 fuzzy history palette (Enter pastes into previous app), clipboard capture with exclusions,
 4 palettes x light/dark, onboarding with download-error recovery, 15-min recording cap.
 
+SHIPPED 22/08: Parakeet TDT v3 engine (CPU int8, ~14x RT measured, 25 European languages),
+12-model whisper registry incl. Distil-Whisper v3.5.
+
 DEFERRED (tracked in HUMAN_TASKS.md / WINDOWS_HANDOFF.md): local-LLM cleanup tier (settings
-scaffolded), Parakeet engine, per-file model checksums, overlay position presets, per-app paste
+scaffolded), per-file model checksums, overlay position presets, per-app paste
 modes, encryption at rest, auto-updater (needs signing keys), selectable app icons, session-only
 retention, low-confidence span inline highlighting (count badge shipped), audio cues,
 voice commands beyond dictated punctuation, Windows first compile+verification.

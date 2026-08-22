@@ -17,6 +17,18 @@ Reproduce with `cargo run --release --example bench -p echokey-asr --features me
 | whisper-large-v3-turbo-q5_0 | meeting (5.3s) | 5.1 | 2690 | 2750 | 1.9x | 4/4 |
 | whisper-large-v3-turbo-q5_0 | email (30s) | 28.7 | 3111 | 3143 | 9.2x | 7/7 |
 
+### Parakeet TDT v3 int8 (CPU, sherpa-onnx — measured 22/08/2026)
+
+| model | fixture | audio_s | ms | xRT | notes |
+|---|---|---|---|---|---|
+| parakeet-tdt-v3-int8 | hello (6.1s) | 6.1 | 414 | 14.7x | perfect transcript |
+| parakeet-tdt-v3-int8 | meeting (5.3s) | 5.1 | 371 | 13.9x | perfect transcript |
+| parakeet-tdt-v3-int8 | email (30s) | 28.7 | 2108 | 13.6x | perfect transcript, load 876 ms |
+
+Parakeet on CPU beats whisper-small on Metal for speed at comparable accuracy,
+leaves the GPU free, and covers 25 European languages (no ja/ko/zh/hi/ar —
+whisper stays the universal default).
+
 Live end-to-end (real microphone -> ordered pipeline -> resample -> Metal
 whisper, base-q5_1, warm): **10 s of speech transcribed in 382 ms**; 6.1 s
 fixture in 240 ms. Recording start latency is dominated by CoreAudio stream

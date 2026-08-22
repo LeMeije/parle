@@ -117,6 +117,15 @@ impl EngineManager {
                 Err(AsrError::EngineUnavailable("whisper feature disabled".into()))
             }
             registry::EngineKind::Parakeet => {
+                #[cfg(feature = "parakeet")]
+                {
+                    let dir = self
+                        .models_dir
+                        .join(registry::extracted_dir(info).unwrap_or(info.file_name));
+                    let engine = crate::parakeet::ParakeetEngine::load(&dir, info.id)?;
+                    Ok(Box::new(engine))
+                }
+                #[cfg(not(feature = "parakeet"))]
                 Err(AsrError::EngineUnavailable("parakeet backend not built (enable the `parakeet` feature)".into()))
             }
         }

@@ -88,10 +88,12 @@ cargo run --release --example bench -p echokey-asr --features cuda  # CUDA
 - Windows mic permission: `permission_status()` returns "unknown" — Settings
   app handles mic consent per-app on Win 11; wire
   `Windows.Media.Capture` permission check if worth it.
-- Parakeet backend (`echokey-asr` feature `parakeet`, sherpa-onnx crate) is
-  scaffolded but not implemented — optional speed path, CPU int8
-  (~30-40x RT expected on the HX 370). Registry entries + engine impl needed.
-  sherpa gotchas already documented in docs/research/ASR.md.
+- Parakeet backend is IMPLEMENTED and measured on macOS (~14x RT on M2 CPU,
+  parakeet.rs; feature `parakeet`, enabled in the app). On Windows the
+  sherpa-onnx crate's build script downloads prebuilt libs at build time
+  (network needed during build, or set SHERPA_ONNX_LIB_DIR). Expect
+  ~25-40x RT on the HX 370 CPU. Verify download+tar.bz2 extraction into
+  %LOCALAPPDATA%\EchoKey\models and a full dictation with the model selected.
 - Installer: `npm run tauri build` produces NSIS .exe (per-user). MSI via
   `--bundles msi`. Test the NSIS one first.
 - The G14 has an OLED HDR display — check HUD transparency renders correctly.

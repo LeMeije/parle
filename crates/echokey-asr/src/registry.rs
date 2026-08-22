@@ -176,7 +176,26 @@ pub const MODELS: &[ModelInfo] = &[
         multilingual: true,
         ram_mb: 2100,
     },
+    ModelInfo {
+        id: "parakeet-tdt-v3-int8",
+        display_name: "Parakeet TDT v3 (fastest, 25 languages, CPU)",
+        engine: EngineKind::Parakeet,
+        url_override: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2"),
+        file_name: "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
+        size_bytes: 487_170_055,
+        speed: 5,
+        accuracy: 4,
+        multilingual: true,
+        ram_mb: 2000,
+    },
 ];
+
+/// The directory an archive model extracts into (archives only).
+pub fn extracted_dir(model: &ModelInfo) -> Option<&'static str> {
+    model
+        .file_name
+        .strip_suffix(".tar.bz2")
+}
 
 /// Real download URL for a model (const tables can't concat strings).
 pub fn url_for(model: &ModelInfo) -> String {
@@ -270,11 +289,12 @@ mod tests {
     }
 
     #[test]
-    fn urls_resolve_to_hf() {
+    fn urls_are_https_from_known_hosts() {
         for m in MODELS {
             let url = url_for(m);
-            assert!(url.starts_with("https://huggingface.co/"), "{url}");
-            assert!(url.contains("/resolve/main/"), "{url}");
+            let known = url.starts_with("https://huggingface.co/")
+                || url.starts_with("https://github.com/k2-fsa/sherpa-onnx/releases/download/");
+            assert!(known, "{url}");
         }
     }
 

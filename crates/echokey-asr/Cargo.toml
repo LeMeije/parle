@@ -12,8 +12,8 @@ whisper = ["dep:whisper-rs"]
 metal = ["whisper-rs/metal"]
 cuda = ["whisper-rs/cuda"]
 # Parakeet via the official sherpa-onnx crate. Off by default: its build script
-# fetches prebuilt libs unless SHERPA_ONNX_LIB_DIR is set. Enable on Windows.
-parakeet = []
+# fetches prebuilt libs unless SHERPA_ONNX_LIB_DIR is set (cache in CI).
+parakeet = ["dep:sherpa-onnx", "dep:tar", "dep:bzip2"]
 
 [dependencies]
 serde = { workspace = true }
@@ -22,6 +22,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 whisper-rs = { version = "0.16", optional = true }
+sherpa-onnx = { version = "1.13", optional = true }
+tar = { version = "0.4", optional = true }
+bzip2 = { version = "0.5", optional = true }
 ureq = "2"
 
 [dev-dependencies]

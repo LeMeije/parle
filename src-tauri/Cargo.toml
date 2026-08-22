@@ -36,7 +36,7 @@ echokey-core = { path = "../crates/echokey-core" }
 echokey-audio = { path = "../crates/echokey-audio" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-echokey-asr = { path = "../crates/echokey-asr", features = ["metal"] }
+echokey-asr = { path = "../crates/echokey-asr", features = ["metal", "parakeet"] }
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }
 window-vibrancy = "0.8"
 core-graphics = "0.24"
