@@ -148,13 +148,31 @@ fn capture_previous_app(app: &AppHandle) {
     }
 }
 
+/// While the main window is visible the app behaves like a normal app
+/// (Dock tile, Cmd+Tab entry); hidden again = menu-bar-only.
+fn set_regular(app: &AppHandle, regular: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        let policy = if regular {
+            tauri::ActivationPolicy::Regular
+        } else {
+            tauri::ActivationPolicy::Accessory
+        };
+        let _ = app.set_activation_policy(policy);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, regular);
+}
+
 /// The history palette is the main window pre-focused on search.
 pub fn toggle_palette(app: &AppHandle) {
     if let Some(main) = app.get_webview_window(MAIN_LABEL) {
         if main.is_visible().unwrap_or(false) && main.is_focused().unwrap_or(false) {
             let _ = main.hide();
+            set_regular(app, false);
         } else {
             capture_previous_app(app);
+            set_regular(app, true);
             let _ = main.show();
             let _ = main.set_focus();
             let _ = main.emit("focus-palette", ());
@@ -164,6 +182,7 @@ pub fn toggle_palette(app: &AppHandle) {
 
 pub fn show_main(app: &AppHandle) {
     capture_previous_app(app);
+    set_regular(app, true);
     if let Some(main) = app.get_webview_window(MAIN_LABEL) {
         let _ = main.show();
         let _ = main.set_focus();

@@ -133,9 +133,14 @@ pub fn run() {
                     .prune(s.history.retention_days, s.history.max_items);
             }
 
-            // macOS: menu bar app — hide dock icon once onboarded.
-            #[cfg(target_os = "macos")]
+            // Onboarded launches start quietly in the menu bar (no window, no
+            // Dock tile). The Dock/Cmd-Tab presence follows the main window:
+            // Regular while it's visible, Accessory when hidden (see hud.rs).
             if state.settings.lock().onboarding_complete {
+                if let Some(main) = handle.get_webview_window(hud::MAIN_LABEL) {
+                    let _ = main.hide();
+                }
+                #[cfg(target_os = "macos")]
                 let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
 
@@ -147,6 +152,11 @@ pub fn run() {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();
+                    // Window gone -> back to menu-bar-only (out of Cmd+Tab/Dock).
+                    #[cfg(target_os = "macos")]
+                    let _ = window
+                        .app_handle()
+                        .set_activation_policy(tauri::ActivationPolicy::Accessory);
                 }
             }
         })
@@ -176,7 +186,12 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .build()?;
 
     TrayIconBuilder::with_id("echokey-tray")
-        .icon(app.default_window_icon().unwrap().clone())
+        // Menu-bar template glyph (alpha-only); the full-colour app icon reads
+        // as a solid white square in template mode.
+        .icon(
+            tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))
+                .unwrap_or_else(|_| app.default_window_icon().unwrap().clone()),
+        )
         .icon_as_template(true)
         .menu(&menu)
         .show_menu_on_left_click(true)
