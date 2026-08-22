@@ -82,7 +82,7 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand">
           <img className="brand-mark-img" src={appIcon} alt="" draggable={false} />
-          <span>EchoKey</span>
+          <span>parle</span>
         </div>
         <nav>
           <NavItem icon={<HistoryIcon size={17} />} label="History" active={tab === 'history'} onClick={() => setTab('history')} />

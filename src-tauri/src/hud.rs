@@ -82,7 +82,7 @@ pub fn create_hud(app: &AppHandle) -> tauri::Result<()> {
     let y = screen_h / scale - HUD_HEIGHT - 56.0;
 
     let window = WebviewWindowBuilder::new(app, HUD_LABEL, WebviewUrl::App("index.html#/hud".into()))
-        .title("EchoKey HUD")
+        .title("Parle HUD")
         .inner_size(HUD_WIDTH, HUD_HEIGHT)
         .position(x, y)
         .resizable(false)

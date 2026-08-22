@@ -150,13 +150,13 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running EchoKey");
+        .expect("error while running Parle");
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItemBuilder::with_id("open", "Open EchoKey").build(app)?;
+    let open = MenuItemBuilder::with_id("open", "Open Parle").build(app)?;
     let toggle = MenuItemBuilder::with_id("toggle", "Start dictation").build(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Quit EchoKey").build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "Quit Parle").build(app)?;
     let menu = MenuBuilder::new(app)
         .item(&open)
         .item(&toggle)

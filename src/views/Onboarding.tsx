@@ -35,7 +35,7 @@ function Welcome({ onNext }: { onNext: () => void }) {
       <div className="ob-icon">
         <Mic size={30} strokeWidth={2} />
       </div>
-      <h1>Welcome to EchoKey</h1>
+      <h1>Welcome to Parle</h1>
       <p>
         Hold a key, speak, release — your words appear where your cursor is. Transcription runs entirely
         on this device. Nothing you say ever leaves it.
@@ -70,7 +70,7 @@ function Permissions({ onNext }: { onNext: () => void }) {
         <ShieldCheck size={30} strokeWidth={2} />
       </div>
       <h1>Permissions</h1>
-      <p>EchoKey needs two grants to hear you and type for you. Both stay on this machine.</p>
+      <p>Parle needs two grants to hear you and type for you. Both stay on this machine.</p>
       <div className="ob-perms">
         <PermRow
           ok={micOk}
@@ -91,8 +91,8 @@ function Permissions({ onNext }: { onNext: () => void }) {
       </div>
       {IS_MAC && !axOk && (
         <p className="ob-note">
-          In System Settings, add <strong>EchoKey</strong> under Privacy &amp; Security → Accessibility, then
-          come back — this page updates by itself. A restart of EchoKey may be needed after granting.
+          In System Settings, add <strong>Parle</strong> under Privacy &amp; Security → Accessibility, then
+          come back — this page updates by itself. A restart of Parle may be needed after granting.
         </p>
       )}
       <button className="btn primary" disabled={!allOk} onClick={onNext}>
@@ -221,7 +221,7 @@ function HotkeyStep({ onNext }: { onNext: () => void }) {
       ) : (
         <p>
           Default: <strong>Right Ctrl</strong>. Hold it and talk, release to paste — or tap it quickly to
-          latch recording on. Have a Copilot key? Bind it in Settings → Hotkeys and EchoKey will take it
+          latch recording on. Have a Copilot key? Bind it in Settings → Hotkeys and Parle will take it
           over completely.
         </p>
       )}

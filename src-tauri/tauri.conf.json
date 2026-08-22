@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "EchoKey",
+  "productName": "Parle",
   "version": "0.1.0",
   "identifier": "com.novaire.echokey",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "EchoKey",
+        "title": "Parle",
         "width": 980,
         "height": 700,
         "minWidth": 720,

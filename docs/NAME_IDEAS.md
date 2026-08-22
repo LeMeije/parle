@@ -1,3 +1,13 @@
+# Name: PARLE (chosen 22/08/2026)
+
+Display name is now **Parle** (in-app wordmark lowercase `parle`). French: "speak".
+Collision check: no voice/dictation product named Parle; Parle Products (biscuits, India)
+is a different industry/class; Parler (social) is a one-letter neighbour, noted.
+Bundle id stays `com.novaire.echokey` and internal crate/repo names stay echokey —
+display-only rename, everything reversible in minutes.
+
+---
+
 # Name explorations (nothing changed in the product)
 
 Context: "EchoKey" works but the capital K grates. Ben's brands trend lowercase

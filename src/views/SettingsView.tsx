@@ -11,7 +11,7 @@ import iconEchoRings from '../assets/icons/echo-rings.png';
 import iconCassette from '../assets/icons/cassette.png';
 
 const APP_ICONS: [string, string, string][] = [
-  ['default', iconDefault, 'EchoKey'],
+  ['default', iconDefault, 'Parle'],
   ['keycap', iconKeycap, 'Keycap'],
   ['waveform', iconWaveform, 'Waveform'],
   ['echo-rings', iconEchoRings, 'Echo rings'],
@@ -265,7 +265,7 @@ export default function SettingsView({
         {needsRestart && (
           <div className="callout warn">
             Icon updated. Restart to refresh the Finder and Dock icon.{' '}
-            <button onClick={() => api.restartApp()}>Restart EchoKey</button>
+            <button onClick={() => api.restartApp()}>Restart Parle</button>
           </div>
         )}
         <Field label="Overlay style" hint="Cassette pairs beautifully with the Retro palette">
@@ -346,7 +346,7 @@ export default function SettingsView({
       </Section>
 
       <footer className="settings-footer">
-        EchoKey · on-device dictation · <span className="faint">nothing ever leaves this machine</span>
+        parle · on-device dictation · <span className="faint">nothing ever leaves this machine</span>
       </footer>
     </div>
   );
