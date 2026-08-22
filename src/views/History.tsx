@@ -136,41 +136,42 @@ export default function HistoryView() {
               ) : (
                 <div className="row-text">{item.text}</div>
               )}
-              <div className="row-meta">
-                <span>{timeAgo(item.created_at)}</span>
-                {item.app_name && <span>· {item.app_name}</span>}
-                {item.duration_ms != null && <span>· {(item.duration_ms / 1000).toFixed(1)}s</span>}
-                {item.model_id && <span>· {shortModel(item.model_id)}</span>}
-                {item.language && item.kind === 'transcription' && (
-                  <span className="badge badge-lang">{item.language}</span>
-                )}
-                <TrimBadge item={item} onRestored={refresh} />
+              <div className="row-footer">
+                <div className="row-meta">
+                  <span>{timeAgo(item.created_at)}</span>
+                  {item.app_name && <span>· {item.app_name}</span>}
+                  {item.duration_ms != null && <span>· {(item.duration_ms / 1000).toFixed(1)}s</span>}
+                  {item.model_id && <span>· {shortModel(item.model_id)}</span>}
+                  {item.language && item.kind === 'transcription' && (
+                    <span className="badge badge-lang">{item.language}</span>
+                  )}
+                  <TrimBadge item={item} onRestored={refresh} />
+                </div>
+                <div className="row-actions">
+                  <button className="cta" title="Paste into the previous app (Enter)" onClick={(e) => { e.stopPropagation(); api.pasteItem(item.id); }}>
+                    <CornerDownLeft size={14} /> Paste
+                  </button>
+                  <button className="cta" title="Copy (⌘Enter)" onClick={(e) => { e.stopPropagation(); api.copyItem(item.id); }}>
+                    <Copy size={14} /> Copy
+                  </button>
+                  <button
+                    title="Edit (feeds auto-learn)"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEditing(item.id);
+                      setEditText(item.text);
+                    }}
+                  >
+                    <Pencil size={14} />
+                  </button>
+                  <button title={item.pinned ? 'Unpin' : 'Pin'} onClick={(e) => { e.stopPropagation(); api.pinItem(item.id, !item.pinned).then(refresh); }}>
+                    {item.pinned ? <PinOff size={14} /> : <Pin size={14} />}
+                  </button>
+                  <button className="danger" title="Delete" onClick={(e) => { e.stopPropagation(); api.deleteItem(item.id).then(refresh); }}>
+                    <Trash2 size={14} />
+                  </button>
+                </div>
               </div>
-            </div>
-            <div className="row-actions">
-              <button className="primary" title="Paste into the previous app (Enter)" onClick={(e) => { e.stopPropagation(); api.pasteItem(item.id); }}>
-                <CornerDownLeft size={15} />
-              </button>
-              <button className="primary" title="Copy (⌘Enter)" onClick={(e) => { e.stopPropagation(); api.copyItem(item.id); }}>
-                <Copy size={15} />
-              </button>
-              <button
-                title="Edit (feeds auto-learn)"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setEditing(item.id);
-                  setEditText(item.text);
-                }}
-              >
-                <Pencil size={14} />
-              </button>
-              <button title={item.pinned ? 'Unpin' : 'Pin'} onClick={(e) => { e.stopPropagation(); api.pinItem(item.id, !item.pinned).then(refresh); }}>
-                {item.pinned ? <PinOff size={14} /> : <Pin size={14} />}
-              </button>
-              <button className="danger" title="Delete" onClick={(e) => { e.stopPropagation(); api.deleteItem(item.id).then(refresh); }}>
-                <Trash2 size={14} />
-              </button>
-            </div>
           </div>
         ))}
       </div>
