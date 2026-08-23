@@ -1156,6 +1156,7 @@ dependencies = [
  "echokey-asr",
  "echokey-audio",
  "echokey-core",
+ "echokey-hook",
  "libc",
  "objc2",
  "objc2-app-kit",
@@ -1229,6 +1230,14 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "uuid",
+]
+
+[[package]]
+name = "echokey-hook"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "windows 0.58.0",
 ]
 
 [[package]]

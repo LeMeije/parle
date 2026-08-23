@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["src-tauri", "crates/echokey-core", "crates/echokey-audio", "crates/echokey-asr"]
+members = [
+    "src-tauri",
+    "crates/echokey-core",
+    "crates/echokey-audio",
+    "crates/echokey-asr",
+    "crates/echokey-hook",
+]
 
 [workspace.package]
 version = "0.1.0"
