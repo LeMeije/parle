@@ -1,0 +1,30 @@
+[package]
+name = "echokey-sync"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "EchoKey sync: LAN discovery, SPAKE2 pairing, Noise sessions and the replication wire format"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+# LAN discovery (_echokey._tcp).
+mdns-sd = "0.21"
+# PAKE over the 6-digit pairing code.
+spake2 = { version = "0.4", features = ["std"] }
+# Noise transport for paired sessions.
+snow = "0.10"
+# Key-confirmation MACs + the pairing KDF. Versions chosen to match what
+# spake2/snow already pull in, so no extra copies land in the tree.
+hmac = "0.12"
+sha2 = "0.10"
+# Constant-time comparison of the pairing confirmation tags.
+subtle = "2"
+# 6-digit pairing codes from the OS CSPRNG.
+getrandom = "0.4"
+

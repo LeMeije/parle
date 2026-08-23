@@ -6,6 +6,7 @@ members = [
     "crates/echokey-audio",
     "crates/echokey-asr",
     "crates/echokey-hook",
+    "crates/echokey-sync",
 ]
 
 [workspace.package]
