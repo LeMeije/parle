@@ -108,6 +108,19 @@ pub fn create_hud(app: &AppHandle) -> tauri::Result<()> {
 
 /// Show/hide the HUD in lockstep with pipeline state, never taking focus.
 pub fn sync_hud(app: &AppHandle, state: PipelineState) {
+    // Tray badge follows capture only: once we are transcribing the mic is no
+    // longer live, and a dot that lingers would misreport that.
+    if let Some(tray) = app.tray_by_id("echokey-tray") {
+        let recording = matches!(state, PipelineState::Recording);
+        let style = crate::tray_style_of(app);
+        let style = style.as_str();
+        let _ = tray.set_icon(Some(crate::tray_icon_for(style, recording)));
+        // set_icon resets the template flag on macOS; re-assert it, but only
+        // for styles that actually are templates — a coloured asset tinted as a
+        // template would come out as a silhouette.
+        #[cfg(target_os = "macos")]
+        let _ = tray.set_icon_as_template(crate::tray_is_template(style));
+    }
     let Some(hud) = app.get_webview_window(HUD_LABEL) else {
         return;
     };

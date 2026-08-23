@@ -3,6 +3,7 @@
 //! post-download sanity check.
 
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -249,7 +250,21 @@ pub fn recommend(profile: &MachineProfile) -> (&'static str, Vec<&'static str>) 
     (default, chain)
 }
 
+/// Real RAM, published by the app at startup on platforms where detecting it
+/// needs OS APIs this crate deliberately doesn't depend on (Windows). Zero
+/// means "not published yet"; the per-platform fallback below is used instead.
+static DETECTED_RAM_MB: AtomicU64 = AtomicU64::new(0);
+
+/// Publish the true installed RAM. Call once, early, before `detect_machine()`.
+pub fn set_total_ram_mb(mb: u64) {
+    DETECTED_RAM_MB.store(mb, Ordering::Relaxed);
+}
+
 fn total_ram_mb() -> u64 {
+    let published = DETECTED_RAM_MB.load(Ordering::Relaxed);
+    if published > 0 {
+        return published;
+    }
     #[cfg(target_os = "macos")]
     {
         // sysctl hw.memsize
@@ -267,7 +282,7 @@ fn total_ram_mb() -> u64 {
     {
         // GlobalMemoryStatusEx via the windows crate lives in the app crate; a
         // conservative default here keeps this crate dependency-light. The app
-        // overrides with the real value before calling recommend().
+        // publishes the real value through set_total_ram_mb() at startup.
         16_384
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -296,6 +311,16 @@ mod tests {
                 || url.starts_with("https://github.com/k2-fsa/sherpa-onnx/releases/download/");
             assert!(known, "{url}");
         }
+    }
+
+    #[test]
+    fn published_ram_overrides_platform_fallback() {
+        // The Windows fallback is a hardcoded 16 GB guess; publishing the real
+        // value must win, so small-RAM machines aren't handed a model too big
+        // for them.
+        set_total_ram_mb(8_192);
+        assert_eq!(detect_machine().total_ram_mb, 8_192);
+        set_total_ram_mb(0); // reset: the static is process-global
     }
 
     #[test]

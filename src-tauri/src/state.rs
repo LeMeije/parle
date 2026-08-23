@@ -108,7 +108,12 @@ impl AppState {
                             Work::Run(job) => job(),
                             Work::Prewarm(app) => {
                                 let state = app.state::<Arc<AppState>>();
+                                // Never at the expense of the hotkey hook.
+                                #[cfg(target_os = "windows")]
+                                crate::platform::windows::set_background_priority(true);
                                 let loaded = state.engine.lock().prewarm();
+                                #[cfg(target_os = "windows")]
+                                crate::platform::windows::set_background_priority(false);
                                 match loaded {
                                     Ok(id) => {
                                         tracing::info!("prewarmed model {id}");
@@ -219,27 +224,7 @@ impl AppState {
     /// DoubleTap bindings are watch-only: the key keeps its normal system
     /// behaviour (that's the whole point of the mode).
     pub fn native_bindings(&self) -> NativeBindings {
-        use echokey_core::settings::HotkeyMode;
-        let s = self.settings.lock();
-        let parse = |b: &echokey_core::settings::HotkeyBinding| {
-            if b.enabled {
-                NativeKey::parse(&b.key).map(|key| platform::WatchedKey {
-                    key,
-                    swallow: b.mode != HotkeyMode::DoubleTap,
-                })
-            } else {
-                None
-            }
-        };
-        NativeBindings {
-            dictation: parse(&s.hotkeys.dictation),
-            dictation_alt: parse(&s.hotkeys.dictation_alt),
-            cancel: if s.hotkeys.cancel.enabled {
-                NativeKey::parse(&s.hotkeys.cancel.key)
-            } else {
-                None
-            },
-        }
+        bindings_from(&self.settings.lock())
     }
 
     /// Arm the native hotkey listener if it isn't running yet (called after
@@ -269,6 +254,17 @@ impl AppState {
     /// (Re)apply settings: gestures, native bindings, clipboard monitor.
     pub fn apply_settings(&self, _app: &AppHandle) {
         let s = self.settings.lock().clone();
+        // Tray style is a live setting: repaint it now rather than at next launch.
+        {
+            use tauri::Manager;
+            if let Some(tray) = _app.tray_by_id("echokey-tray") {
+                let style = s.appearance.tray_style.as_str();
+                let recording = self.recording_flag.load(Ordering::SeqCst);
+                let _ = tray.set_icon(Some(crate::tray_icon_for(style, recording)));
+                #[cfg(target_os = "macos")]
+                let _ = tray.set_icon_as_template(crate::tray_is_template(style));
+            }
+        }
         // Never reset an ACTIVE gesture (a settings write mid-hold would orphan
         // the recording: the release event would arrive in Idle and do nothing).
         {
@@ -341,6 +337,7 @@ impl AppState {
                 } else {
                     self.gesture_alt.lock().on_key(phase, now)
                 };
+                tracing::info!("hotkey {id:?} {phase:?} -> {action:?}");
                 match action {
                     GestureAction::StartRecording => self.pipeline_start(),
                     GestureAction::StopRecording => self.pipeline_stop(),
@@ -366,4 +363,29 @@ pub fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Native bindings straight from settings. Free-standing so the hotkey hook can
+/// be armed at process start, before AppState (and its window/DB setup) exists.
+pub fn bindings_from(s: &echokey_core::settings::Settings) -> NativeBindings {
+    use echokey_core::settings::HotkeyMode;
+    let parse = |b: &echokey_core::settings::HotkeyBinding| {
+        if b.enabled {
+            NativeKey::parse(&b.key).map(|key| platform::WatchedKey {
+                key,
+                swallow: b.mode != HotkeyMode::DoubleTap,
+            })
+        } else {
+            None
+        }
+    };
+    NativeBindings {
+        dictation: parse(&s.hotkeys.dictation),
+        dictation_alt: parse(&s.hotkeys.dictation_alt),
+        cancel: if s.hotkeys.cancel.enabled {
+            NativeKey::parse(&s.hotkeys.cancel.key)
+        } else {
+            None
+        },
+    }
 }

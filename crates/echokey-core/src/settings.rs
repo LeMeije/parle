@@ -199,7 +199,10 @@ impl Default for HotkeySettings {
                 mode: HotkeyMode::Toggle,
                 enabled: true,
             },
-            cancel: HotkeyBinding { key: "Escape".into(), mode: HotkeyMode::Toggle, enabled: true },
+            // Off by default: Escape is pressed constantly for unrelated reasons
+            // (dismissing a dialog, another window), and losing a take you have
+            // already spoken is far worse than having to stop with the hotkey.
+            cancel: HotkeyBinding { key: "Escape".into(), mode: HotkeyMode::Toggle, enabled: false },
             latch_ms: 450,
             suppress_copilot: true,
         }
@@ -238,6 +241,20 @@ impl Default for DictionarySettings {
     }
 }
 
+
+/// Default tray style per platform. macOS menu bars expect a monochrome
+/// template the OS tints itself; Windows tints nothing, so the filled blue
+/// badge is the only style that reads on either taskbar without the user
+/// having to pick. "auto" remains selectable — it follows the taskbar theme
+/// with the monochrome pair.
+pub fn default_tray_style() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "template"
+    } else {
+        "badge"
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppearanceSettings {
@@ -249,6 +266,11 @@ pub struct AppearanceSettings {
     pub accent: String,
     /// App icon id.
     pub app_icon: String,
+    /// Tray / menu-bar icon style:
+    /// "auto" (follow the taskbar theme, Windows) | "badge" | "light" | "dark"
+    /// | "color" | "template" (monochrome, macOS). On macOS "auto" is treated
+    /// as "template".
+    pub tray_style: String,
     pub reduce_motion: bool,
 }
 
@@ -259,6 +281,7 @@ impl Default for AppearanceSettings {
             palette: "paper".into(),
             accent: "#2b5cff".into(),
             app_icon: "default".into(),
+            tray_style: default_tray_style().into(),
             reduce_motion: false,
         }
     }
@@ -325,7 +348,7 @@ impl Default for AudioSettings {
 pub struct OverlaySettings {
     /// "bottom-center" | "bottom-right" | "top-center" | "near-cursor"
     pub position: String,
-    /// "pill" | "cassette" (retro) | "minimal"
+    /// "pill" | "cassette" (retro) | "metal" | "minimal"
     pub style: String,
     pub show_partial_text: bool,
 }

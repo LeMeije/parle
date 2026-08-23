@@ -432,12 +432,12 @@ pub fn pipeline_state(state: State<'_, Arc<AppState>>) -> &'static str {
 
 #[tauri::command]
 pub fn open_permission_settings(which: String) {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     match which.as_str() {
         "microphone" => platform::imp::open_microphone_settings(),
         _ => platform::imp::open_accessibility_settings(),
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = which;
 }
 

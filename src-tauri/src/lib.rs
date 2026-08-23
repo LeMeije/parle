@@ -15,13 +15,79 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Where the app writes its log. Same directory as settings/history.
+fn log_path() -> Option<std::path::PathBuf> {
+    let dir = dirs_next_local()?.join("EchoKey");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("parle.log"))
+}
+
+#[cfg(target_os = "windows")]
+fn dirs_next_local() -> Option<std::path::PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
+}
+#[cfg(not(target_os = "windows"))]
+fn dirs_next_local() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Library/Application Support"))
+}
+
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "echokey=info,echokey_lib=info,echokey_core=info,echokey_audio=info,echokey_asr=info".into()),
-        )
-        .init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "echokey=info,echokey_lib=info,echokey_core=info,echokey_audio=info,echokey_asr=info".into());
+    // Release builds are GUI-subsystem: stdout goes nowhere, so without this the
+    // app has no diagnostics at all on an installed machine. Truncated per run.
+    match log_path().and_then(|p| std::fs::File::create(p).ok()) {
+        Some(f) => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(f))
+            .init(),
+        None => tracing_subscriber::fmt().with_env_filter(filter).init(),
+    }
+
+    // Publish real RAM to the model registry before anything asks it for a
+    // recommendation; its Windows fallback is a conservative 16 GB guess.
+    #[cfg(target_os = "windows")]
+    if let Some(mb) = platform::windows::total_ram_mb() {
+        echokey_asr::registry::set_total_ram_mb(mb);
+        tracing::info!("detected {mb} MB RAM");
+    }
+
+    // The Copilot key must never reach the shell — a stray Copilot window
+    // stealing focus mid-dictation is exactly what the hook exists to prevent.
+    // Arming inside setup() left a ~0.9 s gap after process start (window and
+    // tray creation) in which presses fell through and launched Copilot, so the
+    // hook goes up here instead: settings are read straight from disk, before
+    // any Tauri initialisation. Recording itself needs no model, so a press
+    // during prewarm still starts a recording normally.
+    // Parle lives in the tray with no visible window, which makes it a
+    // throttling candidate; a throttled hook misses keys. Do this before the
+    // hook goes up.
+    #[cfg(target_os = "windows")]
+    platform::windows::disable_power_throttling();
+
+    // Bounded and pre-allocated: the keyboard hook sends from inside its proc,
+    // where an allocating send can overrun LowLevelHooksTimeout and cost a
+    // keypress. Capacity is far beyond any real burst of hotkey/clipboard events.
+    let (platform_tx, platform_rx) =
+        crossbeam_channel::bounded::<platform::PlatformEvent>(1024);
+    #[cfg(target_os = "windows")]
+    let early_hotkeys = {
+        let s = echokey_core::settings::Settings::load(&echokey_core::settings::settings_path())
+            .unwrap_or_default();
+        if s.onboarding_complete {
+            let bindings = state::bindings_from(&s);
+            tracing::info!("arming native hotkeys at startup: {bindings:?}");
+            Some(platform::windows::HotkeyListener::start(
+                bindings,
+                s.hotkeys.suppress_copilot,
+                platform_tx.clone(),
+            ))
+        } else {
+            tracing::info!("native hotkeys not armed (onboarding incomplete)");
+            None
+        }
+    };
 
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
@@ -75,16 +141,24 @@ pub fn run() {
             commands::recommended_setup,
             commands::complete_onboarding,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
             let state = AppState::new(&handle);
             app.manage(state.clone());
+
+            // Adopt the hook armed before Tauri started, so spawn_platform
+            // doesn't install a second one.
+            #[cfg(target_os = "windows")]
+            if let Some(listener) = early_hotkeys {
+                listener.update_bindings(state.native_bindings());
+                *state.hotkeys.lock() = Some(listener);
+            }
 
             if let Err(e) = hud::create_hud(&handle) {
                 tracing::error!("HUD creation failed (continuing without overlay): {e}");
             }
             setup_tray(&handle)?;
-            spawn_platform(&handle, state.clone());
+            spawn_platform(&handle, state.clone(), platform_tx, platform_rx);
             register_chord_shortcuts(&handle, &state);
 
             // Pre-warm the model so the first dictation is instant.
@@ -133,14 +207,18 @@ pub fn run() {
                     .prune(s.history.retention_days, s.history.max_items);
             }
 
-            // Onboarded launches start quietly in the menu bar (no window, no
-            // Dock tile). The Dock/Cmd-Tab presence follows the main window:
-            // Regular while it's visible, Accessory when hidden (see hud.rs).
+            // macOS: onboarded launches start quietly in the menu bar (no
+            // window, no Dock tile). The Dock/Cmd-Tab presence follows the main
+            // window: Regular while visible, Accessory when hidden (see hud.rs).
+            //
+            // Windows has no equivalent convention, and hiding a window that the
+            // config already created visible produces a show-then-hide flash on
+            // every launch. Leave it up; closing it sends the app to the tray.
+            #[cfg(target_os = "macos")]
             if state.settings.lock().onboarding_complete {
                 if let Some(main) = handle.get_webview_window(hud::MAIN_LABEL) {
                     let _ = main.hide();
                 }
-                #[cfg(target_os = "macos")]
                 let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
 
@@ -179,6 +257,87 @@ pub fn run() {
         });
 }
 
+/// Windows taskbar theme, for the "auto" tray style. `SystemUsesLightTheme`
+/// governs the taskbar and tray; `AppsUseLightTheme` governs app windows and is
+/// a different setting entirely.
+#[cfg(target_os = "windows")]
+fn taskbar_is_dark() -> bool {
+    use windows::core::w;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let mut val: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+            w!("SystemUsesLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut val as *mut u32 as *mut _),
+            Some(&mut size),
+        )
+    };
+    // Missing key means the Windows default: a dark taskbar.
+    if rc.is_ok() { val == 0 } else { true }
+}
+
+/// The tray image for a given style setting and recording state.
+///
+/// Styles: "auto" | "badge" | "light" | "dark" | "color" | "template".
+/// macOS uses a template image the OS inverts itself; Windows inverts nothing,
+/// which is why the filled blue badge (a miniature of the app icon) is the
+/// sane default there — it reads on either taskbar without a per-theme pair.
+pub(crate) fn tray_icon_for(style: &str, recording: bool) -> tauri::image::Image<'static> {
+    macro_rules! img {
+        ($idle:literal, $rec:literal) => {
+            tauri::image::Image::from_bytes(if recording {
+                include_bytes!($rec).as_slice()
+            } else {
+                include_bytes!($idle).as_slice()
+            })
+            .expect("tray icon decode")
+        };
+    }
+    match style {
+        "badge" => img!("../icons/tray-badge.png", "../icons/tray-badge-recording.png"),
+        "light" => img!("../icons/tray-light.png", "../icons/tray-light-recording.png"),
+        "dark" => img!("../icons/tray-dark.png", "../icons/tray-dark-recording.png"),
+        "color" => img!("../icons/tray-color.png", "../icons/tray-color-recording.png"),
+        "template" => img!("../icons/tray.png", "../icons/tray-recording.png"),
+        // "auto" and anything unrecognised.
+        _ => {
+            #[cfg(target_os = "macos")]
+            {
+                img!("../icons/tray.png", "../icons/tray-recording.png")
+            }
+            #[cfg(target_os = "windows")]
+            {
+                if taskbar_is_dark() {
+                    img!("../icons/tray-light.png", "../icons/tray-light-recording.png")
+                } else {
+                    img!("../icons/tray-dark.png", "../icons/tray-dark-recording.png")
+                }
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                img!("../icons/tray.png", "../icons/tray-recording.png")
+            }
+        }
+    }
+}
+
+/// The user's chosen tray style, or the platform default before settings load.
+pub(crate) fn tray_style_of(app: &AppHandle) -> String {
+    app.try_state::<Arc<AppState>>()
+        .map(|s| s.settings.lock().appearance.tray_style.clone())
+        .unwrap_or_else(|| echokey_core::settings::default_tray_style().to_string())
+}
+
+/// Whether this style is a macOS template image (the OS tints it itself).
+pub(crate) fn tray_is_template(style: &str) -> bool {
+    matches!(style, "template") || (cfg!(target_os = "macos") && style == "auto")
+}
+
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItemBuilder::with_id("open", "Open Parle").build(app)?;
     let toggle = MenuItemBuilder::with_id("toggle", "Start dictation").build(app)?;
@@ -190,11 +349,15 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .item(&quit)
         .build()?;
 
+    let tray_style = tray_style_of(app);
+    let tray_style = tray_style.as_str();
     TrayIconBuilder::with_id("echokey-tray")
-        // Menu-bar template glyph (alpha-only); the full-colour app icon reads
-        // as a solid white square in template mode.
-        .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?)
-        .icon_as_template(true)
+        // Template mode is alpha-only: macOS discards the colours and tints the
+        // shape itself. Correct for the monochrome glyph, but it would flatten
+        // the colour badge into a solid silhouette — so only claim it when the
+        // chosen style really is a template.
+        .icon(tray_icon_for(tray_style, false))
+        .icon_as_template(tray_is_template(tray_style))
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(move |app, event| match event.id().as_ref() {
@@ -218,9 +381,12 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 /// Spawn the native listeners and the event dispatcher thread.
-fn spawn_platform(app: &AppHandle, state: Arc<AppState>) {
-    let (tx, rx) = crossbeam_channel::unbounded::<platform::PlatformEvent>();
-
+fn spawn_platform(
+    app: &AppHandle,
+    state: Arc<AppState>,
+    tx: crossbeam_channel::Sender<platform::PlatformEvent>,
+    rx: crossbeam_channel::Receiver<platform::PlatformEvent>,
+) {
     *state.platform_tx.lock() = Some(tx.clone());
     #[cfg(target_os = "macos")]
     {
@@ -239,7 +405,10 @@ fn spawn_platform(app: &AppHandle, state: Arc<AppState>) {
 
     #[cfg(target_os = "windows")]
     {
-        if state.settings.lock().onboarding_complete {
+        // Normally already armed at process start; this covers the case where
+        // onboarding completed during THIS run.
+        if state.hotkeys.lock().is_none() && state.settings.lock().onboarding_complete {
+            tracing::info!("arming native hotkeys late: {:?}", state.native_bindings());
             let listener = platform::windows::HotkeyListener::start(
                 state.native_bindings(),
                 state.settings.lock().hotkeys.suppress_copilot,

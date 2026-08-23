@@ -1,20 +1,25 @@
-//! Windows platform layer. WRITTEN ON macOS AGAINST THE RESEARCH SPEC
-//! (docs/research/PLATFORM.md) — NOT YET COMPILED ON WINDOWS. The first task in
-//! docs/WINDOWS_HANDOFF.md is to compile this and fix signature drift.
+//! Windows platform layer.
 //!
-//! Hotkeys: WH_KEYBOARD_LL hook on a dedicated thread with a message pump.
-//! Handles bare L/R modifiers and the Copilot key (LShift+LWin+VK_F23 chord or
-//! VK_LAUNCH_APP1), swallowing only our own bindings. The hook proc is
-//! allocation-free (the LowLevelHooksTimeout budget silently removes slow
-//! hooks); events are forwarded through a pre-allocated channel.
+//! Hotkeys: the WH_KEYBOARD_LL hook does NOT live here. It lives in the
+//! `parle-hook` helper process (crates/echokey-hook) and this module supervises
+//! it. A hook proc must return within LowLevelHooksTimeout (~300 ms) or Windows
+//! bypasses it and delivers the key natively — which for the Copilot chord
+//! means the shell launches Copilot. The proc is trivial, but its thread still
+//! has to be *scheduled*, and for ~5 s after launch this process is busy with
+//! Tauri, WebView2, a CUDA context and possibly a multi-GB model. Arming 6 ms
+//! into startup, THREAD_PRIORITY_HIGHEST, the EcoQoS opt-out and an
+//! allocation-free bounded channel were all tried; presses still leaked. Only
+//! taking the hook out of this process fixes it, so [`HotkeyListener`] is now a
+//! supervisor: it launches the helper, feeds it bindings over a named pipe,
+//! receives hotkey events back, restarts it if it dies, and holds it in a
+//! kill-on-close job object so it can never outlive us swallowing keys.
 //!
-//! Rules that are load-bearing (from the murmur teardown + research):
-//! - Never swallow a key-down but let its key-up escape (stuck-modifier bug).
-//! - After swallowing the Copilot F23 while LWin is down, inject a dummy
-//!   VK 0xFF event so Windows treats Win as "used as modifier" and does not
-//!   open the Start menu on release (PowerToys trick).
-//! - Skip events carrying LLKHF_INJECTED (our own synthetic input).
-//! - Injection is SendInput Ctrl+V; UI Automation cannot insert at the caret.
+//! The load-bearing hook rules (never split a swallow, the dummy-VK Start-menu
+//! trick, skipping LLKHF_INJECTED, an allocation-free proc) moved with the hook
+//! and are documented at its new home.
+//!
+//! Text injection, the clipboard monitor and overlay hardening stay here.
+//! Injection is SendInput Ctrl+V; UI Automation cannot insert at the caret.
 
 #![cfg(target_os = "windows")]
 
@@ -24,268 +29,462 @@ use super::{
 };
 use crate::hotkey_logic::KeyPhase;
 use crossbeam_channel::Sender;
+use echokey_hook as wire;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Arc;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
+use windows::Win32::Storage::FileSystem::{
+    ReadFile, WriteFile, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND,
+};
 use windows::Win32::System::DataExchange::{
     AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData,
     GetClipboardOwner, GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard,
     RegisterClipboardFormatW, SetClipboardData,
 };
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+    JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+    PIPE_TYPE_BYTE, PIPE_WAIT,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-    VK_CONTROL, VK_F23, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU,
-    VK_RSHIFT, VK_RWIN, VK_V,
+    VK_CONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RSHIFT, VK_RWIN, VK_V,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
-    WH_KEYBOARD_LL, WM_CLIPBOARDUPDATE, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
-};
+use windows::Win32::UI::WindowsAndMessaging::WM_CLIPBOARDUPDATE;
 
-const VK_LAUNCH_APP1: u32 = 0xB6;
-const VK_DUMMY: u16 = 0xFF;
+/// Both directions use fixed-size frames; these are the two buffer sizes for
+/// the pipe. Hotkey traffic is a handful of bytes per press.
+const PIPE_BUFFER: u32 = 4096;
 
-// The LL hook proc cannot carry a closure; state lives in statics.
-static HOOK_TX: Mutex<Option<Sender<PlatformEvent>>> = Mutex::new(None);
-static HOOK_BINDINGS: Mutex<NativeBindings> = Mutex::new(NativeBindings {
-    dictation: None,
-    dictation_alt: None,
-    cancel: None,
-});
-static RECORDING: AtomicBool = AtomicBool::new(false);
-static SUPPRESS_COPILOT: AtomicBool = AtomicBool::new(true);
-static LSHIFT_DOWN: AtomicBool = AtomicBool::new(false);
-static LWIN_DOWN: AtomicBool = AtomicBool::new(false);
-/// While > 0, we are swallowing the Copilot chord's F23 events.
-static COPILOT_ACTIVE: AtomicBool = AtomicBool::new(false);
+// -- Hotkeys: supervising the parle-hook helper -------------------------------
 
+/// Public shape unchanged from the in-process hook (start / update_bindings /
+/// set_suppress_copilot / set_recording) so state.rs and lib.rs are unaffected.
 pub struct HotkeyListener {
-    thread_id: Arc<AtomicU32>,
-    join: Option<std::thread::JoinHandle<()>>,
+    inner: Arc<Supervisor>,
+}
+
+struct Supervisor {
+    stop: AtomicBool,
+    /// Desired state. Re-sent in full every time a helper connects, so a
+    /// restarted helper always comes up matching the app.
+    bindings: Mutex<wire::WireBindings>,
+    suppress: AtomicBool,
+    recording: AtomicBool,
+    /// The connected pipe, as a raw HANDLE (HANDLE is not Sync). 0 = none.
+    pipe: AtomicIsize,
+    /// Guards `pipe` for the whole of a write, so the supervisor cannot close
+    /// the handle out from under a sender.
+    write_lock: Mutex<()>,
+    /// Kill-on-close job object owning the helper. If this process dies for any
+    /// reason — including the `libc::_exit(0)` on quit — the kernel closes this
+    /// handle and Windows kills the helper with it. An orphaned helper would go
+    /// on swallowing keys system-wide with nobody left to receive them.
+    job: AtomicIsize,
+    child: Mutex<Option<std::process::Child>>,
 }
 
 impl HotkeyListener {
-    pub fn start(bindings: NativeBindings, suppress_copilot: bool, tx: Sender<PlatformEvent>) -> Self {
-        *HOOK_TX.lock() = Some(tx);
-        *HOOK_BINDINGS.lock() = bindings;
-        SUPPRESS_COPILOT.store(suppress_copilot, Ordering::SeqCst);
-
-        let thread_id = Arc::new(AtomicU32::new(0));
-        let tid = thread_id.clone();
-        let join = std::thread::Builder::new()
-            .name("echokey-llhook".into())
-            .spawn(move || unsafe {
-                tid.store(windows::Win32::System::Threading::GetCurrentThreadId(), Ordering::SeqCst);
-                let hook: HHOOK = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_keyboard_proc), None, 0)
-                {
-                    Ok(h) => h,
-                    Err(e) => {
-                        tracing::error!("SetWindowsHookExW failed: {e}");
-                        return;
-                    }
-                };
-                tracing::info!("WH_KEYBOARD_LL hook installed");
-                // LL hooks require a message pump on the installing thread.
-                let mut msg = MSG::default();
-                while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-                let _ = UnhookWindowsHookEx(hook);
-            })
-            .expect("spawn hook thread");
-
-        Self { thread_id, join: Some(join) }
+    pub fn start(
+        bindings: NativeBindings,
+        suppress_copilot: bool,
+        tx: Sender<PlatformEvent>,
+    ) -> Self {
+        let inner = Arc::new(Supervisor {
+            stop: AtomicBool::new(false),
+            bindings: Mutex::new(to_wire(&bindings)),
+            suppress: AtomicBool::new(suppress_copilot),
+            recording: AtomicBool::new(false),
+            pipe: AtomicIsize::new(0),
+            write_lock: Mutex::new(()),
+            job: AtomicIsize::new(create_kill_on_close_job()),
+            child: Mutex::new(None),
+        });
+        let sup = inner.clone();
+        std::thread::Builder::new()
+            .name("echokey-hook-sup".into())
+            .spawn(move || sup.run(tx))
+            .expect("spawn hook supervisor");
+        Self { inner }
     }
 
     pub fn update_bindings(&self, bindings: NativeBindings) {
-        *HOOK_BINDINGS.lock() = bindings;
+        let w = to_wire(&bindings);
+        *self.inner.bindings.lock() = w;
+        self.inner.send(&w.encode());
     }
 
     pub fn set_suppress_copilot(&self, suppress: bool) {
-        SUPPRESS_COPILOT.store(suppress, Ordering::SeqCst);
+        self.inner.suppress.store(suppress, Ordering::SeqCst);
+        self.inner
+            .send(&wire::encode_flag(wire::CMD_SUPPRESS_COPILOT, suppress));
     }
 
     pub fn set_recording(&self, recording: bool) {
-        RECORDING.store(recording, Ordering::SeqCst);
+        self.inner.recording.store(recording, Ordering::SeqCst);
+        self.inner
+            .send(&wire::encode_flag(wire::CMD_RECORDING, recording));
     }
 }
 
 impl Drop for HotkeyListener {
     fn drop(&mut self) {
-        let tid = self.thread_id.load(Ordering::SeqCst);
-        if tid != 0 {
+        self.inner.stop.store(true, Ordering::SeqCst);
+        self.inner.kill_child();
+        // Closing the job kills anything still assigned to it — the belt to the
+        // kill_child braces.
+        let job = self.inner.job.swap(0, Ordering::SeqCst);
+        if job != 0 {
             unsafe {
-                let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
+                let _ = CloseHandle(HANDLE(job as *mut _));
             }
         }
-        if let Some(j) = self.join.take() {
-            let _ = j.join();
+        // The supervisor thread may be parked in ConnectNamedPipe waiting for a
+        // helper we just killed; it is left to be reaped at process exit. In
+        // practice this Drop only runs at teardown (quit goes through
+        // libc::_exit, which never runs it at all).
+    }
+}
+
+impl Supervisor {
+    fn run(self: Arc<Self>, tx: Sender<PlatformEvent>) {
+        let mut generation: u64 = 0;
+        let mut failures: u32 = 0;
+        while !self.stop.load(Ordering::SeqCst) {
+            generation += 1;
+            // Per-process, per-attempt: a stale helper can never attach to a
+            // fresh app, and a fresh helper can never land on a dead pipe.
+            let name = format!(
+                "{}{}-{}",
+                wire::PIPE_PREFIX,
+                std::process::id(),
+                generation
+            );
+            let started = std::time::Instant::now();
+            if let Err(e) = self.serve_once(&name, &tx) {
+                tracing::warn!("hook helper session ended: {e}");
+            }
+            self.kill_child();
+            if self.stop.load(Ordering::SeqCst) {
+                break;
+            }
+            // A helper that ran for a while and then died is worth restarting
+            // immediately-ish; one that dies on arrival is not worth spinning on.
+            if started.elapsed() >= std::time::Duration::from_secs(5) {
+                failures = 0;
+            } else {
+                failures = (failures + 1).min(5);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500 << failures));
+        }
+        tracing::info!("hook supervisor stopped");
+    }
+
+    /// One helper lifetime: create the pipe, launch the helper, hand it the
+    /// current state, then pump its events until the pipe breaks.
+    fn serve_once(&self, pipe_name: &str, tx: &Sender<PlatformEvent>) -> Result<(), String> {
+        // Two unidirectional pipes, NOT one duplex pipe. These handles are
+        // synchronous, and Windows serialises I/O per file object: the blocking
+        // ReadFile this thread parks in would stall every concurrent WriteFile
+        // on the same handle until a key arrives. That deadlocked the UI thread
+        // on startup. One handle, one direction.
+        let cmd = create_pipe(&format!("{pipe_name}-c"), PIPE_ACCESS_OUTBOUND)?;
+        let evt = match create_pipe(&format!("{pipe_name}-e"), PIPE_ACCESS_INBOUND) {
+            Ok(h) => h,
+            Err(e) => {
+                unsafe { let _ = CloseHandle(cmd); }
+                return Err(e);
+            }
+        };
+        let result = self.serve_connected(cmd, evt, pipe_name, tx);
+        unsafe { let _ = CloseHandle(evt); }
+        let server = cmd;
+        {
+            // Hold the write lock across the close so no sender can touch a
+            // handle that is being freed.
+            let _g = self.write_lock.lock();
+            self.pipe.store(0, Ordering::SeqCst);
+            unsafe {
+                let _ = CloseHandle(server);
+            }
+        }
+        result
+    }
+
+    fn serve_connected(
+        &self,
+        cmd: HANDLE,
+        evt: HANDLE,
+        pipe_name: &str,
+        tx: &Sender<PlatformEvent>,
+    ) -> Result<(), String> {
+        self.spawn_helper(pipe_name)?;
+        // Blocks until the helper connects. It does so within milliseconds:
+        // connecting is the first thing it does after arming the hook. The
+        // helper opens the command pipe first, so accept them in that order.
+        accept(cmd, "cmd")?;
+        accept(evt, "evt")?;
+        self.pipe.store(cmd.0 as isize, Ordering::SeqCst);
+        tracing::info!("hook helper connected");
+
+        // Full state, not a delta: the helper starts blank and a restart must
+        // not silently lose a binding.
+        let bindings = *self.bindings.lock();
+        self.send(&bindings.encode());
+        self.send(&wire::encode_flag(
+            wire::CMD_SUPPRESS_COPILOT,
+            self.suppress.load(Ordering::SeqCst),
+        ));
+        self.send(&wire::encode_flag(
+            wire::CMD_RECORDING,
+            self.recording.load(Ordering::SeqCst),
+        ));
+
+        let mut frame = [0u8; wire::EVENT_FRAME];
+        loop {
+            if !read_exact(evt, &mut frame) {
+                return Err("helper pipe closed".into());
+            }
+            if frame[0] != wire::EV_HOTKEY {
+                tracing::warn!("ignoring unknown event tag {:#04x}", frame[0]);
+                continue;
+            }
+            let (Some(id), Some(phase)) = (hotkey_from_wire(frame[1]), phase_from_wire(frame[2]))
+            else {
+                tracing::warn!("ignoring malformed hotkey event {frame:?}");
+                continue;
+            };
+            if tx.send(PlatformEvent::Hotkey { id, phase }).is_err() {
+                return Err("dispatcher gone".into());
+            }
+        }
+    }
+
+    fn spawn_helper(&self, pipe_name: &str) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::CommandExt;
+        /// No console window for a GUI app's helper.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        let exe = helper_path().ok_or_else(|| {
+            "parle-hook.exe not found next to the app binary; hotkeys are disabled".to_string()
+        })?;
+        let child = std::process::Command::new(&exe)
+            .arg("--pipe")
+            .arg(pipe_name)
+            .arg("--parent")
+            .arg(std::process::id().to_string())
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("could not launch {}: {e}", exe.display()))?;
+
+        let job = self.job.load(Ordering::SeqCst);
+        if job != 0 {
+            let h = HANDLE(child.as_raw_handle() as *mut _);
+            if let Err(e) = unsafe { AssignProcessToJobObject(HANDLE(job as *mut _), h) } {
+                // Not fatal: the helper also watches our pid and exits with us.
+                tracing::warn!("could not put the hook helper in the job object: {e}");
+            }
+        }
+        *self.child.lock() = Some(child);
+        tracing::info!("launched hook helper {}", exe.display());
+        Ok(())
+    }
+
+    fn kill_child(&self) {
+        if let Some(mut child) = self.child.lock().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    /// Send one command frame. Silently does nothing when no helper is
+    /// connected — the full state is re-sent on the next connect.
+    ///
+    /// Callers include the recording path, so this must not stall: it can only
+    /// block if the helper stops reading AND the pipe's 4 KB buffer (hundreds
+    /// of frames) fills, which means the helper is already wedged.
+    fn send(&self, frame: &[u8; wire::CMD_FRAME]) {
+        let _g = self.write_lock.lock();
+        let raw = self.pipe.load(Ordering::SeqCst);
+        if raw == 0 {
+            return;
+        }
+        if !write_all(HANDLE(raw as *mut _), frame) {
+            tracing::warn!("write to hook helper failed");
         }
     }
 }
 
-unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code < 0 {
-        return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
-    }
-    let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-    // Skip our own injected events (dummy key, Ctrl+V synthesis).
-    if info.flags.contains(LLKHF_INJECTED) {
-        return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
-    }
-    let vk = info.vkCode;
-    let is_down = wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN;
-    let is_up = wparam.0 as u32 == WM_KEYUP || wparam.0 as u32 == WM_SYSKEYUP;
-    if !is_down && !is_up {
-        return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
-    }
-    let phase = if is_down { KeyPhase::Down } else { KeyPhase::Up };
-
-    // Track chord modifiers.
-    if vk == VK_LSHIFT.0 as u32 {
-        LSHIFT_DOWN.store(is_down, Ordering::SeqCst);
-    }
-    if vk == VK_LWIN.0 as u32 {
-        LWIN_DOWN.store(is_down, Ordering::SeqCst);
-    }
-
-    // -- Copilot key: LShift+LWin+F23 chord (or discrete VK_LAUNCH_APP1). ----
-    let is_copilot_f23 = vk == VK_F23.0 as u32
-        && (COPILOT_ACTIVE.load(Ordering::SeqCst)
-            || (LSHIFT_DOWN.load(Ordering::SeqCst) && LWIN_DOWN.load(Ordering::SeqCst)));
-    let is_copilot_app1 = vk == VK_LAUNCH_APP1;
-    if is_copilot_f23 || is_copilot_app1 {
-        let bindings = HOOK_BINDINGS.lock();
-        let bound = binding_for(&bindings, &NativeKey::CopilotKey);
-        drop(bindings);
-        if let Some((id, swallow)) = bound {
-            if is_down && !COPILOT_ACTIVE.load(Ordering::SeqCst) {
-                COPILOT_ACTIVE.store(true, Ordering::SeqCst);
-                send_event(id, KeyPhase::Down);
-                if is_copilot_f23 && swallow {
-                    // Mark Win as "used as modifier" so releasing it doesn't
-                    // open the Start menu after we swallow F23.
-                    inject_dummy_key();
-                }
-            } else if is_up {
-                COPILOT_ACTIVE.store(false, Ordering::SeqCst);
-                send_event(id, KeyPhase::Up);
-            }
-            if swallow {
-                // Swallow BOTH down and up (never split a swallow).
-                return LRESULT(1);
-            }
-            return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
-        }
-        if SUPPRESS_COPILOT.load(Ordering::SeqCst) && is_copilot_f23 {
-            // Not bound but suppression requested: still swallow the launch.
-            if is_down {
-                inject_dummy_key();
-            }
-            return LRESULT(1);
-        }
-        return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
-    }
-
-    // -- Bare modifier bindings (L/R discriminated by vkCode). ---------------
-    if let Some(key) = vk_to_native(vk) {
-        let bindings = HOOK_BINDINGS.lock();
-        let bound = binding_for(&bindings, &key);
-        let cancel_bound = bindings.cancel.as_ref() == Some(&key);
-        drop(bindings);
-        if let Some((id, swallow)) = bound {
-            // Auto-repeat suppression for held modifiers: Windows repeats
-            // key-down; forward only transitions.
-            send_event(id, phase);
-            if swallow {
-                // Swallow the bare-modifier binding completely so it stops acting
-                // as a modifier while bound (both down and up — never split).
-                return LRESULT(1);
-            }
-            return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
-        }
-        if cancel_bound && RECORDING.load(Ordering::SeqCst) {
-            if is_down {
-                send_event_id(HotkeyId::Cancel, KeyPhase::Down);
-            }
-            return LRESULT(1);
+/// Where the helper lives. Tauri drops sidecars beside the app binary with the
+/// target triple stripped, and cargo puts every workspace binary in the same
+/// target directory, so in both installed and dev layouts it is simply "next to
+/// us". No path is hardcoded.
+fn helper_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    for name in [
+        "parle-hook.exe",
+        // Belt and braces if a bundle ever keeps the triple or the subfolder.
+        "parle-hook-x86_64-pc-windows-msvc.exe",
+    ] {
+        let p = dir.join(name);
+        if p.is_file() {
+            return Some(p);
         }
     }
+    let p = dir.join("binaries").join("parle-hook.exe");
+    p.is_file().then_some(p)
+}
 
-    // Escape cancel (only while recording).
-    if vk == 0x1B && RECORDING.load(Ordering::SeqCst) {
-        let bindings = HOOK_BINDINGS.lock();
-        let esc_bound = bindings.cancel.as_ref() == Some(&NativeKey::Escape);
-        drop(bindings);
-        if esc_bound {
-            if is_down {
-                send_event_id(HotkeyId::Cancel, KeyPhase::Down);
-            }
-            return LRESULT(1);
+/// ConnectNamedPipe, treating ERROR_PIPE_CONNECTED as success.
+///
+/// The helper is spawned before we call this, so it routinely connects in the
+/// window between CreateNamedPipe and ConnectNamedPipe. Windows reports that as
+/// ERROR_PIPE_CONNECTED, which means "already connected" — a success, not a
+/// failure. Treating it as an error tore the session down and retried until the
+/// race happened to fall the other way.
+fn accept(pipe: HANDLE, which: &str) -> Result<(), String> {
+    const ERROR_PIPE_CONNECTED: i32 = 535;
+    match unsafe { ConnectNamedPipe(pipe, None) } {
+        Ok(()) => Ok(()),
+        Err(e) if e.code().0 as i32 & 0xFFFF == ERROR_PIPE_CONNECTED => Ok(()),
+        Err(e) => Err(format!("ConnectNamedPipe({which}) failed: {e}")),
+    }
+}
+
+fn create_pipe(name: &str, access: windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES) -> Result<HANDLE, String> {
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let h = unsafe {
+        CreateNamedPipeW(
+            windows::core::PCWSTR(wide.as_ptr()),
+            access,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            PIPE_BUFFER,
+            PIPE_BUFFER,
+            0,
+            None,
+        )
+    };
+    if h.is_invalid() {
+        return Err(format!(
+            "CreateNamedPipeW({name}) failed: {}",
+            windows::core::Error::from_win32()
+        ));
+    }
+    Ok(h)
+}
+
+fn read_exact(h: HANDLE, buf: &mut [u8]) -> bool {
+    let mut got = 0usize;
+    while got < buf.len() {
+        let mut n = 0u32;
+        if unsafe { ReadFile(h, Some(&mut buf[got..]), Some(&mut n), None) }.is_err() {
+            return false;
         }
+        if n == 0 {
+            return false;
+        }
+        got += n as usize;
     }
-
-    CallNextHookEx(HHOOK::default(), code, wparam, lparam)
+    true
 }
 
-fn binding_for(b: &NativeBindings, key: &NativeKey) -> Option<(HotkeyId, bool)> {
-    if let Some(w) = b.dictation.as_ref().filter(|w| &w.key == key) {
-        Some((HotkeyId::Dictation, w.swallow))
-    } else if let Some(w) = b.dictation_alt.as_ref().filter(|w| &w.key == key) {
-        Some((HotkeyId::DictationAlt, w.swallow))
-    } else {
-        None
+fn write_all(h: HANDLE, buf: &[u8]) -> bool {
+    let mut sent = 0usize;
+    while sent < buf.len() {
+        let mut n = 0u32;
+        if unsafe { WriteFile(h, Some(&buf[sent..]), Some(&mut n), None) }.is_err() {
+            return false;
+        }
+        if n == 0 {
+            return false;
+        }
+        sent += n as usize;
+    }
+    true
+}
+
+fn create_kill_on_close_job() -> isize {
+    unsafe {
+        let job = match CreateJobObjectW(None, windows::core::PCWSTR::null()) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!("CreateJobObjectW failed ({e}); relying on the helper's parent watch");
+                return 0;
+            }
+        };
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if let Err(e) = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) {
+            tracing::warn!("SetInformationJobObject failed: {e}");
+        }
+        job.0 as isize
     }
 }
 
-fn send_event(id: HotkeyId, phase: KeyPhase) {
-    send_event_id(id, phase);
-}
+// -- Wire conversions ---------------------------------------------------------
 
-fn send_event_id(id: HotkeyId, phase: KeyPhase) {
-    if let Some(tx) = HOOK_TX.lock().as_ref() {
-        let _ = tx.try_send_or_send(PlatformEvent::Hotkey { id, phase });
+fn key_to_wire(k: &NativeKey) -> u8 {
+    match k {
+        NativeKey::Fn => wire::KEY_FN,
+        NativeKey::LeftShift => wire::KEY_LEFT_SHIFT,
+        NativeKey::RightShift => wire::KEY_RIGHT_SHIFT,
+        NativeKey::LeftCtrl => wire::KEY_LEFT_CTRL,
+        NativeKey::RightCtrl => wire::KEY_RIGHT_CTRL,
+        NativeKey::LeftAlt => wire::KEY_LEFT_ALT,
+        NativeKey::RightAlt => wire::KEY_RIGHT_ALT,
+        NativeKey::LeftCmd => wire::KEY_LEFT_CMD,
+        NativeKey::RightCmd => wire::KEY_RIGHT_CMD,
+        NativeKey::CopilotKey => wire::KEY_COPILOT,
+        NativeKey::Escape => wire::KEY_ESCAPE,
     }
 }
 
-trait TrySendOrSend<T> {
-    fn try_send_or_send(&self, v: T) -> Result<(), ()>;
-}
-impl<T> TrySendOrSend<T> for Sender<T> {
-    fn try_send_or_send(&self, v: T) -> Result<(), ()> {
-        // Unbounded channel: send never blocks; keep the hook proc fast.
-        self.send(v).map_err(|_| ())
+fn to_wire(b: &NativeBindings) -> wire::WireBindings {
+    wire::WireBindings {
+        dictation_key: b.dictation.as_ref().map_or(wire::KEY_NONE, |w| key_to_wire(&w.key)),
+        dictation_swallow: b.dictation.as_ref().is_some_and(|w| w.swallow),
+        dictation_alt_key: b
+            .dictation_alt
+            .as_ref()
+            .map_or(wire::KEY_NONE, |w| key_to_wire(&w.key)),
+        dictation_alt_swallow: b.dictation_alt.as_ref().is_some_and(|w| w.swallow),
+        cancel_key: b.cancel.as_ref().map_or(wire::KEY_NONE, key_to_wire),
     }
 }
 
-fn vk_to_native(vk: u32) -> Option<NativeKey> {
-    let vk = VIRTUAL_KEY(vk as u16);
-    Some(match vk {
-        v if v == VK_LSHIFT => NativeKey::LeftShift,
-        v if v == VK_RSHIFT => NativeKey::RightShift,
-        v if v == VK_LCONTROL => NativeKey::LeftCtrl,
-        v if v == VK_RCONTROL => NativeKey::RightCtrl,
-        v if v == VK_LMENU => NativeKey::LeftAlt,
-        // Right Alt is AltGr on many layouts; supported but not default.
-        v if v == VK_RMENU => NativeKey::RightAlt,
-        v if v == VK_LWIN => NativeKey::LeftCmd,
-        v if v == VK_RWIN => NativeKey::RightCmd,
+fn hotkey_from_wire(id: u8) -> Option<HotkeyId> {
+    Some(match id {
+        wire::HK_DICTATION => HotkeyId::Dictation,
+        wire::HK_DICTATION_ALT => HotkeyId::DictationAlt,
+        wire::HK_CANCEL => HotkeyId::Cancel,
+        wire::HK_PALETTE => HotkeyId::Palette,
         _ => return None,
     })
 }
 
-fn inject_dummy_key() {
-    unsafe {
-        let inputs = [
-            key_input(VK_DUMMY, false),
-            key_input(VK_DUMMY, true),
-        ];
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-    }
+fn phase_from_wire(p: u8) -> Option<KeyPhase> {
+    Some(match p {
+        wire::PHASE_DOWN => KeyPhase::Down,
+        wire::PHASE_UP => KeyPhase::Up,
+        _ => return None,
+    })
 }
 
 fn key_input(vk: u16, up: bool) -> INPUT {
@@ -612,7 +811,49 @@ pub fn harden_overlay(window: &tauri::WebviewWindow) {
 // -- Permissions (Windows needs none of the macOS grants) ---------------------------
 
 pub fn permission_status() -> PermissionStatus {
-    PermissionStatus { accessibility: true, microphone: "unknown".into() }
+    PermissionStatus { accessibility: true, microphone: microphone_status() }
+}
+
+/// Windows 11 has no runtime consent prompt for unpackaged Win32 apps: mic
+/// access is decided by the CapabilityAccessManager consent store, which the
+/// Settings app writes. Read it so the UI can show real state instead of
+/// "unknown". Both gates must allow: the global one and the desktop-app one.
+fn microphone_status() -> String {
+    const BASE: &str =
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
+    let global = consent_value(BASE);
+    let desktop = consent_value(&format!(r"{BASE}\NonPackaged"));
+    match (global.as_deref(), desktop.as_deref()) {
+        (Some("Deny"), _) | (_, Some("Deny")) => "denied".into(),
+        (Some("Allow"), _) => "granted".into(),
+        _ => "unknown".into(),
+    }
+}
+
+fn consent_value(subkey: &str) -> Option<String> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
+    let path = HSTRING::from(subkey);
+    let name = HSTRING::from("Value");
+    let mut buf = [0u16; 32];
+    let mut cb = (buf.len() * 2) as u32;
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            &path,
+            &name,
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr() as *mut _),
+            Some(&mut cb),
+        )
+    };
+    if rc.is_err() {
+        return None;
+    }
+    // cb counts bytes including the NUL terminator.
+    let len = (cb as usize / 2).saturating_sub(1);
+    Some(String::from_utf16_lossy(&buf[..len.min(buf.len())]))
 }
 
 pub fn secure_input_active() -> bool {
@@ -620,10 +861,80 @@ pub fn secure_input_active() -> bool {
 }
 
 pub fn open_accessibility_settings() {}
-pub fn open_microphone_settings() {}
+
+/// Deep-link to Settings > Privacy & security > Microphone. This is the only
+/// actionable path on Windows: there is no prompt API for unpackaged apps.
+pub fn open_microphone_settings() {
+    let _ = std::process::Command::new("explorer")
+        .arg("ms-settings:privacy-microphone")
+        .spawn();
+}
 
 /// Windows: hiding our window returns focus automatically; explicit
 /// activation of another process is restricted (SetForegroundWindow rules).
 pub fn activate_app(_bundle_id: &str) -> bool {
     false
+}
+
+// -- Machine info -------------------------------------------------------------
+
+/// Installed physical RAM in MB, via GlobalMemoryStatusEx. echokey-asr keeps
+/// itself free of the `windows` dependency, so the real value is measured here
+/// and published to its registry at startup (see registry::set_total_ram_mb).
+pub fn total_ram_mb() -> Option<u64> {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX {
+        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
+    };
+    unsafe { GlobalMemoryStatusEx(&mut status) }.ok()?;
+    Some(status.ullTotalPhys / 1_048_576)
+}
+
+/// Opt out of Windows power throttling (EcoQoS).
+///
+/// Windows 11 throttles processes with no visible window — which is Parle's
+/// normal state, sitting in the tray. A throttled process's low-level keyboard
+/// hook can exceed LowLevelHooksTimeout (~300 ms), at which point Windows
+/// bypasses the hook and delivers the key natively: the Copilot key opens
+/// Copilot instead of starting dictation. Thread priority alone can't fix this,
+/// because throttling caps the whole process's execution speed.
+pub fn disable_power_throttling() {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, SetProcessInformation, ProcessPowerThrottling,
+        PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_STATE,
+    };
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0, // 0 with the bit in ControlMask = explicitly DISABLE throttling
+    };
+    let ok = unsafe {
+        SetProcessInformation(
+            HANDLE(GetCurrentProcess().0),
+            ProcessPowerThrottling,
+            &state as *const _ as *const _,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    };
+    match ok {
+        Ok(()) => tracing::info!("power throttling disabled for this process"),
+        Err(e) => tracing::warn!("could not disable power throttling: {e}"),
+    }
+}
+
+/// Lower/restore the CALLING thread's priority around long background work.
+/// Model prewarm is a multi-GB CUDA load; at normal priority it competes with
+/// the keyboard hook thread, and a hook that overruns LowLevelHooksTimeout gets
+/// bypassed — the keypress is delivered natively and dictation misses it.
+pub fn set_background_priority(on: bool) {
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_NORMAL,
+    };
+    let level = if on { THREAD_PRIORITY_BELOW_NORMAL } else { THREAD_PRIORITY_NORMAL };
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), level);
+    }
 }
