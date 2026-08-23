@@ -20,6 +20,12 @@ pub enum StoreError {
 
 pub struct Store {
     conn: Connection,
+    /// This install's device id. Stamped onto every row written locally so a
+    /// row can always be attributed to the machine that produced it — which is
+    /// what makes "from MacBook / from G14" possible, and what replication
+    /// keys on. Empty until set_device_id runs, in which case rows stay NULL
+    /// exactly as they did before sync existed.
+    device_id: Option<String>,
 }
 
 impl Store {
@@ -94,7 +100,26 @@ impl Store {
             )?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
-        Ok(Self { conn })
+        Ok(Self { conn, device_id: None })
+    }
+
+    /// Assign this install's identity. Call once, after settings load.
+    pub fn set_device_id(&mut self, id: &str) {
+        self.device_id = if id.is_empty() { None } else { Some(id.to_string()) };
+    }
+
+    fn source(&self) -> Option<&str> {
+        self.device_id.as_deref()
+    }
+
+    /// Which machine a row came from. None for rows written before this
+    /// install had an identity.
+    pub fn source_machine_of(&self, id: i64) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT source_machine FROM items WHERE id=?1", params![id], |r| r.get(0))
+            .optional()?
+            .flatten())
     }
 
     // -- inserts ------------------------------------------------------------
@@ -113,8 +138,8 @@ impl Store {
         })
         .to_string();
         self.conn.execute(
-            "INSERT INTO items (kind, text, raw_text, created_at, duration_ms, model_id, language, app_id, app_name, meta)
-             VALUES ('transcription', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO items (kind, text, raw_text, created_at, duration_ms, model_id, language, app_id, app_name, meta, source_machine)
+             VALUES ('transcription', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 r.text,
                 r.raw_text,
@@ -124,7 +149,8 @@ impl Store {
                 r.language,
                 app_id,
                 app_name,
-                meta
+                meta,
+                self.source()
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -154,9 +180,9 @@ impl Store {
             }
         }
         self.conn.execute(
-            "INSERT INTO items (kind, text, created_at, app_id, app_name)
-             VALUES ('clipboard', ?1, ?2, ?3, ?4)",
-            params![text, now_ms(), app_id, app_name],
+            "INSERT INTO items (kind, text, created_at, app_id, app_name, source_machine)
+             VALUES ('clipboard', ?1, ?2, ?3, ?4, ?5)",
+            params![text, now_ms(), app_id, app_name, self.source()],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -519,5 +545,18 @@ mod tests {
         let hits = s.search("hel\" AND (", None, 10).unwrap();
         // Fuzzy fallback may or may not match; the call must simply not error.
         let _ = hits;
+    }
+
+    #[test]
+    fn local_rows_are_stamped_with_the_device_id() {
+        let mut st = Store::open_in_memory().unwrap();
+        // Before an identity exists, rows stay NULL exactly as they did before
+        // sync was a thing — no migration surprise for existing installs.
+        let id0 = st.insert_clipboard("before", None, None).unwrap();
+        assert_eq!(st.source_machine_of(id0).unwrap(), None);
+
+        st.set_device_id("device-abc");
+        let id1 = st.insert_clipboard("after", None, None).unwrap();
+        assert_eq!(st.source_machine_of(id1).unwrap().as_deref(), Some("device-abc"));
     }
 }

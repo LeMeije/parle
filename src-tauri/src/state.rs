@@ -50,12 +50,24 @@ enum Work {
 
 impl AppState {
     pub fn new(app: &AppHandle) -> Arc<Self> {
-        let settings = Arc::new(Mutex::new(
-            Settings::load(&echokey_core::settings::settings_path()).unwrap_or_default(),
-        ));
-        let store = Arc::new(Mutex::new(
-            Store::open(&history_db_path()).expect("history store"),
-        ));
+        let mut loaded = Settings::load(&echokey_core::settings::settings_path()).unwrap_or_default();
+        // Assign this install's identity on first run and persist it straight
+        // away: a device id that changed between launches would orphan every
+        // row already stamped with the old one.
+        if loaded.ensure_device_identity() {
+            let path = echokey_core::settings::settings_path();
+            match loaded.save(&path) {
+                Ok(()) => tracing::info!("assigned device identity {}", loaded.sync.device_id),
+                Err(e) => tracing::warn!("could not persist device identity: {e}"),
+            }
+        }
+        let device_id = loaded.sync.device_id.clone();
+        let settings = Arc::new(Mutex::new(loaded));
+        let store = Arc::new(Mutex::new({
+            let mut s = Store::open(&history_db_path()).expect("history store");
+            s.set_device_id(&device_id);
+            s
+        }));
 
         let use_gpu = cfg!(any(target_os = "macos", feature = "cuda"));
         let engine = Arc::new(Mutex::new(EngineManager::new(models_dir(), use_gpu)));

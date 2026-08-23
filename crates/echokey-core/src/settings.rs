@@ -23,6 +23,7 @@ pub struct Settings {
     pub paste: PasteSettings,
     pub launch_at_login: bool,
     pub auto_update_check: bool,
+    pub sync: SyncSettings,
 }
 
 impl Default for Settings {
@@ -42,7 +43,45 @@ impl Default for Settings {
             paste: PasteSettings::default(),
             launch_at_login: false,
             auto_update_check: true,
+            sync: SyncSettings::default(),
         }
+    }
+}
+
+impl Settings {
+    /// Assign this install's stable identity if it has none yet.
+    ///
+    /// Returns true when something changed, so the caller knows to save. The id
+    /// must be generated exactly once and then persisted: regenerating it would
+    /// orphan every history row already stamped with the old one, and would
+    /// look like a brand new device to every peer we had paired with.
+    pub fn ensure_device_identity(&mut self) -> bool {
+        let mut changed = false;
+        if self.sync.device_id.is_empty() {
+            self.sync.device_id = uuid::Uuid::new_v4().to_string();
+            changed = true;
+        }
+        if self.sync.device_name.trim().is_empty() {
+            self.sync.device_name = default_device_name();
+            changed = true;
+        }
+        changed
+    }
+}
+
+/// Friendly default: the machine's hostname, falling back to the OS name so the
+/// pairing list never shows a blank entry.
+fn default_device_name() -> String {
+    let host = gethostname::gethostname().to_string_lossy().trim().to_string();
+    if !host.is_empty() {
+        return host;
+    }
+    if cfg!(target_os = "macos") {
+        "Mac".into()
+    } else if cfg!(target_os = "windows") {
+        "Windows PC".into()
+    } else {
+        "This device".into()
     }
 }
 
@@ -482,5 +521,58 @@ mod tests {
         assert_eq!(HotkeySettings::default().dictation.key, "RightCtrl");
         #[cfg(target_os = "macos")]
         assert_eq!(HotkeySettings::default().dictation.key, "Fn");
+    }
+
+    #[test]
+    fn device_identity_is_assigned_once_and_kept() {
+        let mut s = Settings::default();
+        assert!(s.sync.device_id.is_empty(), "no identity before first run");
+
+        assert!(s.ensure_device_identity(), "first run assigns");
+        let id = s.sync.device_id.clone();
+        assert!(!id.is_empty());
+        assert!(!s.sync.device_name.trim().is_empty(), "name falls back to something usable");
+
+        // Re-running must be a no-op: a changing id would orphan every history
+        // row already stamped with the old one and look like a new device to
+        // every paired peer.
+        assert!(!s.ensure_device_identity(), "second run changes nothing");
+        assert_eq!(s.sync.device_id, id);
+    }
+
+    #[test]
+    fn sync_is_off_until_asked_for() {
+        let s = Settings::default();
+        assert!(!s.sync.enabled, "nothing leaves the machine by default");
+    }
+}
+
+/// Cross-machine sync. Off until the user pairs a device.
+///
+/// `device_id` is this install's stable identity and is what every history row
+/// is stamped with, so a row can always be attributed to the machine that
+/// produced it — including before any sync is set up. It is assigned once, on
+/// first run, by `ensure_device_identity`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncSettings {
+    pub enabled: bool,
+    /// Stable per-install UUID. Empty until first run assigns one.
+    pub device_id: String,
+    /// Human-facing name shown when pairing and on synced rows.
+    pub device_name: String,
+    pub sync_dictations: bool,
+    pub sync_clipboard: bool,
+}
+
+impl Default for SyncSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            device_id: String::new(),
+            device_name: String::new(),
+            sync_dictations: true,
+            sync_clipboard: true,
+        }
     }
 }
