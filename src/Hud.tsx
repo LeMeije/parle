@@ -1,5 +1,6 @@
 // The recording HUD: non-focus-stealing overlay. Waveform + streaming partial
-// text + click-to-stop / cancel. Retro style renders spinning cassette reels.
+// text + click-to-stop / cancel. The cassette and metal styles render a deck:
+// spinning reels either side of a segmented level meter.
 
 import { useEffect, useRef, useState } from 'react';
 import { api, onLevel, onPartial, onPipelineEvent } from './api';
@@ -7,6 +8,17 @@ import type { Settings } from './types';
 import './hud.css';
 
 const BAR_COUNT = 27;
+
+// Deck meter: discrete segments rather than the pill's continuous bar.
+const SEG_COUNT = 18;
+
+// Reel cut-outs: three trapezes whose outer edge follows the rim as an arc.
+// Fixed geometry against a 0 0 40 40 viewBox — do not redraw by hand.
+const REEL_CUTS = [
+  'M16.2,13.42 L8.2,8.61 A16.4,16.4 0 0 1 31.8,8.61 L23.8,13.42 A7.6,7.6 0 0 0 16.2,13.42 Z',
+  'M27.6,20.0 L35.76,15.48 A16.4,16.4 0 0 1 23.97,35.91 L23.8,26.58 A7.6,7.6 0 0 0 27.6,20.0 Z',
+  'M16.2,26.58 L16.03,35.91 A16.4,16.4 0 0 1 4.24,15.48 L12.4,20.0 A7.6,7.6 0 0 0 16.2,26.58 Z',
+];
 
 export default function Hud() {
   const [state, setState] = useState<'recording' | 'transcribing' | 'idle'>('idle');
@@ -48,12 +60,16 @@ export default function Hud() {
       // mapping looks flat. dB scale (-44dB floor .. -12dB ceiling) with a
       // contrast power makes speech visibly dramatic against pauses.
       const db = 20 * Math.log10(Math.max(u.rms, 1e-6));
-      let v = (db + 44) / 32;
-      v = Math.pow(Math.max(0, Math.min(1, v)), 1.7);
+      // Floor -50 dB, ceiling -20 dB. The old window (-44..-12) put ordinary
+      // speech near the bottom, and a 1.7 power then crushed what was left, so
+      // the bars barely moved. A narrower window and a gentler curve put normal
+      // speech across the middle of the range where it can actually be seen.
+      let v = (db + 50) / 30;
+      v = Math.pow(Math.max(0, Math.min(1, v)), 1.15);
       // A touch of peak keeps plosives snappy.
       const peakDb = 20 * Math.log10(Math.max(u.peak, 1e-6));
-      const p = Math.max(0, Math.min(1, (peakDb + 40) / 34));
-      bars.push(Math.min(1, v * 0.85 + p * 0.25));
+      const p = Math.max(0, Math.min(1, (peakDb + 46) / 32));
+      bars.push(Math.min(1, v * 0.85 + p * 0.3));
       if (bars.length > BAR_COUNT) bars.shift();
       force((n) => n + 1);
     });
@@ -66,6 +82,7 @@ export default function Hud() {
   }, []);
 
   const style = settings?.overlay.style ?? 'pill';
+  const isDeck = style === 'cassette' || style === 'metal';
   const showPartial = settings?.overlay.show_partial_text ?? true;
   const mm = Math.floor(elapsed / 60000);
   const ss = Math.floor((elapsed % 60000) / 1000);
@@ -80,7 +97,10 @@ export default function Hud() {
   }
 
   return (
-    <div className={`hud hud-${style} ${state}`}>
+    <div
+      className={`hud hud-${style} ${state}`}
+      onClick={isDeck && state === 'recording' ? () => api.stopRecording() : undefined}
+    >
       {style === 'minimal' ? (
         <div
           className="hud-min-inner"
@@ -93,8 +113,13 @@ export default function Hud() {
             ✕
           </button>
         </div>
-      ) : style === 'cassette' ? (
-        <Cassette recording={state === 'recording'} envelope={envelopeRef.current} time={time} />
+      ) : isDeck ? (
+        <Deck
+          variant={style === 'metal' ? 'metal' : 'cassette'}
+          recording={state === 'recording'}
+          envelope={envelopeRef.current}
+          time={time}
+        />
       ) : (
         <>
           <button
@@ -138,41 +163,100 @@ function Spinner() {
   return <span className="hud-spinner" />;
 }
 
-// Spinning cassette reels for the retro theme.
-function Cassette({ recording, envelope, time }: { recording: boolean; envelope: number; time: string }) {
+// Spinning reels either side of a segmented meter. Shared by the cassette
+// (paper reels, racing stripe) and metal (graphite reels, orange hub) styles;
+// the shell itself is drawn by the .hud-cassette / .hud-metal rules.
+function Deck({
+  variant,
+  recording,
+  envelope,
+  time,
+}: {
+  variant: 'cassette' | 'metal';
+  recording: boolean;
+  envelope: number;
+  time: string;
+}) {
+  // Same dB window as the pill waveform, quantised into discrete segments.
+  const db = 20 * Math.log10(Math.max(envelope, 1e-6));
+  const level = Math.min(1, Math.pow(Math.max(0, (db + 50) / 30), 1.15));
+  const lit = Math.round(level * SEG_COUNT);
   return (
-    <div className="cassette" onClick={() => recording && api.stopRecording()}>
-      <div className={`reel ${recording ? 'spin' : ''}`}>
-        <div className="reel-hub" />
-        {[0, 60, 120, 180, 240, 300].map((d) => (
-          <div key={d} className="reel-spoke" style={{ transform: `rotate(${d}deg)` }} />
-        ))}
-      </div>
-      <div className="cassette-mid">
-        <div className="vu">
-          <div className="vu-fill" style={{ width: `${Math.min(100, Math.pow(Math.max(0, (20 * Math.log10(Math.max(envelope, 1e-6)) + 44) / 32), 1.5) * 100)}%` }} />
+    <>
+      <Reel variant={variant} spinning={recording} rewinding={!recording} />
+      <div className="deck-mid">
+        <div className="deck-seg">
+          {Array.from({ length: SEG_COUNT }, (_, i) => {
+            // Transcribing: there is no live level any more, so run an
+            // indeterminate sweep instead of leaving the last frame frozen.
+            if (!recording) {
+              return (
+                <i
+                  key={i}
+                  className={variant === 'metal' ? 'hot sweep' : 'lit sweep'}
+                  style={{ animationDelay: `${i * 55}ms` }}
+                />
+              );
+            }
+            // Peak-meter colouring: on the cassette the top two lit segments
+            // read hot; the metal meter is orange throughout.
+            const tone =
+              i >= lit ? '' : variant === 'metal' ? 'hot' : i >= lit - 2 ? 'warn' : 'lit';
+            const flick = i === lit - 1 ? ' edge' : '';
+            return <i key={i} className={tone + flick} />;
+          })}
         </div>
-        <div className="cassette-label">
-          {recording ? 'REC' : 'PROC'} <span className="cassette-time">{time}</span>
+        <div className={`deck-label${recording ? '' : ' working'}`}>
+          {recording ? 'REC' : 'PROC'} <span className="deck-time">{time}</span>
         </div>
       </div>
-      <div className={`reel ${recording ? 'spin slow' : ''}`}>
-        <div className="reel-hub" />
-        {[0, 60, 120, 180, 240, 300].map((d) => (
-          <div key={d} className="reel-spoke" style={{ transform: `rotate(${d}deg)` }} />
-        ))}
-      </div>
+      <Reel variant={variant} spinning={recording} rewinding={!recording} slow />
+      {variant === 'cassette' && <span className="deck-stripe" />}
       <button
-        className="hud-cancel cassette-cancel"
+        className="deck-cancel"
         title="Cancel (Esc)"
         onClick={(e) => {
           e.stopPropagation();
           api.cancelRecording();
         }}
       >
-        ✕
+        <svg viewBox="0 0 7 7" width="7" height="7" aria-hidden="true">
+          <line x1="1.5" y1="1.5" x2="5.5" y2="5.5" />
+          <line x1="5.5" y1="1.5" x2="1.5" y2="5.5" />
+        </svg>
       </button>
-    </div>
+    </>
+  );
+}
+
+function Reel({
+  variant,
+  spinning,
+  rewinding,
+  slow,
+}: {
+  variant: 'cassette' | 'metal';
+  spinning: boolean;
+  rewinding?: boolean;
+  slow?: boolean;
+}) {
+  const paper = variant === 'cassette';
+  const motion = spinning ? ' spin' : rewinding ? ' rewind' : '';
+  return (
+    <svg
+      className={`deck-reel${motion}${slow ? ' slow' : ''}`}
+      viewBox="0 0 40 40"
+      width="44"
+      height="44"
+      aria-hidden="true"
+    >
+      <circle cx="20" cy="20" r="19" fill={paper ? '#d9d6cf' : '#2f3237'} />
+      {REEL_CUTS.map((d, i) => (
+        <path key={i} d={d} fill={paper ? '#fbfbfa' : '#8f959c'} />
+      ))}
+      <circle cx="20" cy="20" r="6.2" fill={paper ? '#b9b5ac' : '#22252a'} />
+      {!paper && <circle cx="20" cy="20" r="2.5" fill="#ff6a1f" />}
+    </svg>
   );
 }
 

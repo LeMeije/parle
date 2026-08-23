@@ -9,6 +9,11 @@ import iconKeycap from '../assets/icons/keycap.png';
 import iconWaveform from '../assets/icons/waveform.png';
 import iconEchoRings from '../assets/icons/echo-rings.png';
 import iconCassette from '../assets/icons/cassette.png';
+import trayTemplate from '../../src-tauri/icons/tray.png';
+import trayBadge from '../../src-tauri/icons/tray-badge.png';
+import trayLight from '../../src-tauri/icons/tray-light.png';
+import trayDark from '../../src-tauri/icons/tray-dark.png';
+import trayColor from '../../src-tauri/icons/tray-color.png';
 
 const APP_ICONS: [string, string, string][] = [
   ['default', iconDefault, 'Parle'],
@@ -16,6 +21,70 @@ const APP_ICONS: [string, string, string][] = [
   ['waveform', iconWaveform, 'Waveform'],
   ['echo-rings', iconEchoRings, 'Echo rings'],
   ['cassette', iconCassette, 'Cassette'],
+];
+
+// Inline glyphs for the overlay-style picker. Drawn in currentColor so they
+// inherit the segmented control's active/inactive text colour.
+const glyph = (children: React.ReactNode) => (
+  <svg
+    viewBox="0 0 16 16"
+    width="14"
+    height="14"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.2"
+    aria-hidden="true"
+  >
+    {children}
+  </svg>
+);
+
+const OVERLAY_STYLES: [string, string, React.ReactNode][] = [
+  [
+    'pill',
+    'Pill',
+    glyph(
+      <>
+        <rect x="0.9" y="4.6" width="14.2" height="6.8" rx="3.4" />
+        <path d="M5 7.2v1.6M7.4 6.3v3.4M9.8 6.9v2.2M12.2 7.4v1.2" strokeLinecap="round" />
+      </>,
+    ),
+  ],
+  [
+    'cassette',
+    'Cassette',
+    glyph(
+      <>
+        <rect x="0.9" y="3.4" width="14.2" height="9.2" rx="2" />
+        <circle cx="5.1" cy="7.4" r="1.9" />
+        <circle cx="10.9" cy="7.4" r="1.9" />
+        <path d="M1.6 11.9h12.8" strokeWidth="1.5" strokeLinecap="round" />
+      </>,
+    ),
+  ],
+  [
+    'metal',
+    'Metal',
+    glyph(
+      <>
+        <rect x="0.9" y="3.4" width="14.2" height="9.2" rx="2" />
+        <circle cx="5.1" cy="8" r="2.1" />
+        <circle cx="10.9" cy="8" r="2.1" />
+        <circle cx="5.1" cy="8" r="0.7" fill="currentColor" stroke="none" />
+        <circle cx="10.9" cy="8" r="0.7" fill="currentColor" stroke="none" />
+      </>,
+    ),
+  ],
+  [
+    'minimal',
+    'Minimal',
+    glyph(
+      <>
+        <rect x="3.4" y="5.4" width="9.2" height="5.2" rx="2.6" />
+        <circle cx="6.2" cy="8" r="0.9" fill="currentColor" stroke="none" />
+      </>,
+    ),
+  ],
 ];
 
 const LANGUAGES: [string, string][] = [
@@ -41,9 +110,60 @@ const ACCENTS = ['#2b5cff', '#e0642f', '#178a50', '#8b5cf6', '#d5382f', '#0d9aa8
 
 const IS_MAC = navigator.userAgent.includes('Mac');
 
+// Tray/menu-bar icon styles, platform-filtered: the outline variants only make
+// sense against a Windows taskbar, and macOS renders "template" as a proper
+// template image. Each preview pairs the asset with the backdrop it is drawn
+// for, so a white outline is never previewed on white.
+const TRAY_STYLES: [string, string, [string, 'light' | 'dark'][]][] = IS_MAC
+  ? [
+      ['template', 'Monochrome', [[trayTemplate, 'light']]],
+      ['badge', 'Blue badge', [[trayBadge, 'light']]],
+    ]
+  : [
+      ['badge', 'Blue badge', [[trayBadge, 'light']]],
+      [
+        'auto',
+        'Auto — match taskbar',
+        [
+          [trayDark, 'light'],
+          [trayLight, 'dark'],
+        ],
+      ],
+      ['light', 'Outline light', [[trayLight, 'dark']]],
+      ['dark', 'Outline dark', [[trayDark, 'light']]],
+      ['color', 'Blue outline', [[trayColor, 'light']]],
+    ];
+
 const SPECIAL_KEYS = IS_MAC
   ? ['Fn', 'RightCommand', 'RightOption', 'RightControl', 'LeftControl']
   : ['CopilotKey', 'RightCtrl', 'RightShift', 'LeftAlt', 'RightWin'];
+
+// Sentinel for the picker only — never stored in settings.
+const CUSTOM = '__custom__';
+
+// Bare modifiers that Rust's NativeKey::parse understands. Keyed by
+// KeyboardEvent.code because event.key can't tell left from right.
+const NATIVE_BY_CODE: Record<string, string> = IS_MAC
+  ? {
+      ControlLeft: 'LeftControl',
+      ControlRight: 'RightControl',
+      ShiftLeft: 'LeftShift',
+      ShiftRight: 'RightShift',
+      AltLeft: 'LeftOption',
+      AltRight: 'RightOption',
+      MetaLeft: 'LeftCommand',
+      MetaRight: 'RightCommand',
+    }
+  : {
+      ControlLeft: 'LeftCtrl',
+      ControlRight: 'RightCtrl',
+      ShiftLeft: 'LeftShift',
+      ShiftRight: 'RightShift',
+      AltLeft: 'LeftAlt',
+      AltRight: 'RightAlt',
+      MetaLeft: 'LeftWin',
+      MetaRight: 'RightWin',
+    };
 
 export default function SettingsView({
   settings,
@@ -56,6 +176,9 @@ export default function SettingsView({
   const [perms, setPerms] = useState<{ accessibility: boolean; microphone: string } | null>(null);
 
   const [needsRestart, setNeedsRestart] = useState(false);
+
+  const [customPicked, setCustomPicked] = useState(false);
+  const [capturing, setCapturing] = useState(false);
 
   useEffect(() => {
     api.listAudioDevices().then(setDevices);
@@ -73,6 +196,34 @@ export default function SettingsView({
     onSave(next);
   };
 
+  // While listening, swallow the keypress entirely and turn it into a binding.
+  useEffect(() => {
+    if (!capturing) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.code === 'Escape') {
+        setCapturing(false);
+        return;
+      }
+      const binding = bindingFromEvent(e);
+      if (!binding) return;
+      setCapturing(false);
+      set((d) => (d.hotkeys.dictation.key = binding));
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [capturing, s]);
+
+  // "auto" is a Windows concept; on macOS it simply means the monochrome
+  // template icon, so show it as such rather than leaving the picker blank.
+  const trayStyle = IS_MAC && s.appearance.tray_style === 'auto' ? 'template' : s.appearance.tray_style;
+  const trayPreview = TRAY_STYLES.find(([v]) => v === trayStyle)?.[2] ?? [];
+
+  const dictationKey = s.hotkeys.dictation.key;
+  const isCustom = customPicked || !SPECIAL_KEYS.includes(dictationKey);
+  const warning = SPECIAL_KEYS.includes(dictationKey) ? null : bindingWarning(dictationKey);
+
   return (
     <div className="settings">
       <header className="view-head">
@@ -82,17 +233,38 @@ export default function SettingsView({
 
       <Section title="Hotkeys">
         <Field label="Dictation key" hint={IS_MAC ? 'Fn needs Accessibility permission' : 'Right Alt is AltGr on many layouts — Right Ctrl is safer'}>
-          <select value={s.hotkeys.dictation.key} onChange={(e) => set((d) => (d.hotkeys.dictation.key = e.target.value))}>
+          <select
+            value={isCustom ? CUSTOM : dictationKey}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === CUSTOM) {
+                setCustomPicked(true);
+                return;
+              }
+              setCustomPicked(false);
+              setCapturing(false);
+              set((d) => (d.hotkeys.dictation.key = v));
+            }}
+          >
             {SPECIAL_KEYS.map((k) => (
               <option key={k} value={k}>
                 {keyLabel(k)}
               </option>
             ))}
-            {!SPECIAL_KEYS.includes(s.hotkeys.dictation.key) && (
-              <option value={s.hotkeys.dictation.key}>{s.hotkeys.dictation.key}</option>
-            )}
+            <option value={CUSTOM}>Custom…</option>
           </select>
         </Field>
+        {isCustom && (
+          <Field label="Custom binding" hint="Click, then press the key or combination you want. Esc cancels.">
+            <button
+              className={`btn key-capture ${capturing ? 'listening' : ''}`}
+              onClick={() => setCapturing(true)}
+            >
+              {capturing ? 'Press a key combination…' : keyLabel(dictationKey)}
+            </button>
+          </Field>
+        )}
+        {isCustom && warning && <div className="callout warn">{warning}</div>}
         <Field
           label="Gesture"
           hint={
@@ -116,6 +288,12 @@ export default function SettingsView({
         <Field label="Latch window" hint="Hybrid: taps shorter than this latch into toggle. Double tap: max gap between taps">
           <NumberInput value={s.hotkeys.latch_ms} min={150} max={900} step={50} suffix="ms" onChange={(v) => set((d) => (d.hotkeys.latch_ms = v))} />
         </Field>
+        <Toggle
+          label="Esc cancels recording"
+          hint="Off by default: Esc gets pressed for all sorts of unrelated reasons, and discarding a take you already spoke is worse than stopping it with your hotkey"
+          value={s.hotkeys.cancel.enabled}
+          onChange={(v) => set((d) => (d.hotkeys.cancel.enabled = v))}
+        />
         <Field label="History palette" hint="Chord shortcut for search">
           <input
             className="key-input"
@@ -276,11 +454,31 @@ export default function SettingsView({
             <button onClick={() => api.restartApp()}>Restart Parle</button>
           </div>
         )}
+        <Field
+          label={IS_MAC ? 'Menu bar icon' : 'Tray icon'}
+          hint={IS_MAC ? 'Monochrome follows the menu bar; the badge keeps Parle’s colour' : 'Auto picks the outline that reads against your taskbar'}
+        >
+          <span className="tray-preview">
+            {trayPreview.map(([src, bg]) => (
+              <span key={src} className="tray-chip" data-bg={bg}>
+                <img src={src} alt="" draggable={false} />
+              </span>
+            ))}
+          </span>
+          <select value={trayStyle} onChange={(e) => set((d) => (d.appearance.tray_style = e.target.value))}>
+            {TRAY_STYLES.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
         <Field label="Overlay style" hint="Cassette pairs beautifully with the Retro palette">
-          <div className="seg">
-            {['pill', 'cassette', 'minimal'].map((st) => (
+          <div className="seg seg-icons">
+            {OVERLAY_STYLES.map(([st, label, icon]) => (
               <button key={st} className={s.overlay.style === st ? 'active' : ''} onClick={() => set((d) => (d.overlay.style = st))}>
-                {st[0].toUpperCase() + st.slice(1)}
+                {icon}
+                {label}
               </button>
             ))}
           </div>
@@ -439,17 +637,61 @@ function NumberInput({
 }
 
 function keyLabel(k: string): string {
+  if (k.includes('+')) return k.split('+').map(chordPartLabel).join(' + ');
   const map: Record<string, string> = {
     Fn: '🌐 Fn / Globe',
     RightCommand: 'Right ⌘',
+    LeftCommand: 'Left ⌘',
     RightOption: 'Right ⌥',
+    LeftOption: 'Left ⌥',
     RightControl: 'Right ⌃',
     LeftControl: 'Left ⌃',
     CopilotKey: 'Copilot key',
     RightCtrl: 'Right Ctrl',
+    LeftCtrl: 'Left Ctrl',
     RightShift: 'Right Shift',
+    LeftShift: 'Left Shift',
     LeftAlt: 'Left Alt',
+    RightAlt: 'Right Alt',
     RightWin: 'Right Win',
+    LeftWin: 'Left Win',
   };
   return map[k] ?? k;
+}
+
+function chordPartLabel(part: string): string {
+  if (part === 'Super') return IS_MAC ? '⌘' : 'Win';
+  if (part.startsWith('Arrow')) return part.slice(5);
+  return part;
+}
+
+// Canonical binding string for a captured keypress, or null if unusable.
+// A bare modifier becomes a NativeKey name (native listener path); anything
+// else becomes a chord string for tauri-plugin-global-shortcut.
+function bindingFromEvent(e: KeyboardEvent): string | null {
+  const native = NATIVE_BY_CODE[e.code];
+  if (native) return native;
+  if (!e.code || e.code === 'Unidentified') return null;
+  const main = e.code.startsWith('Key')
+    ? e.code.slice(3)
+    : e.code.startsWith('Digit')
+      ? e.code.slice(5)
+      : e.code;
+  const parts: string[] = [];
+  if (e.ctrlKey) parts.push('Ctrl');
+  if (e.altKey) parts.push('Alt');
+  if (e.shiftKey) parts.push('Shift');
+  if (e.metaKey) parts.push('Super');
+  parts.push(main);
+  return parts.join('+');
+}
+
+function bindingWarning(key: string): string | null {
+  if (key === 'LeftCtrl' || key === 'LeftControl')
+    return 'Left Ctrl drives most keyboard shortcuts — binding it will fire during normal use.';
+  if (key === 'LeftShift')
+    return 'Left Shift is pressed constantly while typing — expect false triggers.';
+  if (key === 'RightAlt' || key === 'RightOption')
+    return 'Right Alt is AltGr on many layouts, so it types accented characters. Right Ctrl is safer.';
+  return null;
 }

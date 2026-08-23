@@ -1,4 +1,4 @@
-/* HUD overlay: transparent window, pill or cassette inside. */
+/* HUD overlay: transparent window, pill / deck / minimal inside. */
 
 body[data-window='hud'] {
   background: transparent;
@@ -150,105 +150,182 @@ body[data-window='hud'] #root {
   color: var(--danger);
 }
 
-/* ---------- Cassette (retro) ---------- */
+/* ---------- Decks: cassette (retro) + metal ---------- */
 
-.hud-cassette {
-  border-radius: var(--radius-m);
-  background: linear-gradient(180deg, var(--bg-raised), var(--bg-sunken));
-  border: 2px solid var(--border-strong);
-}
-
-.cassette {
-  display: flex;
-  align-items: center;
+/* Both are physical objects rather than app chrome, so their colours are
+   fixed rather than palette-driven. */
+.hud.hud-cassette,
+.hud.hud-metal {
+  --deck-danger: #d5382f;
+  --deck-ok: #178a50;
+  --deck-warn: #b06a00;
+  --deck-orange: #ff6a1f;
+  position: relative;
   gap: 12px;
-  width: 100%;
+  padding: 0 13px;
+  border: none;
+  border-radius: 12px;
+  overflow: hidden;
+  backdrop-filter: none;
   cursor: pointer;
-  position: relative;
 }
 
-.reel {
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  border: 3px solid var(--border-strong);
-  position: relative;
+.hud.hud-cassette {
+  background: #f4f2ee;
+  /* The stripe owns the bottom 7px: reserve it so content centres in what is
+     left, not in the full height. */
+  padding-bottom: 7px;
+  box-shadow: 0 9px 24px rgba(20, 16, 12, 0.3);
+}
+
+/* Hairline on three sides, stopping where the stripe starts. Dropping only the
+   bottom border is not enough: the left and right borders still run the full
+   height and lay a 1px line down each end of the stripe. */
+.hud.hud-cassette::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 7px;
+  border: 1px solid #e2dfd8;
+  border-bottom: none;
+  border-radius: 12px 12px 0 0;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.hud.hud-metal {
+  background: linear-gradient(168deg, #f1f2f4 0%, #e2e5e8 38%, #d4d8dc 62%, #e9ebee 100%);
+  box-shadow: 0 10px 26px rgba(15, 18, 22, 0.36), inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+/* Full-bleed: touches the left, right and bottom edges with nothing beside it. */
+.deck-stripe {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 7px;
+  z-index: 1;
+  background: linear-gradient(180deg, var(--deck-danger) 0 3px, #e0642f 3px 7px);
+}
+
+.deck-reel {
   flex: 0 0 auto;
-  background: var(--bg-sunken);
+  display: block;
+}
+.deck-reel.spin {
+  animation: reel-spin 2.1s linear infinite;
+}
+.deck-reel.spin.slow {
+  animation-duration: 3.2s;
 }
 
-.reel.spin {
-  animation: reel-spin 1.4s linear infinite;
+/* Processing: the tape rewinds. Reverse and slow the reels so the state is
+   obvious at a glance — "PROC" alone is too easy to miss. */
+.deck-reel.rewind {
+  animation: reel-spin 3.6s linear infinite reverse;
 }
-.reel.spin.slow {
-  animation-duration: 2.2s;
+.deck-reel.rewind.slow {
+  animation-duration: 5.2s;
 }
 
 @keyframes reel-spin {
   to { transform: rotate(360deg); }
 }
 
-.reel-hub {
-  position: absolute;
-  inset: 30%;
-  border-radius: 50%;
-  background: var(--border-strong);
+/* No audio level while transcribing, so the meter shows an indeterminate
+   sweep rather than a frozen bar. */
+.deck-seg i.sweep {
+  animation: deck-sweep 1.15s ease-in-out infinite;
+}
+@keyframes deck-sweep {
+  0%, 100% { opacity: 0.18; }
+  50% { opacity: 1; }
 }
 
-.reel-spoke {
-  position: absolute;
-  left: 50%;
-  top: 4px;
-  width: 3px;
-  height: 12px;
-  margin-left: -1.5px;
-  border-radius: 2px;
-  background: var(--border-strong);
-  transform-origin: 50% 16px;
+.deck-label.working {
+  animation: deck-breathe 1.15s ease-in-out infinite;
+}
+@keyframes deck-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
 }
 
-.cassette-mid {
+.deck-mid {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 5px;
+  position: relative;
+  z-index: 2;
 }
 
-.vu {
+.deck-seg {
+  display: flex;
+  gap: 2px;
   height: 10px;
-  border-radius: 5px;
-  background: var(--bg-sunken);
-  border: 1px solid var(--border);
-  overflow: hidden;
+}
+.deck-seg i {
+  flex: 1;
+  border-radius: 1px;
+  background: #e4e1da;
+}
+.hud-metal .deck-seg i { background: #b7bcc1; }
+.deck-seg i.lit { background: var(--deck-ok); }
+.deck-seg i.warn { background: var(--deck-warn); }
+.deck-seg i.hot { background: var(--deck-orange); }
+.deck-seg i.edge { animation: deck-flick 0.5s steps(1) infinite; }
+
+@keyframes deck-flick {
+  0%, 60% { opacity: 1; }
+  61%, 100% { opacity: 0.25; }
 }
 
-.vu-fill {
-  height: 100%;
-  border-radius: 5px;
-  background: linear-gradient(90deg, var(--ok), var(--warn) 70%, var(--danger));
-  transition: width 70ms linear;
-}
-
-.cassette-label {
+.deck-label {
   font-size: 11px;
   letter-spacing: 0.14em;
   font-weight: 700;
-  color: var(--danger);
+  color: var(--deck-danger);
 }
+.hud-metal .deck-label { color: #3d4045; }
 
-.cassette-time {
-  color: var(--text-dim);
+.deck-time {
+  color: #7d7a73;
   font-family: var(--font-mono);
   margin-left: 6px;
   letter-spacing: 0;
   font-weight: 500;
 }
+.hud-metal .deck-time { color: #6d7278; }
 
-.cassette-cancel {
+/* Solid faded disc, no border, tucked into the corner. The glyph is stroked
+   rather than typed: a text ✕ sits optically low in a disc this small. */
+.deck-cancel {
   position: absolute;
-  right: -6px;
-  top: -8px;
+  right: 3px;
+  top: 3px;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(120, 120, 115, 0.42);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  z-index: 6;
+  transition: background 120ms ease;
+}
+.hud-metal .deck-cancel { background: rgba(90, 95, 100, 0.38); }
+.deck-cancel:hover { background: rgba(120, 120, 115, 0.68); }
+.hud-metal .deck-cancel:hover { background: rgba(90, 95, 100, 0.62); }
+.deck-cancel line {
+  stroke: #fff;
+  stroke-width: 1.5;
+  stroke-linecap: round;
 }
 
 /* ---------- Minimal style ---------- */

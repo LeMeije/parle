@@ -70,7 +70,11 @@ function Permissions({ onNext }: { onNext: () => void }) {
         <ShieldCheck size={30} strokeWidth={2} />
       </div>
       <h1>Permissions</h1>
-      <p>Parle needs two grants to hear you and type for you. Both stay on this machine.</p>
+      <p>
+        {IS_MAC
+          ? 'Parle needs two grants to hear you and type for you. Both stay on this machine.'
+          : 'Parle needs one grant, to hear you. It stays on this machine.'}
+      </p>
       <div className="ob-perms">
         <PermRow
           ok={micOk}
@@ -124,9 +128,13 @@ function PermRow({
       </div>
       {!ok && (
         <div className="ob-perm-actions">
-          <button className="btn" onClick={action}>
-            Grant
-          </button>
+          {/* Windows has no consent prompt for unpackaged apps — Settings is
+              the only place the grant can be made, so don't offer a dead button. */}
+          {IS_MAC && (
+            <button className="btn" onClick={action}>
+              Grant
+            </button>
+          )}
           <button className="btn ghost" onClick={settingsAction}>
             Open Settings
           </button>

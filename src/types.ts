@@ -48,6 +48,7 @@ export interface Settings {
     palette: string;
     accent: string;
     app_icon: string;
+    tray_style: string;
     reduce_motion: boolean;
   };
   history: {
