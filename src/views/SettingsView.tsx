@@ -649,8 +649,8 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  // `sync_status` doesn't report the two kind flags, so they are seeded from
-  // settings on mount and held locally after that.
+  // Seeded from settings so the toggles render correctly before the first
+  // status event; the backend is the source of truth from then on.
   const [kinds, setKinds] = useState({
     dictations: sync?.sync_dictations ?? true,
     clipboard: sync?.sync_clipboard ?? true,
@@ -673,11 +673,15 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
       .syncStatus()
       .then((st) => {
         setStatus(st);
+        setKinds({ dictations: st.dictations, clipboard: st.clipboard });
         setLoadError(null);
       })
       .catch((e) => setLoadError(errText(e)));
     const un = onSyncStatus((st) => {
       setStatus(st);
+      // The backend owns these; adopting them here keeps the toggles honest
+      // even if another window or a failed write changed them.
+      setKinds({ dictations: st.dictations, clipboard: st.clipboard });
       setLoadError(null);
       setSeedCode(null);
     });
@@ -823,6 +827,16 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
             </div>
           )}
 
+          {/* The backend reports why sync is on but not working — a failed port
+              bind, no usable network, a keychain refusal. Without this the panel
+              would just show an empty device list, which reads as "nothing found
+              yet" rather than "this is broken". */}
+          {status.error && (
+            <div className="sync-block">
+              <div className="callout warn">{status.error}</div>
+            </div>
+          )}
+
           <Field label="This device" hint="The name the other machine sees while pairing.">
             <input
               className="sync-name-input"
@@ -931,8 +945,17 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
               <>
                 {unpaired.length === 0 ? (
                   <span className="sync-empty">
-                    No devices found yet. Open Parle on the other machine, turn Sync on there too, and make sure
-                    both are on the same network.
+                    {status.scanning ? (
+                      <>
+                        Looking for devices on this network… Open Parle on the other machine and turn Sync on
+                        there too.
+                      </>
+                    ) : (
+                      <>
+                        Not searching for devices right now. Open Parle on the other machine, turn Sync on
+                        there too, and make sure both are on the same network.
+                      </>
+                    )}
                   </span>
                 ) : (
                   <div className="sync-peers">

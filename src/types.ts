@@ -189,6 +189,12 @@ export interface SyncStatus {
   peers: SyncPeer[];
   paired: SyncPairedDevice[];
   pairing: SyncPairingState | null;
+  /** True while discovery is running, so "none found" isn't shown instantly. */
+  scanning: boolean;
+  dictations: boolean;
+  clipboard: boolean;
+  /** Why sync isn't working, when it's enabled but dead. */
+  error: string | null;
 }
 
 export interface PermissionStatus {

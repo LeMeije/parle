@@ -33,6 +33,27 @@ pub enum PairFlowError {
     BadIdentity,
 }
 
+/// Length of a SPAKE2 opening message, measured from the library rather than
+/// assumed, so it cannot drift if the crate changes group.
+pub fn spake2_msg_len() -> usize {
+    let probe = PairingCode::parse("000000").expect("literal code");
+    let (_, msg) = Pairing::start(PairingRole::Initiator, &probe);
+    msg.len()
+}
+
+/// Could these bytes plausibly be a peer's opening SPAKE2 message?
+///
+/// This gates the rate limiter. Without it, `read_frame` accepts any length
+/// from zero upward, so three bytes on the wire (mode byte + an empty frame)
+/// cost the user one of four pairing attempts — four connections burn the code
+/// and lock pairing out for five minutes, repeatable forever by anyone on the
+/// LAN. Checking the shape first costs an attacker nothing they can fake
+/// cheaply and reveals nothing, so the charge-before-exchange ordering that
+/// closes the TOCTOU is untouched.
+pub fn looks_like_pairing_message(buf: &[u8]) -> bool {
+    !buf.is_empty() && buf.len() == spake2_msg_len()
+}
+
 /// What we learn about the other device once pairing succeeds.
 pub struct Paired {
     pub key: PairedKey,
@@ -188,5 +209,45 @@ mod tests {
         let long = format!("11111111-1111-4111-8111-111111111111\n{}", "x".repeat(500));
         let (_, name) = decode_identity(long.as_bytes()).unwrap();
         assert_eq!(name.chars().count(), 64);
+    }
+
+    #[test]
+    fn only_a_real_spake2_message_can_cost_a_pairing_attempt() {
+        // The DoS this gate exists to stop: an empty frame is legal on the
+        // wire, so without a shape check three bytes burn one of four guesses.
+        assert!(!looks_like_pairing_message(b""), "an empty frame must be free");
+        assert!(!looks_like_pairing_message(b"x"));
+        assert!(!looks_like_pairing_message(&vec![0u8; 4096]));
+
+        let code = PairingCode::parse("123456").unwrap();
+        let (_, real) = Pairing::start(PairingRole::Responder, &code);
+        assert!(looks_like_pairing_message(&real), "a genuine opening message passes");
+    }
+
+    #[test]
+    fn a_pre_read_opening_message_pairs_identically() {
+        // run_with must behave exactly like run when handed the frame the
+        // caller already consumed, or the inbound path would silently differ
+        // from the outbound one.
+        let (mut c, mut s) = socket_pair();
+        let code = PairingCode::parse("246810").unwrap();
+        let c2 = code.clone();
+        let t = std::thread::spawn(move || {
+            // Initiator reads the responder's frame itself, then replays it.
+            let first = super::read_frame(&mut s).unwrap();
+            run_with(
+                &mut s,
+                PairingRole::Initiator,
+                &c2,
+                ("11111111-1111-4111-8111-111111111111", "A"),
+                Some(first),
+            )
+        });
+        let resp = run(&mut c, PairingRole::Responder, &code, ("22222222-2222-4222-8222-222222222222", "B"));
+        let init = t.join().unwrap();
+        assert_eq!(
+            init.expect("initiator").key.as_bytes(),
+            resp.expect("responder").key.as_bytes()
+        );
     }
 }

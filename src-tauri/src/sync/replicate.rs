@@ -161,17 +161,26 @@ pub fn exchange<S: Read + Write>(
 
     // 2. Watermarks, both ways.
     let mine = store.lock().watermarks().map_err(|e| ReplicateError::Store(e.to_string()))?;
-    session.send(&SyncMessage::Watermarks {
-        entries: mine
-            .iter()
-            .filter_map(|(src, clock)| {
-                DeviceId::parse(src).ok().map(|d| Watermark {
-                    source_device: d,
-                    clock: (*clock).max(0) as u64,
-                })
+    // Chunked: the wire caps a batch at MAX_BATCH_LEN, and a store polluted
+    // before attribution was enforced can hold more sources than that. Sending
+    // one oversized message would fail every exchange with an opaque wire error
+    // instead of degrading.
+    let marks: Vec<Watermark> = mine
+        .iter()
+        .filter_map(|(src, clock)| {
+            DeviceId::parse(src).ok().map(|d| Watermark {
+                source_device: d,
+                clock: (*clock).max(0) as u64,
             })
-            .collect(),
-    })?;
+        })
+        .collect();
+    if marks.is_empty() {
+        session.send(&SyncMessage::Watermarks { entries: Vec::new() })?;
+    } else {
+        for chunk in marks.chunks(PAGE) {
+            session.send(&SyncMessage::Watermarks { entries: chunk.to_vec() })?;
+        }
+    }
     let peer_marks: HashMap<String, i64> = match session.recv()? {
         SyncMessage::Watermarks { entries } => entries
             .into_iter()

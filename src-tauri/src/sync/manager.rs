@@ -26,6 +26,7 @@ use tauri::{AppHandle, Emitter};
 use super::guard::{GuardError, PairingGuard};
 use super::keystore;
 use super::pair_flow;
+use super::deadline::{Deadline, Timed};
 use super::replicate::{self, Attribution, Kinds, Retention};
 use super::wire_tcp::{read_byte, read_frame, write_byte, write_frame, MODE_PAIR, MODE_SESSION};
 use echokey_core::history::Store;
@@ -47,6 +48,15 @@ const MAX_DIALS: usize = 4;
 /// advertise unlimited records; without a cap both the map and the JSON we push
 /// to the webview grow without bound.
 const MAX_PEERS: usize = 64;
+
+/// Releases an inbound handler slot on drop, including on unwind.
+struct SlotGuard(Arc<AtomicUsize>);
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -348,13 +358,14 @@ impl SyncManager {
                             }
                             me.inbound.fetch_add(1, Ordering::SeqCst);
                             let me2 = me.clone();
-                            let slot = me.inbound.clone();
+                            let slot = SlotGuard(me.inbound.clone());
                             std::thread::spawn(move || {
+                                // RAII: released on every exit including a
+                                // panic. Decrementing after the call would leak
+                                // a slot per unwind, and eight leaks close the
+                                // listener to everyone.
+                                let _slot = slot;
                                 me2.serve(s);
-                                // Released however serve() exits, including on
-                                // an early return, so a peer that connects and
-                                // says nothing cannot leak a slot.
-                                slot.fetch_sub(1, Ordering::SeqCst);
                             });
                         }
                         Err(e) => tracing::debug!("sync: accept failed: {e}"),
@@ -416,6 +427,12 @@ impl SyncManager {
     // -- inbound --------------------------------------------------------------
 
     fn serve(self: Arc<Self>, mut s: TcpStream) {
+        // stop() wakes accept(), but a connection already accepted, or one that
+        // arrives in the gap, would otherwise run to completion and move
+        // history after the user switched sync off.
+        if !self.inner.lock().enabled {
+            return;
+        }
         // Unauthenticated peer: never block on it indefinitely.
         let _ = s.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
         let _ = s.set_write_timeout(Some(HANDSHAKE_TIMEOUT));
@@ -443,6 +460,13 @@ impl SyncManager {
                 return;
             }
         };
+        // Only a well-formed opening message may cost the user an attempt. An
+        // empty frame is legal on the wire, so without this three bytes burn a
+        // guess and four connections lock pairing out for five minutes.
+        if !pair_flow::looks_like_pairing_message(&peer_first) {
+            tracing::debug!("sync: ignoring a malformed pairing frame; no attempt charged");
+            return;
+        }
         // Now charge it. Checking the budget only after the exchange completes
         // is a TOCTOU race: concurrent connections would each read the same
         // live code and each get a free guess.
@@ -490,6 +514,13 @@ impl SyncManager {
         // Peer announces which device it claims to be so we can find the key.
         let Ok(raw) = read_frame(&mut s) else { return };
         let Ok(peer_id) = String::from_utf8(raw) else { return };
+        // Must look like an id we issue before it is used as a keychain lookup
+        // key or written to the log. It would fail closed anyway, but arbitrary
+        // peer bytes have no business reaching either.
+        if peer_id.len() != 36 || !peer_id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+            tracing::debug!("sync: session request with a malformed device id");
+            return;
+        }
         let key = match keystore::load(&peer_id) {
             Ok(Some(k)) => k,
             Ok(None) => {
@@ -506,12 +537,14 @@ impl SyncManager {
         // says nothing park this thread forever, and because the inbound slot
         // is only released when serve() returns, eight such packets saturated
         // MAX_INBOUND permanently and killed sync until restart.
-        match echokey_sync::Session::accept(s, &key) {
+        // A socket read timeout bounds one read(), not the exchange: a peer
+        // dribbling a byte just under the limit renews it forever. The deadline
+        // is wall-clock and survives the loop inside read_exact.
+        let deadline = Deadline::after(HANDSHAKE_TIMEOUT);
+        match echokey_sync::Session::accept(Timed::new(s, deadline.clone()), &key) {
             Ok(session) => {
-                // Authenticated now, so a longer budget is reasonable — but
-                // never unbounded: a peer that drops off the network mid
-                // exchange without a FIN would otherwise hold this thread.
-                let _ = session.get_ref().set_read_timeout(Some(SESSION_TIMEOUT));
+                // Authenticated: a longer budget, still never unbounded.
+                deadline.extend(SESSION_TIMEOUT);
                 self.run_session(peer_id, session)
             }
             Err(e) => tracing::info!("sync: session handshake failed with {peer_id}: {e}"),
@@ -686,6 +719,10 @@ impl SyncManager {
         peer_id: String,
         mut session: echokey_sync::Session<S>,
     ) {
+        if !self.inner.lock().enabled {
+            tracing::info!("sync: dropping a session for {peer_id}; sync was turned off");
+            return;
+        }
         let (me_id, me_name, kinds) = {
             let i = self.inner.lock();
             (
@@ -769,9 +806,10 @@ impl SyncManager {
         if write_frame(&mut s, me_id.as_bytes()).is_err() {
             return;
         }
-        match echokey_sync::Session::initiate(s, &key) {
+        let deadline = Deadline::after(HANDSHAKE_TIMEOUT);
+        match echokey_sync::Session::initiate(Timed::new(s, deadline.clone()), &key) {
             Ok(session) => {
-                let _ = session.get_ref().set_read_timeout(Some(SESSION_TIMEOUT));
+                deadline.extend(SESSION_TIMEOUT);
                 self.run_session(peer_id, session)
             }
             Err(e) => tracing::info!("sync: handshake with {peer_id} failed: {e}"),

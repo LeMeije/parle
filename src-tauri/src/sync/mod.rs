@@ -11,6 +11,7 @@
 //!   clipboard content must never leave the machine. That is enforced before
 //!   anything is handed to the protocol, never after.
 
+pub mod deadline;
 pub mod guard;
 pub mod manager;
 pub mod keystore;
