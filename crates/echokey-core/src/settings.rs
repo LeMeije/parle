@@ -563,6 +563,19 @@ pub struct SyncSettings {
     pub device_name: String,
     pub sync_dictations: bool,
     pub sync_clipboard: bool,
+    /// Devices we have paired with. The KEY for each lives in the OS keychain,
+    /// never here — this is only the roster needed to show a list and to know
+    /// whose key to look up.
+    pub paired: Vec<PairedDevice>,
+}
+
+/// A device we have paired with. Carries no secret.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairedDevice {
+    pub id: String,
+    pub name: String,
+    /// Epoch ms, or None if never seen since pairing.
+    pub last_seen: Option<i64>,
 }
 
 impl Default for SyncSettings {
@@ -573,6 +586,7 @@ impl Default for SyncSettings {
             device_name: String::new(),
             sync_dictations: true,
             sync_clipboard: true,
+            paired: Vec::new(),
         }
     }
 }
