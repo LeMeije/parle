@@ -76,8 +76,19 @@ export interface Settings {
     prefer_ax_insert: boolean;
     press_enter: boolean;
   };
+  // Present from the build that introduced cross-machine sync. Optional so an
+  // older backend (or one mid-rebuild) can't blank the Sync panel.
+  sync?: SyncSettings;
   launch_at_login: boolean;
   auto_update_check: boolean;
+}
+
+export interface SyncSettings {
+  enabled: boolean;
+  device_id: string;
+  device_name: string;
+  sync_dictations: boolean;
+  sync_clipboard: boolean;
 }
 
 export interface HotkeyBinding {
@@ -144,6 +155,41 @@ export type PipelineEvent =
     }
   | { kind: 'empty'; reason: string }
   | { kind: 'error'; message: string };
+
+// ---------- Cross-machine sync ----------
+// Mirrors the `sync_status` command payload and the `sync-status` event.
+
+/** Seen on the LAN but not yet paired. */
+export interface SyncPeer {
+  id: string;
+  name: string;
+  addr: string;
+  port: number;
+}
+
+export interface SyncPairedDevice {
+  id: string;
+  name: string;
+  last_seen: number | null;
+  online: boolean;
+}
+
+/** `code` is only populated when this device is the one showing it. */
+export interface SyncPairingState {
+  role: 'showing' | 'entering';
+  code: string | null;
+  peer_id: string | null;
+  expires_at: number;
+}
+
+export interface SyncStatus {
+  enabled: boolean;
+  device_id: string;
+  device_name: string;
+  peers: SyncPeer[];
+  paired: SyncPairedDevice[];
+  pairing: SyncPairingState | null;
+}
 
 export interface PermissionStatus {
   accessibility: boolean;

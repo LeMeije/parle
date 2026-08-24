@@ -6,6 +6,7 @@ mod hud;
 mod icons;
 mod pipeline;
 mod platform;
+mod sync;
 mod state;
 
 use state::AppState;

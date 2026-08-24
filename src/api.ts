@@ -9,6 +9,7 @@ import type {
   PermissionStatus,
   PipelineEvent,
   Settings,
+  SyncStatus,
 } from './types';
 
 export const api = {
@@ -36,6 +37,16 @@ export const api = {
     invoke<{ id: number; warning: string | null }>('dict_add', { term, corrections }),
   dictSetEnabled: (id: number, enabled: boolean) => invoke<void>('dict_set_enabled', { id, enabled }),
   dictDelete: (id: number) => invoke<void>('dict_delete', { id }),
+
+  syncStatus: () => invoke<SyncStatus>('sync_status'),
+  syncSetEnabled: (enabled: boolean) => invoke<void>('sync_set_enabled', { enabled }),
+  syncSetDeviceName: (name: string) => invoke<void>('sync_set_device_name', { name }),
+  syncStartPairing: () => invoke<{ code: string; expires_at: number }>('sync_start_pairing'),
+  syncCancelPairing: () => invoke<void>('sync_cancel_pairing'),
+  syncPairWith: (peerId: string, code: string) => invoke<void>('sync_pair_with', { peerId, code }),
+  syncUnpair: (deviceId: string) => invoke<void>('sync_unpair', { deviceId }),
+  syncSetKinds: (dictations: boolean, clipboard: boolean) =>
+    invoke<void>('sync_set_kinds', { dictations, clipboard }),
 
   startRecording: () => invoke<void>('start_recording'),
   stopRecording: () => invoke<void>('stop_recording'),
@@ -84,6 +95,10 @@ export function onDownloadComplete(cb: (modelId: string) => void): Promise<Unlis
 
 export function onDownloadError(cb: (message: string) => void): Promise<UnlistenFn> {
   return listen<string>('model-download-error', (e) => cb(e.payload));
+}
+
+export function onSyncStatus(cb: (s: SyncStatus) => void): Promise<UnlistenFn> {
+  return listen<SyncStatus>('sync-status', (e) => cb(e.payload));
 }
 
 export function onFocusPalette(cb: () => void): Promise<UnlistenFn> {

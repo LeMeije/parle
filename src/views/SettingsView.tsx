@@ -2,8 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { enable as enableAutostart, disable as disableAutostart } from '@tauri-apps/plugin-autostart';
-import { api } from '../api';
-import type { Settings } from '../types';
+import { api, onSyncStatus } from '../api';
+import type { Settings, SyncStatus } from '../types';
 import iconDefault from '../assets/icons/default.png';
 import iconKeycap from '../assets/icons/keycap.png';
 import iconWaveform from '../assets/icons/waveform.png';
@@ -512,6 +512,8 @@ export default function SettingsView({
         </Field>
       </Section>
 
+      <SyncSection sync={s.sync} />
+
       <Section title="Audio">
         <Field label="Microphone">
           <select value={s.audio.input_device} onChange={(e) => set((d) => (d.audio.input_device = e.target.value))}>
@@ -634,6 +636,397 @@ function NumberInput({
       <span className="suffix">{suffix}</span>
     </span>
   );
+}
+
+// ---------- Sync ----------
+// Cross-machine sync, device-to-device over the LAN. State is driven entirely
+// by `sync_status` plus the `sync-status` event — no polling. Every command can
+// reject (a wrong pairing code is the *expected* failure, and the Rust side may
+// still be landing), so failures surface inline instead of blanking the panel.
+
+function SyncSection({ sync }: { sync: Settings['sync'] }) {
+  const [status, setStatus] = useState<SyncStatus | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // `sync_status` doesn't report the two kind flags, so they are seeded from
+  // settings on mount and held locally after that.
+  const [kinds, setKinds] = useState({
+    dictations: sync?.sync_dictations ?? true,
+    clipboard: sync?.sync_clipboard ?? true,
+  });
+
+  const [nameDraft, setNameDraft] = useState<string | null>(null);
+  const [confirmUnpair, setConfirmUnpair] = useState<string | null>(null);
+  const [direction, setDirection] = useState<'show' | 'enter'>('show');
+  // Optimistic code from sync_start_pairing, shown until a status event
+  // supersedes it — so the digits appear instantly even if the event lags.
+  const [seedCode, setSeedCode] = useState<{ code: string; expires_at: number } | null>(null);
+  const [peerId, setPeerId] = useState<string | null>(null);
+  const [code, setCode] = useState('');
+  const [pairError, setPairError] = useState<string | null>(null);
+  const [pairBusy, setPairBusy] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    api
+      .syncStatus()
+      .then((st) => {
+        setStatus(st);
+        setLoadError(null);
+      })
+      .catch((e) => setLoadError(errText(e)));
+    const un = onSyncStatus((st) => {
+      setStatus(st);
+      setLoadError(null);
+      setSeedCode(null);
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
+  const shownCode =
+    status?.pairing?.role === 'showing' && status.pairing.code
+      ? { code: status.pairing.code, expires_at: status.pairing.expires_at }
+      : seedCode;
+  const expiresAt = shownCode ? toMillis(shownCode.expires_at) : 0;
+  const remaining = expiresAt ? Math.max(0, Math.ceil((expiresAt - now) / 1000)) : 0;
+
+  // Only tick while a code is actually on screen.
+  useEffect(() => {
+    if (!expiresAt) return;
+    setNow(Date.now());
+    const t = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(t);
+  }, [expiresAt]);
+
+  async function setEnabled(v: boolean) {
+    setActionError(null);
+    setStatus((st) => (st ? { ...st, enabled: v } : st));
+    try {
+      await api.syncSetEnabled(v);
+    } catch (e) {
+      setActionError(errText(e));
+      api.syncStatus().then(setStatus).catch(() => {});
+    }
+  }
+
+  async function commitName(current: string) {
+    if (nameDraft === null) return;
+    const next = nameDraft.trim();
+    setNameDraft(null);
+    if (!next || next === current) return;
+    setActionError(null);
+    try {
+      await api.syncSetDeviceName(next);
+    } catch (e) {
+      setActionError(errText(e));
+    }
+  }
+
+  async function startPairing() {
+    setActionError(null);
+    try {
+      setSeedCode(await api.syncStartPairing());
+    } catch (e) {
+      setActionError(errText(e));
+    }
+  }
+
+  async function cancelPairing() {
+    setSeedCode(null);
+    setActionError(null);
+    try {
+      await api.syncCancelPairing();
+    } catch (e) {
+      setActionError(errText(e));
+    }
+  }
+
+  async function pair(id: string) {
+    setPairBusy(true);
+    setPairError(null);
+    try {
+      await api.syncPairWith(id, code);
+      setCode('');
+      setPeerId(null);
+    } catch (e) {
+      // A wrong code lands here. Say so and stop — never retry on the user's behalf.
+      setPairError(errText(e));
+    } finally {
+      setPairBusy(false);
+    }
+  }
+
+  async function unpair(id: string) {
+    setConfirmUnpair(null);
+    setActionError(null);
+    try {
+      await api.syncUnpair(id);
+    } catch (e) {
+      setActionError(errText(e));
+    }
+  }
+
+  async function saveKinds(next: { dictations: boolean; clipboard: boolean }) {
+    const prev = kinds;
+    setKinds(next);
+    setActionError(null);
+    try {
+      await api.syncSetKinds(next.dictations, next.clipboard);
+    } catch (e) {
+      setKinds(prev);
+      setActionError(errText(e));
+    }
+  }
+
+  if (loadError) {
+    return (
+      <Section title="Sync">
+        <div className="sync-block">
+          <div className="callout error">Sync isn’t available right now — {loadError}</div>
+        </div>
+      </Section>
+    );
+  }
+
+  if (!status) {
+    return (
+      <Section title="Sync">
+        <div className="sync-block">
+          <span className="sync-empty">Checking sync…</span>
+        </div>
+      </Section>
+    );
+  }
+
+  const unpaired = status.peers.filter((p) => !status.paired.some((d) => d.id === p.id));
+  const selected = unpaired.find((p) => p.id === peerId) ?? null;
+
+  return (
+    <Section title="Sync">
+      <Toggle
+        label="Sync with my other devices"
+        hint="Off unless you turn it on. Your Mac and PC talk straight to each other over your local network, end-to-end encrypted — no account, no cloud, nothing uploaded anywhere."
+        value={status.enabled}
+        onChange={setEnabled}
+      />
+
+      {status.enabled && (
+        <>
+          {actionError && (
+            <div className="sync-block">
+              <div className="callout error">
+                {actionError} <button onClick={() => setActionError(null)}>Dismiss</button>
+              </div>
+            </div>
+          )}
+
+          <Field label="This device" hint="The name the other machine sees while pairing.">
+            <input
+              className="sync-name-input"
+              value={nameDraft ?? status.device_name}
+              placeholder="Name this device"
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={() => commitName(status.device_name)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                if (e.key === 'Escape') setNameDraft(null);
+              }}
+            />
+          </Field>
+          <Field label="Device ID" hint="This install’s identity. It never leaves your network.">
+            <code className="sync-device-id">{status.device_id}</code>
+          </Field>
+
+          <div className="sync-block">
+            <div className="field-label">
+              <span>Paired devices</span>
+              <small>Only these machines can see your history. Pairing is mutual.</small>
+            </div>
+            {status.paired.length === 0 ? (
+              <span className="sync-empty">No devices paired yet — pair one below to start syncing.</span>
+            ) : (
+              <div className="sync-list">
+                {status.paired.map((d) => (
+                  <div key={d.id} className="sync-device">
+                    <span className={`sync-dot ${d.online ? 'online' : ''}`} />
+                    <span className="sync-device-body">
+                      <span className="sync-device-name">{d.name}</span>
+                      <span className="sync-device-meta">
+                        {d.online ? 'Online now' : lastSeenLabel(d.last_seen)}
+                      </span>
+                    </span>
+                    {confirmUnpair === d.id ? (
+                      <span className="sync-confirm">
+                        <span>Unpair {d.name}? It stops syncing and needs a new code to come back.</span>
+                        <button className="btn ghost" onClick={() => setConfirmUnpair(null)}>
+                          Keep it
+                        </button>
+                        <button className="btn danger" onClick={() => unpair(d.id)}>
+                          Unpair
+                        </button>
+                      </span>
+                    ) : (
+                      <button className="btn ghost" onClick={() => setConfirmUnpair(d.id)}>
+                        Unpair
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="sync-block">
+            <div className="field-label">
+              <span>Pair a new device</span>
+              <small>Either machine can start. Read the six digits aloud or type them across.</small>
+            </div>
+            <div className="seg">
+              {(['show', 'enter'] as const).map((m) => (
+                <button key={m} className={direction === m ? 'active' : ''} onClick={() => setDirection(m)}>
+                  {m === 'show' ? 'Show a code' : 'Enter a code'}
+                </button>
+              ))}
+            </div>
+
+            {direction === 'show' ? (
+              shownCode ? (
+                <div className="sync-showing">
+                  <div className="sync-code">
+                    {shownCode.code.split('').map((digit, i) => (
+                      <b key={i} className={i === 3 ? 'split' : undefined}>
+                        {digit}
+                      </b>
+                    ))}
+                  </div>
+                  <div className="sync-countdown">
+                    {remaining > 0
+                      ? `Type it on the other device — expires in ${fmtCountdown(remaining)}`
+                      : 'This code has expired.'}
+                  </div>
+                  {remaining > 0 ? (
+                    <button className="btn" onClick={cancelPairing}>
+                      Cancel
+                    </button>
+                  ) : (
+                    <button className="btn primary" onClick={startPairing}>
+                      Show a new code
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="sync-showing">
+                  <span className="sync-empty">
+                    Parle shows six digits here; type them into the other machine to confirm it’s really yours.
+                  </span>
+                  <button className="btn primary" onClick={startPairing}>
+                    Show a code
+                  </button>
+                </div>
+              )
+            ) : (
+              <>
+                {unpaired.length === 0 ? (
+                  <span className="sync-empty">
+                    No devices found yet. Open Parle on the other machine, turn Sync on there too, and make sure
+                    both are on the same network.
+                  </span>
+                ) : (
+                  <div className="sync-peers">
+                    {unpaired.map((p) => (
+                      <button
+                        key={p.id}
+                        className={`sync-peer ${p.id === peerId ? 'active' : ''}`}
+                        onClick={() => {
+                          setPeerId(p.id);
+                          setPairError(null);
+                        }}
+                      >
+                        <span className="sync-peer-name">{p.name}</span>
+                        <span className="sync-peer-addr">
+                          {p.addr}:{p.port}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="sync-enter">
+                  <input
+                    className="sync-code-input"
+                    inputMode="numeric"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="——————"
+                    value={code}
+                    onChange={(e) => {
+                      setCode(e.target.value.replace(/\D/g, '').slice(0, 6));
+                      setPairError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && selected && code.length === 6 && !pairBusy) pair(selected.id);
+                    }}
+                  />
+                  <button
+                    className="btn primary"
+                    disabled={!selected || code.length !== 6 || pairBusy}
+                    onClick={() => selected && pair(selected.id)}
+                  >
+                    {pairBusy ? 'Pairing…' : 'Pair'}
+                  </button>
+                </div>
+                {pairError && <div className="callout error">{pairError}</div>}
+              </>
+            )}
+          </div>
+
+          <Toggle
+            label="Sync dictations"
+            hint="Everything you dictate shows up in History on both machines"
+            value={kinds.dictations}
+            onChange={(v) => saveKinds({ ...kinds, dictations: v })}
+          />
+          <Toggle
+            label="Sync clipboard"
+            hint="Copy on one machine, paste on the other"
+            value={kinds.clipboard}
+            onChange={(v) => saveKinds({ ...kinds, clipboard: v })}
+          />
+        </>
+      )}
+    </Section>
+  );
+}
+
+// Tauri rejects with the command's error value — a plain string for
+// Result<_, String>, an Error if the command doesn't exist at all.
+function errText(e: unknown): string {
+  if (typeof e === 'string') return e;
+  if (e instanceof Error) return e.message;
+  if (e && typeof e === 'object' && 'message' in e) return String((e as { message: unknown }).message);
+  return 'Something went wrong.';
+}
+
+// Timestamps may arrive as epoch seconds or milliseconds; accept both.
+function toMillis(t: number): number {
+  return t > 1e11 ? t : t * 1000;
+}
+
+function fmtCountdown(secs: number): string {
+  const m = Math.floor(secs / 60);
+  return m > 0 ? `${m}:${String(secs % 60).padStart(2, '0')}` : `${secs}s`;
+}
+
+function lastSeenLabel(at: number | null): string {
+  if (at == null) return 'Never connected';
+  const ms = toMillis(at);
+  const s = Math.floor((Date.now() - ms) / 1000);
+  if (s < 60) return 'Last seen just now';
+  if (s < 3600) return `Last seen ${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `Last seen ${Math.floor(s / 3600)}h ago`;
+  return `Last seen ${new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`;
 }
 
 function keyLabel(k: string): string {

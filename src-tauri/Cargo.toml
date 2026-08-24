@@ -34,6 +34,8 @@ crossbeam-channel = { workspace = true }
 arboard = "3"
 libc = "0.2"
 echokey-core = { path = "../crates/echokey-core" }
+echokey-sync = { path = "../crates/echokey-sync" }
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
 echokey-audio = { path = "../crates/echokey-audio" }
 
 [target.'cfg(target_os = "macos")'.dependencies]

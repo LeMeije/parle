@@ -29,7 +29,17 @@ pub fn get_settings(state: State<'_, Arc<AppState>>) -> Settings {
 pub async fn set_settings(state: State<'_, Arc<AppState>>, app: AppHandle, settings: Settings) -> Result<()> {
     {
         let mut guard = state.settings.lock();
+        // The whole Settings blob comes back from the UI on every write, so any
+        // subtree the UI does not own would be overwritten with whatever it last
+        // cached. `sync` is server-owned: it carries the device identity, which
+        // must survive forever, and the paired-kind flags, which the dedicated
+        // sync_* commands mutate. A stale (or, since the field is optional in
+        // the frontend type, an ABSENT) sync subtree would deserialise to
+        // defaults and silently wipe device_id — orphaning every history row
+        // stamped with it and invalidating every pairing.
+        let owned_sync = guard.sync.clone();
         *guard = settings.clone();
+        guard.sync = owned_sync;
         guard.save(&settings_path()).map_err(err)?;
     }
     // apply_settings queues engine reconfiguration on the serial worker, so
