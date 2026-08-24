@@ -1,144 +1,117 @@
-# EchoKey — Windows Handoff
+# Parle — Windows status
 
-Everything needed to finish, test, and package EchoKey on the Windows machine
-(ASUS Zephyrus G14 2025: Ryzen AI 9 370HX, 64 GB RAM, RTX 5070 Ti 12 GB).
-The macOS build is complete and tested; the Windows platform layer is WRITTEN
-but has never been compiled or executed on Windows. This file plus the pickup
-prompt at the bottom is the entire brief.
+The Windows platform layer is **built, installed, and in daily use** on the
+ASUS Zephyrus G14 2025 (Ryzen AI 9 370HX, 64 GB, RTX 5070 Ti). This file was
+originally a brief for a build that had never been compiled; it is now a record
+of what is verified, what changed, and what is still open.
 
-## Current state (what the Mac session delivered)
+The macOS build remains the reference for behaviour. The behavioural contract
+(`shared/formatter-test-vectors.json`, `shared/dictionary-test-vectors.json`)
+passes unmodified on both platforms.
 
-- Workspace: `echokey-core` (settings/formatter/dictionary/history — fully
-  platform-independent, 44 tests + 2 contract suites), `echokey-audio` (cpal
-  capture, ordered pipeline, resampler — 12 tests), `echokey-asr` (whisper.cpp
-  via whisper-rs, registry, resumable downloader, fallback ladder — 11 tests),
-  `src-tauri` (app: pipeline, gesture machine, HUD, tray, IPC, React UI).
-- Verified on macOS: live mic -> transcript in 382 ms for 10 s audio (Metal,
-  base-q5_1); onboarding UI; clipboard capture with app attribution; behavioural
-  contract vectors green.
-- Windows-specific code lives in
-  [src-tauri/src/platform/windows.rs](../src-tauri/src/platform/windows.rs) —
-  written against the researched API surface, cfg-gated, never compiled.
+## Toolchain actually used
 
-## Toolchain to install (in order)
+Recorded because two of these are not obvious and both cost a build.
 
-1. **Rust** (stable, MSVC toolchain): https://rustup.rs — pick
-   `x86_64-pc-windows-msvc` (default).
-2. **Visual Studio Build Tools 2022+** with "Desktop development with C++"
-   (MSVC, Windows SDK) — required by whisper-rs's cmake build.
-3. **CMake** (winget install Kitware.CMake) and ensure it's on PATH.
-4. **Node.js 20+** (winget install OpenJS.NodeJS.LTS).
-5. **WebView2 runtime** — preinstalled on Windows 11; nothing to do.
-6. **CUDA Toolkit 12.8+** (only for the `--features cuda` build; the RTX 5070 Ti
-   is Blackwell/sm_120 and needs >= 12.8). CPU build works without it.
-7. Optional: NSIS is bundled by tauri-cli; no separate install needed.
+| Component | Version / note |
+|---|---|
+| Rust | stable, `x86_64-pc-windows-msvc`. `rustup-init` **prompts** — and so appears to hang — if MSVC is missing. Install Build Tools first. |
+| VS Build Tools 2022 | "Desktop development with C++" (MSVC + Windows SDK). Required by whisper.cpp's cmake build. |
+| CMake | 4.4.2, on PATH. |
+| LLVM | Required by `bindgen`; `LIBCLANG_PATH` must point at `C:\Program Files\LLVM\bin` or the build fails with "Unable to find libclang". |
+| CUDA | 13.3. MSBuild resolves the toolkit through `CUDA_PATH_V13_3`, not `CUDA_PATH`; a shell that predates the install fails with "The CUDA Toolkit directory '' does not exist". |
+| Node | 20+. |
+| WebView2 | preinstalled on Windows 11. |
 
-## Build & test sequence (run these in order, fix what breaks)
+`env.sh` at the repo root sets all of these. It is gitignored because the paths
+are machine-specific. **Source it before every cargo or tauri command:**
 
-```powershell
-cd echokey
-npm install
-
-# 1. Platform-independent crates must pass untouched (behavioural contract):
-cargo test -p echokey-core
-cargo test -p echokey-audio
-
-# 2. ASR crate, CPU first (no CUDA needed):
-cargo test -p echokey-asr
-
-# 3. THE FIRST REAL TASK: compile the app crate. platform/windows.rs has never
-#    seen a Windows compiler — expect windows-crate signature drift (HWND
-#    wrappers, BOOL conversions, GlobalAlloc HGLOBAL types). Fix until clean:
-cargo check -p echokey
-
-# 4. Dev run:
-npm run tauri dev
-
-# 5. CUDA build (after CPU works):
-cargo check -p echokey --features cuda
-npm run tauri build -- --features cuda
-
-# 6. Benchmarks (download models via the app's Models screen first, or place
-#    GGML files in %LOCALAPPDATA%\EchoKey\models):
-cargo run --release --example bench -p echokey-asr                  # CPU
-cargo run --release --example bench -p echokey-asr --features cuda  # CUDA
-# Append results to docs/BENCHMARKS.md.
+```bash
+source ./env.sh
 ```
 
-## What was researched and encoded in windows.rs (verify each on hardware)
+## Verified on hardware
 
-| Feature | Implementation | Verify |
-|---|---|---|
-| Copilot key | WH_KEYBOARD_LL; chord = LShift+LWin+VK_F23 (0x86), also VK_LAUNCH_APP1 (0xB6); swallow both down AND up (never split); dummy VK 0xFF injected while LWin held so Start menu doesn't open (PowerToys trick); LLKHF_INJECTED skipped | Press Copilot key: recording toggles, Copilot app does NOT open, Start menu does NOT open on release |
-| Bare-modifier hotkeys | vkCode gives L/R directly (VK_RCONTROL etc.); binding is swallowed down+up | Default = RightCtrl. NEVER default RightAlt (AltGr on many layouts) |
-| Hook discipline | Proc is allocation-light, unbounded channel send; hooks that exceed LowLevelHooksTimeout (~300 ms) are SILENTLY removed | Long dictation sessions: hotkey still works after hours. Consider a watchdog re-install |
-| Paste injection | Clipboard write + SendInput Ctrl+V (UIA cannot insert at caret: TextPattern read-only, ValuePattern replaces whole fields) | Notepad, Word, Chrome, VS Code, Windows Terminal |
-| Clipboard restore | GetClipboardSequenceNumber check, ~500 ms delay, OpenClipboard retry loop | Copy something, dictate, verify old clipboard returns |
-| Clipboard write etiquette | Sets ExcludeClipboardContentFromMonitorProcessing + CanIncludeInClipboardHistory=0 + "Clipboard Viewer Ignore" so transcripts stay out of Win+V history | Win+V after dictation: transcript should NOT appear |
-| Clipboard monitor | Polls GetClipboardSequenceNumber @400 ms (v1); upgrade path = message-only window + AddClipboardFormatListener | Copy in various apps -> rows appear in History with source exe |
-| HUD no-focus | WS_EX_NOACTIVATE \| WS_EX_TOPMOST \| WS_EX_TOOLWINDOW applied to raw HWND in `harden_overlay` (tao focus:false alone is insufficient) | Focus a Notepad caret, dictate: HUD appears, caret stays, text lands in Notepad |
-| Elevated windows | UIPI: hook + SendInput cannot reach elevated apps — accepted v1 gap | Document in-app if desired |
+- The workspace compiles clean. `platform/windows.rs` was written on the Mac
+  against the researched API surface and compiled on Windows with **no
+  signature drift** — the anticipated HWND/BOOL/HGLOBAL churn did not happen.
+- Full test suite green on Windows, including the shared contract vectors.
+- CUDA build, NSIS installer, install and run on this machine.
+- Core loop end to end: hold hotkey, speak, release, text lands in the target
+  app, clipboard restored, history row created.
+- The HUD does not steal focus; the caret stays in the target app.
+- **Copilot key**: starts and stops dictation, and the Copilot app never opens.
+  This took a different architecture from the Mac plan — see below.
+- Tray icon renders correctly (opaque squares and the white matte around the
+  glyph were both real bugs, now fixed), with a distinct recording state and a
+  user-selectable icon style.
+- Mic permission: real consent state read from the CapabilityAccessManager
+  registry, with a working "open Settings" action.
+- Esc during recording no longer discards the take.
 
-## Known gaps / decisions deferred to the Windows session
+## The Copilot key needed its own process
 
-- `windows` crate version pinned at 0.58 in src-tauri/Cargo.toml — bump if the
-  API has moved, but keep all listed features.
-- Copilot key hold-to-talk: F23 auto-repeats — the down handler fires once
-  because COPILOT_ACTIVE latches; verify repeat events don't retrigger Down.
-- Windows mic permission: `permission_status()` returns "unknown" — Settings
-  app handles mic consent per-app on Win 11; wire
-  `Windows.Media.Capture` permission check if worth it.
-- Parakeet backend is IMPLEMENTED and measured on macOS (~14x RT on M2 CPU,
-  parakeet.rs; feature `parakeet`, enabled in the app). On Windows the
-  sherpa-onnx crate's build script downloads prebuilt libs at build time
-  (network needed during build, or set SHERPA_ONNX_LIB_DIR). Expect
-  ~25-40x RT on the HX 370 CPU. Verify download+tar.bz2 extraction into
-  %LOCALAPPDATA%\EchoKey\models and a full dictation with the model selected.
-- Installer: `npm run tauri build` produces NSIS .exe (per-user). MSI via
-  `--bundles msi`. Test the NSIS one first.
-- The G14 has an OLED HDR display — check HUD transparency renders correctly.
+The Mac-side plan — a `WH_KEYBOARD_LL` hook inside the app — is correct in
+principle and does not survive contact with a busy Tauri process. Windows
+silently removes any hook whose proc exceeds `LowLevelHooksTimeout` (~300 ms),
+and the app's own startup and transcription work were enough to trip it.
+
+The hook now lives in `crates/echokey-hook`, built as a separate ~230 KB
+`parle-hook.exe` helper that does nothing but pump messages. The app talks to it
+over named pipes and keeps it inside a job object with
+`KILL_ON_JOB_CLOSE`, so the helper cannot outlive the app.
+
+Two things about this are load-bearing:
+
+- **Two unidirectional pipes, not one duplex pipe.** Windows serialises I/O per
+  file object, so a blocking read parked on a synchronous handle blocks
+  concurrent writes on that same handle. With one duplex pipe the UI froze
+  outright.
+- `ERROR_PIPE_CONNECTED` from `ConnectNamedPipe` means *already connected*, not
+  failure. Treating it as an error cost five reconnect attempts on every start.
+
+The rules commented in `platform/windows.rs` are still binding: never split a
+swallow across key-down and key-up; inject the dummy VK 0xFF while LWin is held
+so the Start menu does not open; skip `LLKHF_INJECTED`; keep the hook proc
+allocation-free.
+
+Note on a dead end, recorded so it is not re-investigated: F23 auto-repeat was
+suspected of defeating the press latch and a debounce was added for it. The
+logs showed a clean 1:1 press-to-event ratio and the debounce was reverted — it
+added 75 ms of latency for a bug that did not exist.
+
+## Still open
+
+- **Windows benchmarks have not been run.** `docs/BENCHMARKS.md` still contains
+  only the M2 Metal numbers; its Windows section is a prediction, not a
+  measurement. Run both and replace it:
+  ```bash
+  cargo run --release --example bench -p echokey-asr                  # CPU
+  cargo run --release --example bench -p echokey-asr --features cuda  # CUDA
+  ```
+- **Win+V exclusion is implemented but not verified on hardware.** Dictate, then
+  press Win+V: the transcript must not appear.
+- **Parakeet on Windows is unverified.** The sherpa-onnx build script downloads
+  prebuilt libraries at build time (needs network, or `SHERPA_ONNX_LIB_DIR`).
+- **Clean-account install** of the NSIS bundle has not been tested.
+- **Elevated windows**: UIPI means the hook and `SendInput` cannot reach apps
+  running elevated. Accepted gap; not surfaced in the UI.
+- **LAN sync** is built and covered by tests including two-peer exchanges over
+  real sockets, but has never run between two physical machines — there is only
+  one Windows box here. See `docs/SYNC_DESIGN.md`.
+- **Linux** has not been attempted.
+
+## A packaging trap worth remembering
+
+`tauri-build` emits no `rerun-if-changed` for the icon files, so changing an
+icon and rebuilding ships the **old** icon with no warning and no error. Force
+it by touching `build.rs` or clearing `target/release/build/echokey-*`. The only
+reliable confirmation is a byte-search of the produced executable for the new
+icon data.
 
 ## Behavioural contract
 
 `shared/formatter-test-vectors.json` and `shared/dictionary-test-vectors.json`
-are the spec. `cargo test -p echokey-core` runs them. If Windows behaviour must
-differ (it shouldn't — the formatter/dictionary are pure Rust), change the
-vectors first and flag it.
-
-## Pickup prompt for Claude Code on the Windows machine
-
-Copy-paste this to start the Windows session:
-
-```
-Read docs/WINDOWS_HANDOFF.md, docs/ARCHITECTURE.md, docs/PRODUCT.md and
-docs/research/PLATFORM.md in the echokey repo, then finish the Windows build.
-
-Context: EchoKey is a Tauri 2 + Rust on-device dictation + clipboard history
-app. The macOS side is built and tested. src-tauri/src/platform/windows.rs was
-written on the Mac against researched Windows APIs but has NEVER been compiled
-here — your first job is `cargo check -p echokey` and fixing signature drift
-until the workspace builds clean, without changing behaviour or weakening any
-of the load-bearing rules commented in that file (never split a swallow across
-key-down/key-up; dummy-key Start-menu suppression; allocation-light hook proc;
-SendInput Ctrl+V as primary injection; clipboard-history exclusion formats).
-
-Then, in order: (1) run the full test suite — the shared/*.json behavioural
-contract vectors must pass untouched; (2) `npm run tauri dev`, complete
-onboarding, verify the core loop end to end: hold Right Ctrl -> speak ->
-release -> text pastes into Notepad, clipboard restored after ~500 ms, history
-row created; (3) verify the HUD never steals focus (caret must stay in the
-target app while the overlay is visible); (4) verify the Copilot key: bind it
-in Settings -> Hotkeys, confirm it starts/stops dictation, the Copilot app
-never launches, and the Start menu does not open on release; (5) verify Win+V
-clipboard history does NOT contain injected transcripts; (6) build with
---features cuda (CUDA toolkit 12.8+ required for the RTX 5070 Ti) and run
-`cargo run --release --example bench -p echokey-asr --features cuda`, then
-append a Windows section to docs/BENCHMARKS.md with CPU vs CUDA numbers;
-(7) `npm run tauri build -- --features cuda` and test the NSIS installer on a
-clean user account; (8) update docs/WINDOWS_HANDOFF.md marking what's verified
-and listing anything still open, and commit as you go with clear messages.
-
-Work autonomously; test rigorously at each step; fix what you find. The bar is
-commercial-grade: the Windows experience must be indistinguishable in polish
-from the macOS one.
-```
+are the spec; `cargo test -p echokey-core` runs them. If Windows behaviour ever
+has to differ — it should not, the formatter and dictionary are pure Rust —
+change the vectors first and flag it.
