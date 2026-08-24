@@ -189,9 +189,15 @@ pub fn exchange<S: Read + Write>(
         _ => HashMap::new(),
     };
 
-    // 3. Serve. Every source we hold, not just our own — otherwise an edit made
-    //    here to a row that originated elsewhere never propagates.
-    for (source, _) in mine.iter() {
+    // 3. Serve. Every source we hold ANYTHING for — live rows or only
+    //    tombstones. Iterating live rows alone meant that deleting the last
+    //    surviving row from a source made its tombstone unreachable, and the
+    //    peer kept that row forever while we kept refusing its copy.
+    let sources = store
+        .lock()
+        .known_sources()
+        .map_err(|e| ReplicateError::Store(e.to_string()))?;
+    for source in sources.iter() {
         let mut after = peer_marks.get(source).copied().unwrap_or(0);
         for _ in 0..MAX_BATCHES {
             let page = fetch_page(store, source, after)?;
@@ -205,9 +211,20 @@ pub fn exchange<S: Read + Write>(
                 .filter_map(to_wire)
                 .collect();
             let more = page.len() >= PAGE;
+            // Chunked on the way out. fetch_page can legitimately return far
+            // more than PAGE when it widens past a saturated millisecond, and
+            // the wire refuses any batch over MAX_BATCH_LEN — sending it whole
+            // aborted the entire exchange, deterministically, every time. That
+            // is the same class of bug as PAGE-vs-MAX_BATCH_LEN, reintroduced
+            // one function along, so the send path now enforces it itself.
             if !out.is_empty() {
                 stats.sent_items += out.len();
-                session.send(&SyncMessage::Items { items: out, more })?;
+                let chunks: Vec<_> = out.chunks(PAGE).map(|c| c.to_vec()).collect();
+                let last_ix = chunks.len() - 1;
+                for (ix, chunk) in chunks.into_iter().enumerate() {
+                    let more_to_come = more || ix < last_ix;
+                    session.send(&SyncMessage::Items { items: chunk, more: more_to_come })?;
+                }
             }
             // `last == after` means the cursor cannot advance: every row in a
             // full page shared one millisecond even after widening. Without
@@ -231,20 +248,25 @@ pub fn exchange<S: Read + Write>(
             let last = page.last().map(|t| t.deleted_at).unwrap_or(after);
             let more = page.len() >= PAGE;
             stats.sent_tombstones += page.len();
-            session.send(&SyncMessage::Tombstones {
-                entries: page
-                    .iter()
-                    .filter_map(|t| {
-                        DeviceId::parse(&t.source_machine).ok().map(|d| Tombstone {
-                            source_device: d,
-                            origin_id: t.origin_id.clone(),
-                            deleted_at: t.deleted_at,
-                            clock: t.deleted_at.max(0) as u64,
-                        })
+            let entries: Vec<Tombstone> = page
+                .iter()
+                .filter_map(|t| {
+                    DeviceId::parse(&t.source_machine).ok().map(|d| Tombstone {
+                        source_device: d,
+                        origin_id: t.origin_id.clone(),
+                        deleted_at: t.deleted_at,
+                        clock: t.deleted_at.max(0) as u64,
                     })
-                    .collect(),
-                more,
-            })?;
+                })
+                .collect();
+            if !entries.is_empty() {
+                let chunks: Vec<_> = entries.chunks(PAGE).map(|c| c.to_vec()).collect();
+                let last_ix = chunks.len() - 1;
+                for (ix, chunk) in chunks.into_iter().enumerate() {
+                    let more_to_come = more || ix < last_ix;
+                    session.send(&SyncMessage::Tombstones { entries: chunk, more: more_to_come })?;
+                }
+            }
             if !more || last == after {
                 break;
             }
@@ -502,5 +524,20 @@ mod tests {
             "our own id must be refused even if it appears in the roster"
         );
         assert!(!a.accepts(""), "an empty source is refused");
+    }
+
+    #[test]
+    fn an_outbound_batch_never_exceeds_the_wire_limit() {
+        // fetch_page widens past a saturated millisecond and can return far
+        // more than PAGE. Sending that whole vector was refused by the wire and
+        // aborted the exchange every time, deterministically.
+        let big: Vec<u32> = (0..20_000).collect();
+        for chunk in big.chunks(PAGE) {
+            assert!(
+                chunk.len() <= echokey_sync::MAX_BATCH_LEN,
+                "every chunk must be acceptable to the wire"
+            );
+        }
+        assert_eq!(big.chunks(PAGE).map(|c| c.len()).sum::<usize>(), 20_000, "nothing dropped");
     }
 }

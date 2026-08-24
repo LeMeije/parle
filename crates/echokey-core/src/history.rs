@@ -83,6 +83,18 @@ impl Store {
         Self::init(Connection::open_in_memory()?)
     }
 
+    /// Open on a caller-supplied connection. Tests use it to build a database
+    /// in a specific historical state and prove the migration copes.
+    #[cfg(test)]
+    pub fn from_connection_for_test(conn: Connection) -> Result<Self, StoreError> {
+        Self::init(conn)
+    }
+
+    #[cfg(test)]
+    pub fn conn_for_test(&self) -> &Connection {
+        &self.conn
+    }
+
     fn init(conn: Connection) -> Result<Self, StoreError> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -159,10 +171,32 @@ impl Store {
             // identity: we cannot attribute them, so they keep a NULL origin_id
             // and simply never replicate. Guessing would let two machines each
             // claim the same row.
+            // Each ALTER is guarded, because SQLite has no ADD COLUMN IF NOT
+            // EXISTS and this step is not atomic on its own: a crash or a force
+            // quit between the two ALTERs previously left user_version at 2 with
+            // origin_id already present, and every subsequent launch died on
+            // "duplicate column name" with no repair path — the user's entire
+            // history unreachable. The whole step also runs in one transaction
+            // so it either lands or does not.
+            let has_col = |name: &str| -> Result<bool, StoreError> {
+                let mut st = conn.prepare("PRAGMA table_info(items)")?;
+                let mut rows = st.query([])?;
+                while let Some(r) = rows.next()? {
+                    let c: String = r.get(1)?;
+                    if c == name {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            };
+            if !has_col("origin_id")? {
+                conn.execute("ALTER TABLE items ADD COLUMN origin_id TEXT", [])?;
+            }
+            if !has_col("updated_at")? {
+                conn.execute("ALTER TABLE items ADD COLUMN updated_at INTEGER", [])?;
+            }
             conn.execute_batch(
                 r#"
-                ALTER TABLE items ADD COLUMN origin_id TEXT;
-                ALTER TABLE items ADD COLUMN updated_at INTEGER;
 
                 UPDATE items SET updated_at = created_at WHERE updated_at IS NULL;
                 UPDATE items SET origin_id = CAST(id AS TEXT)
@@ -462,13 +496,46 @@ impl Store {
         Ok(())
     }
 
+    /// Delete unpinned history, writing tombstones so the deletes propagate.
+    ///
+    /// Without the tombstones this was worse than useless on a synced pair:
+    /// clearing removed the rows locally, the source then vanished from
+    /// `watermarks()` (which only sees surviving rows), the peer therefore
+    /// served from zero, and the "cleared" history came straight back on the
+    /// next exchange. Someone who pasted a password, panicked and hit Clear
+    /// History got it returned to them thirty seconds later.
     pub fn clear(&self, kind: Option<HistoryKind>) -> Result<usize, StoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let now = now_ms();
         let n = match kind {
-            Some(k) => self
-                .conn
-                .execute("DELETE FROM items WHERE kind=?1 AND pinned=0", params![kind_str(k)])?,
-            None => self.conn.execute("DELETE FROM items WHERE pinned=0", [])?,
+            Some(k) => {
+                tx.execute(
+                    "INSERT INTO tombstones (source_machine, origin_id, deleted_at)
+                     SELECT source_machine, origin_id, max(?2, COALESCE(updated_at, created_at))
+                       FROM items
+                      WHERE kind=?1 AND pinned=0
+                        AND source_machine IS NOT NULL AND origin_id IS NOT NULL
+                     ON CONFLICT(source_machine, origin_id)
+                     DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at)",
+                    params![kind_str(k), now],
+                )?;
+                tx.execute("DELETE FROM items WHERE kind=?1 AND pinned=0", params![kind_str(k)])?
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO tombstones (source_machine, origin_id, deleted_at)
+                     SELECT source_machine, origin_id, max(?1, COALESCE(updated_at, created_at))
+                       FROM items
+                      WHERE pinned=0
+                        AND source_machine IS NOT NULL AND origin_id IS NOT NULL
+                     ON CONFLICT(source_machine, origin_id)
+                     DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at)",
+                    params![now],
+                )?;
+                tx.execute("DELETE FROM items WHERE pinned=0", [])?
+            }
         };
+        tx.commit()?;
         Ok(n)
     }
 
@@ -513,12 +580,41 @@ impl Store {
     ///
     /// A source with no surviving rows is absent from the result, not zero.
     pub fn watermarks(&self) -> Result<Vec<(String, i64)>, StoreError> {
+        // The union of live rows AND tombstones, deliberately.
+        //
+        // Taking it from surviving rows alone had two consequences, both of
+        // which lost data. A source whose last row was deleted disappeared from
+        // the list entirely, so its tombstone was never served and the peer
+        // kept the row forever; and after a clear, the peer saw no watermark at
+        // all and served the whole history straight back.
         let mut stmt = self.conn.prepare(
-            "SELECT source_machine, MAX(COALESCE(updated_at, created_at)) FROM items
-             WHERE source_machine IS NOT NULL AND origin_id IS NOT NULL
+            "SELECT source_machine, MAX(clock) FROM (
+                 SELECT source_machine, COALESCE(updated_at, created_at) AS clock
+                   FROM items
+                  WHERE source_machine IS NOT NULL AND origin_id IS NOT NULL
+                 UNION ALL
+                 SELECT source_machine, deleted_at AS clock FROM tombstones
+             )
              GROUP BY source_machine ORDER BY source_machine",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Every source we hold anything for, live or deleted.
+    ///
+    /// The serve loop iterates this rather than `watermarks()` keys so that a
+    /// source with only tombstones left still gets its deletes offered.
+    pub fn known_sources(&self) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT source_machine FROM (
+                 SELECT source_machine FROM items
+                  WHERE source_machine IS NOT NULL AND origin_id IS NOT NULL
+                 UNION
+                 SELECT source_machine FROM tombstones
+             ) ORDER BY source_machine",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -1432,5 +1528,94 @@ mod tests {
         st.set_device_id("device-abc");
         let id1 = st.insert_clipboard("after", None, None).unwrap();
         assert_eq!(st.source_machine_of(id1).unwrap().as_deref(), Some("device-abc"));
+    }
+
+    #[test]
+    fn clearing_history_leaves_tombstones_so_the_clear_actually_sticks() {
+        // The failure this guards: clear() removed rows but wrote no
+        // tombstones, the source then vanished from watermarks(), the peer
+        // served from zero and handed the "cleared" history straight back.
+        let mut st = Store::open_in_memory().unwrap();
+        st.set_device_id("dev-a");
+        st.insert_clipboard("a password", None, None).unwrap();
+        st.insert_clipboard("something else", None, None).unwrap();
+        assert_eq!(st.clear(None).unwrap(), 2);
+
+        let t = st.tombstones_since("dev-a", 0, 100).unwrap();
+        assert_eq!(t.len(), 2, "every cleared row leaves a tombstone");
+
+        // And the source is still visible to replication, so the peer is told
+        // about the deletes rather than being asked for everything again.
+        let w = st.watermarks().unwrap();
+        assert!(
+            w.iter().any(|(src, _)| src == "dev-a"),
+            "a source with only tombstones must still report a watermark"
+        );
+        assert!(st.known_sources().unwrap().iter().any(|s| s == "dev-a"));
+    }
+
+    #[test]
+    fn a_pinned_row_survives_clear_and_is_not_tombstoned() {
+        let mut st = Store::open_in_memory().unwrap();
+        st.set_device_id("dev-a");
+        let keep = st.insert_clipboard("keep me", None, None).unwrap();
+        st.insert_clipboard("bin me", None, None).unwrap();
+        st.set_pinned(keep, true).unwrap();
+        assert_eq!(st.clear(None).unwrap(), 1);
+        assert_eq!(st.tombstones_since("dev-a", 0, 100).unwrap().len(), 1);
+        assert!(st.source_machine_of(keep).unwrap().is_some(), "pinned row still there");
+    }
+
+    #[test]
+    fn deleting_the_last_row_from_a_source_still_propagates_the_delete() {
+        // watermarks() used to see only surviving rows, so a source whose last
+        // row was deleted disappeared and its tombstone was never served — the
+        // peer kept the row forever.
+        let mut st = Store::open_in_memory().unwrap();
+        st.set_device_id("me");
+        let remote = RemoteItem {
+            source_machine: "peer".into(),
+            origin_id: "1".into(),
+            kind: "clipboard".into(),
+            text: "theirs".into(),
+            created_at: 1_000,
+            updated_at: 1_000,
+            pinned: false,
+        };
+        st.apply_remote_item(&remote).unwrap();
+        let id: i64 = st
+            .conn_for_test()
+            .query_row("SELECT id FROM items WHERE source_machine='peer'", [], |r| r.get(0))
+            .unwrap();
+        st.delete_item_local(id).unwrap();
+
+        assert!(
+            st.known_sources().unwrap().iter().any(|s| s == "peer"),
+            "the source must remain visible so its tombstone is offered"
+        );
+        assert_eq!(st.tombstones_since("peer", 0, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_interrupted_v3_migration_can_be_re_run() {
+        // A crash between the two ALTERs left user_version at 2 with origin_id
+        // already added, and every later launch died on "duplicate column
+        // name" — the whole history unreachable, with no repair path.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE items (
+                id INTEGER PRIMARY KEY, kind TEXT, text TEXT, raw_text TEXT,
+                created_at INTEGER, duration_ms INTEGER, model_id TEXT, language TEXT,
+                app_id TEXT, app_name TEXT, meta TEXT, pinned INTEGER DEFAULT 0,
+                source_machine TEXT
+             );",
+        )
+        .unwrap();
+        // Half-applied state.
+        conn.execute("ALTER TABLE items ADD COLUMN origin_id TEXT", []).unwrap();
+        conn.pragma_update(None, "user_version", 2i64).unwrap();
+
+        let store = Store::from_connection_for_test(conn);
+        assert!(store.is_ok(), "a half-applied migration must be recoverable: {:?}", store.err());
     }
 }
