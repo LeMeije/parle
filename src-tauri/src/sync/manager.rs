@@ -26,7 +26,7 @@ use tauri::{AppHandle, Emitter};
 use super::guard::{GuardError, PairingGuard};
 use super::keystore;
 use super::pair_flow;
-use super::replicate::{self, Kinds};
+use super::replicate::{self, Kinds, Retention};
 use super::wire_tcp::{read_byte, read_frame, write_byte, write_frame, MODE_PAIR, MODE_SESSION};
 use echokey_core::history::Store;
 
@@ -110,6 +110,9 @@ pub struct SyncManager {
     stop: Arc<AtomicBool>,
     store: Arc<Mutex<Store>>,
     inbound: Arc<AtomicUsize>,
+    /// Mirrored from settings so the replication path never has to reach back
+    /// into AppState (which would invert the lock order).
+    retention_days: Arc<AtomicUsize>,
 }
 
 impl SyncManager {
@@ -145,6 +148,7 @@ impl SyncManager {
             stop: Arc::new(AtomicBool::new(false)),
             store,
             inbound: Arc::new(AtomicUsize::new(0)),
+            retention_days: Arc::new(AtomicUsize::new(0)),
         });
         if s.enabled {
             m.clone().start();
@@ -499,6 +503,11 @@ impl SyncManager {
         self.publish();
     }
 
+    /// Kept in step with history.retention_days by apply_settings.
+    pub fn set_retention_days(&self, days: u32) {
+        self.retention_days.store(days as usize, Ordering::SeqCst);
+    }
+
     pub fn set_kinds(&self, dictations: bool, clipboard: bool) {
         let mut i = self.inner.lock();
         i.dictations = dictations;
@@ -539,9 +548,10 @@ impl SyncManager {
                 Kinds { dictations: i.dictations, clipboard: i.clipboard },
             )
         };
+        let retention = Retention { oldest_allowed: self.retention_floor() };
         // The store lock is taken inside the exchange, per statement, never
         // held across a socket read.
-        match replicate::exchange(&mut session, &self.store, (&me_id, &me_name), kinds) {
+        match replicate::exchange(&mut session, &self.store, (&me_id, &me_name), kinds, retention) {
             Ok(stats) => tracing::info!(
                 "sync: {peer_id} sent {} items / {} tombstones, applied {} / {}, ignored {}",
                 stats.sent_items,
@@ -558,6 +568,16 @@ impl SyncManager {
         }
         drop(i);
         self.publish();
+    }
+
+    /// Oldest `created_at` this machine will keep, from the retention setting.
+    /// None when retention is off.
+    fn retention_floor(&self) -> Option<i64> {
+        let days = self.retention_days.load(Ordering::SeqCst);
+        if days == 0 {
+            return None;
+        }
+        Some(now_ms() - (days as i64) * 86_400_000)
     }
 
     /// Connect to a paired peer we have just seen and run one exchange.

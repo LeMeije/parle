@@ -269,8 +269,13 @@ impl Store {
         let last: Option<(i64, String)> = self
             .conn
             .query_row(
-                "SELECT id, text FROM items WHERE kind='clipboard' ORDER BY created_at DESC LIMIT 1",
-                [],
+                // Only ever dedupe against OUR OWN rows. Comparing against
+                // replicated rows lets a local copy mutate a row that belongs
+                // to another machine and produce no local row at all — the
+                // capture would appear to vanish, and the edit would propagate
+                // back as a change to the peer's item.
+                "SELECT id, text FROM items                  WHERE kind='clipboard'                    AND (source_machine IS NULL OR source_machine = ?1)                  ORDER BY created_at DESC LIMIT 1",
+                params![self.source()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;

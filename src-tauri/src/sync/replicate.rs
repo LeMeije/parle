@@ -62,6 +62,29 @@ pub struct Kinds {
     pub clipboard: bool,
 }
 
+/// The receiving machine's retention window, in epoch ms. Rows older than this
+/// are refused rather than stored.
+///
+/// The design settles that a synced row obeys the RECEIVER's retention, and
+/// enforcing it here is also what stops an infinite loop: without it, a row the
+/// local machine has just pruned is immediately re-pulled from the peer,
+/// re-inserted, pruned again on the next sweep, and pulled again forever.
+/// Retention is a per-device policy, so the peer is right to still be offering
+/// the row — we are simply right not to keep it.
+#[derive(Debug, Clone, Copy)]
+pub struct Retention {
+    pub oldest_allowed: Option<i64>,
+}
+
+impl Retention {
+    pub fn keeps(&self, created_at: i64) -> bool {
+        match self.oldest_allowed {
+            Some(floor) => created_at >= floor,
+            None => true,
+        }
+    }
+}
+
 impl Kinds {
     fn allows(&self, kind: &str) -> bool {
         match kind {
@@ -79,6 +102,7 @@ pub fn exchange<S: Read + Write>(
     store: &Arc<Mutex<Store>>,
     me: (&str, &str),
     kinds: Kinds,
+    retention: Retention,
 ) -> Result<RoundStats, ReplicateError> {
     let mut stats = RoundStats::default();
 
@@ -187,6 +211,12 @@ pub fn exchange<S: Read + Write>(
         match session.recv()? {
             SyncMessage::Items { items, more } => {
                 for it in &items {
+                    if !retention.keeps(it.created_at) {
+                        // Older than this machine keeps. Refusing is what stops
+                        // prune and replication fighting each other forever.
+                        stats.ignored += 1;
+                        continue;
+                    }
                     apply_item(store, it, &mut stats)?;
                 }
                 if !more && items.is_empty() {
@@ -346,5 +376,18 @@ mod tests {
             pinned: false,
         };
         assert!(to_wire(&r).is_none());
+    }
+
+    #[test]
+    fn retention_refuses_rows_older_than_this_machine_keeps() {
+        let r = Retention { oldest_allowed: Some(1_000) };
+        assert!(!r.keeps(999), "older than the floor is refused");
+        assert!(r.keeps(1_000), "exactly at the floor is kept");
+        assert!(r.keeps(5_000));
+
+        // Retention disabled keeps everything, including very old rows.
+        let none = Retention { oldest_allowed: None };
+        assert!(none.keeps(0));
+        assert!(none.keeps(i64::MIN));
     }
 }

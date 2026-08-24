@@ -74,6 +74,7 @@ impl AppState {
             &settings.lock().sync.clone(),
             store.clone(),
         );
+        sync.set_retention_days(settings.lock().history.retention_days);
 
         let use_gpu = cfg!(any(target_os = "macos", feature = "cuda"));
         let engine = Arc::new(Mutex::new(EngineManager::new(models_dir(), use_gpu)));
@@ -303,6 +304,8 @@ impl AppState {
             #[cfg(target_os = "windows")]
             h.set_suppress_copilot(s.hotkeys.suppress_copilot);
         }
+        // Replication refuses rows older than we keep, so it has to know.
+        self.sync.set_retention_days(s.history.retention_days);
         if let Some(m) = self.clipboard_monitor.lock().as_ref() {
             m.set_enabled(s.history.clipboard_capture);
         }
