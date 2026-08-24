@@ -603,18 +603,8 @@ pub async fn sync_unpair(state: State<'_, Arc<AppState>>, device_id: String) -> 
 
 /// Mirror the manager's state into settings.json.
 ///
-/// The manager is the source of truth while running; settings is only where it
-/// survives a restart. Paired KEYS are never written here — they live in the OS
-/// keychain.
+/// The manager owns this now, because it also changes pairing state on paths no
+/// command ever sees — an inbound pairing completes on a listener thread.
 fn persist_sync(state: &Arc<AppState>) {
-    let (enabled, name, dictations, clipboard, paired) = state.sync.persistable();
-    let mut s = state.settings.lock();
-    s.sync.enabled = enabled;
-    s.sync.device_name = name;
-    s.sync.sync_dictations = dictations;
-    s.sync.sync_clipboard = clipboard;
-    s.sync.paired = paired;
-    if let Err(e) = s.save(&settings_path()) {
-        tracing::warn!("could not persist sync settings: {e}");
-    }
+    state.sync.persist();
 }

@@ -15,9 +15,10 @@
 //! It is still only as trustworthy as the code: see the note in `pairing.rs`
 //! about device ids not being bound into the SPAKE2 transcript.
 
-use std::net::TcpStream;
-
-use echokey_sync::{ConfirmTag, PairedKey, Pairing, PairingCode, PairingError, PairingRole};
+use echokey_sync::{
+    ConfirmTag, PairedKey, Pairing, PairingCode, PairingError, PairingRole, Session, SessionError,
+    SyncMessage, PROTOCOL_VERSION,
+};
 
 use super::wire_tcp::{read_frame, write_frame, TcpError};
 
@@ -31,6 +32,10 @@ pub enum PairFlowError {
     BadTag,
     #[error("peer sent a malformed identity")]
     BadIdentity,
+    #[error("could not open a confirmed channel to exchange identity: {0}")]
+    Session(#[from] SessionError),
+    #[error("peer speaks sync protocol {peer}, we speak {ours}")]
+    Version { peer: u16, ours: u16 },
 }
 
 /// Length of a SPAKE2 opening message, measured from the library rather than
@@ -66,8 +71,8 @@ pub struct Paired {
 /// A wrong code surfaces as `PairingError::CodeMismatch` from `verify_peer` —
 /// it must fail here, loudly, rather than yielding a key that produces a
 /// mysteriously broken session later.
-pub fn run(
-    stream: &mut TcpStream,
+pub fn run<S: std::io::Read + std::io::Write>(
+    stream: &mut S,
     role: PairingRole,
     code: &PairingCode,
     me: (&str, &str),
@@ -84,8 +89,8 @@ pub fn run(
 /// the LAN. Requiring a well-formed frame first costs the attacker real work
 /// and reveals nothing, so it does not reintroduce the TOCTOU that the
 /// charge-before-exchange ordering exists to close.
-pub fn run_with(
-    stream: &mut TcpStream,
+pub fn run_with<S: std::io::Read + std::io::Write>(
+    stream: &mut S,
     role: PairingRole,
     code: &PairingCode,
     me: (&str, &str),
@@ -106,20 +111,48 @@ pub fn run_with(
     // Fails closed on a wrong code. Nothing below this line runs otherwise.
     let key = confirm.verify_peer(&ConfirmTag::from_bytes(peer_tag))?;
 
-    // Identity, now that the channel is proven to share a secret.
-    let mine = encode_identity(me.0, me.1);
-    let theirs = match role {
-        PairingRole::Responder => {
-            write_frame(stream, &mine)?;
-            read_frame(stream)?
-        }
-        PairingRole::Initiator => {
-            let t = read_frame(stream)?;
-            write_frame(stream, &mine)?;
-            t
-        }
+    // Identity is exchanged INSIDE a session keyed by what we just agreed, not
+    // in the clear on the raw socket.
+    //
+    // Sending it as plain frames was a real hole even though the key was
+    // already confirmed. An attacker on the path relays the SPAKE2 messages and
+    // the confirmation tags byte for byte — so it never learns the key and both
+    // sides verify — and rewrites only the identity frames. Both machines then
+    // pair successfully and file the key under an attacker-chosen id and name:
+    // the device list shows a name the attacker picked, and the keychain entry
+    // is keyed on an id no real device will ever announce, so sync silently
+    // never works again.
+    //
+    // A Noise session closes it without inventing anything: an attacker who
+    // does not hold the key cannot complete the handshake, let alone forge a
+    // message inside it. `Hello` is exactly the right payload — it carries the
+    // id and name, and its validation rejects device names that the raw path
+    // waved through into the log, the UI and settings.json.
+    let mut session = match role {
+        PairingRole::Initiator => Session::initiate(&mut *stream, &key)?,
+        PairingRole::Responder => Session::accept(&mut *stream, &key)?,
     };
-    let (device_id, device_name) = decode_identity(&theirs).ok_or(PairFlowError::BadIdentity)?;
+    session.send(&SyncMessage::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        device_id: echokey_sync::DeviceId::parse(me.0).map_err(|_| PairFlowError::BadIdentity)?,
+        device_name: me.1.chars().take(64).collect(),
+    })?;
+    let (device_id, device_name) = match session.recv()? {
+        SyncMessage::Hello { protocol_version, device_id, device_name }
+            if protocol_version == PROTOCOL_VERSION =>
+        {
+            (device_id.as_str().to_string(), device_name)
+        }
+        SyncMessage::Hello { protocol_version, .. } => {
+            return Err(PairFlowError::Version { peer: protocol_version, ours: PROTOCOL_VERSION })
+        }
+        _ => return Err(PairFlowError::BadIdentity),
+    };
+    let device_name = if device_name.trim().is_empty() {
+        "Unnamed device".to_string()
+    } else {
+        device_name
+    };
 
     Ok(Paired { key, device_id, device_name })
 }
@@ -148,7 +181,7 @@ fn decode_identity(buf: &[u8]) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
 
     fn socket_pair() -> (TcpStream, TcpStream) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -272,44 +305,47 @@ mod adversarial {
     /// attacker simply repeats it against every code the user displays, so the
     /// user can never pair a device at all while the attacker is on the LAN.
     #[test]
-    fn adv_junk_of_the_right_length_burns_the_pairing_budget() {
+    fn junk_can_burn_one_code_but_cannot_deny_pairing() {
+        // Honest about what is and is not fixable. `looks_like_pairing_message`
+        // is a length check, and it cannot be much more: a genuine SPAKE2
+        // opening message is indistinguishable from one generated against a
+        // random code, so an attacker can always produce something that costs a
+        // real guess. Junk of the right shape therefore still burns the code
+        // that is currently on screen.
+        //
+        // What must NOT happen is the user being unable to pair at all. That
+        // was the actual defect: the lockout refused to issue a replacement, so
+        // five 33-byte connections denied pairing for five minutes, repeatable
+        // forever by anyone on the LAN.
         let junk = vec![0u8; spake2_msg_len()];
-        assert!(
-            looks_like_pairing_message(&junk),
-            "the shape gate accepts {} bytes of zeroes",
-            junk.len()
-        );
+        assert!(looks_like_pairing_message(&junk), "the shape gate is length-only");
 
         let mut g = PairingGuard::new();
         let now = Instant::now();
         g.begin("123456".into(), now).unwrap();
 
-        let mut charged = 0;
         let mut locked = false;
         for _ in 0..MAX_FAILURES {
-            // exactly manager.rs:466-489
+            // exactly what serve_pairing does
             if !looks_like_pairing_message(&junk) {
                 continue;
             }
-            match g.reserve(now) {
-                Ok(_) => charged += 1,
-                Err(GuardError::LockedOut { .. }) => {
-                    locked = true;
-                    break;
-                }
-                Err(e) => panic!("unexpected {e:?}"),
+            if let Err(GuardError::LockedOut { .. }) = g.reserve(now) {
+                locked = true;
+                break;
             }
         }
-        assert_eq!(charged, (MAX_FAILURES - 1) as usize);
-        assert!(locked, "{MAX_FAILURES} junk connections locked pairing out");
+        assert!(locked, "the code on screen is burnt, as designed");
 
-        // The code is gone and a fresh one cannot even be displayed.
-        assert!(g.code(now).is_none(), "the live code was burned");
+        // The user shows a new code and is immediately able to pair again.
+        g.begin("654321".into(), now)
+            .expect("a fresh code must be available despite the lockout");
         assert!(
-            matches!(g.begin("654321".into(), now), Err(GuardError::LockedOut { .. })),
-            "the user cannot start a new pairing for {LOCKOUT:?}"
+            g.reserve(now).is_ok(),
+            "a real device must be able to pair against the new code"
         );
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -318,8 +354,9 @@ mod adversarial {
 #[cfg(test)]
 mod adversarial_mitm {
     use super::*;
-    use crate::sync::wire_tcp::{read_frame, write_frame};
-    use std::net::TcpListener;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
 
     const A_ID: &str = "11111111-1111-4111-8111-111111111111";
     const REAL_B: &str = "22222222-2222-4222-8222-222222222222";
@@ -330,49 +367,52 @@ mod adversarial_mitm {
         let addr = l.local_addr().unwrap();
         let c = TcpStream::connect(addr).unwrap();
         let (s, _) = l.accept().unwrap();
+        for sock in [&c, &s] {
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            sock.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        }
         (c, s)
     }
 
-    /// Pump three frames one way, optionally replacing one of them. SPAKE2 and
-    /// the confirmation tags pass through byte for byte, so both honest ends
-    /// still derive the same key and both `verify_peer` calls succeed.
-    fn relay(mut from: TcpStream, mut to: TcpStream, swap_ix: Option<usize>, replacement: Vec<u8>) {
-        for ix in 0..3 {
-            let Ok(f) = read_frame(&mut from) else { return };
-            let out = if Some(ix) == swap_ix { replacement.clone() } else { f };
-            if write_frame(&mut to, &out).is_err() {
+    /// A byte pump, not a frame pump.
+    ///
+    /// It has to be raw bytes now: identity moved inside a Noise session, which
+    /// does its own framing, so anything that assumed the pre-session
+    /// length-prefixed shape simply blocks forever partway through.
+    ///
+    /// `corrupt_after` flips a bit once that many bytes have passed, which is
+    /// the strongest thing an on-path attacker can still do — it cannot read or
+    /// forge session traffic without the key.
+    fn pump(mut from: TcpStream, mut to: TcpStream, corrupt_after: Option<usize>) {
+        let mut seen = 0usize;
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = match from.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            if let Some(at) = corrupt_after {
+                if seen + n > at && seen <= at {
+                    let ix = (at - seen).min(n - 1);
+                    buf[ix] ^= 0xff;
+                }
+            }
+            seen += n;
+            if to.write_all(&buf[..n]).is_err() {
                 return;
             }
+            let _ = to.flush();
         }
     }
 
-    /// FINDING: the identity frame exchanged after `verify_peer` travels in
-    /// CLEARTEXT over the raw TCP socket with no MAC (`run_with`,
-    /// pair_flow.rs:109-121). An on-path attacker relaying the SPAKE2 messages
-    /// and confirmation tags verbatim never learns the key — but it rewrites
-    /// the identity, so the two honest machines finish pairing on a shared key
-    /// filed under a device id and display name of the attacker's choosing.
-    ///
-    /// Fallout: the paired-devices list shows an attacker-chosen name; the
-    /// keychain entry is keyed on an id the real peer will never announce, so
-    /// `serve_session` finds no key for it and sync silently never works; and
-    /// the bogus id lands in `Attribution::known`, where any other paired peer
-    /// is then allowed to author rows for it.
-    #[test]
-    fn adv_an_on_path_attacker_rewrites_the_peer_identity_after_key_agreement() {
+    fn pair_through_relay(corrupt_down_after: Option<usize>) -> (Result<Paired, PairFlowError>, Result<Paired, PairFlowError>) {
         let (a_end, mitm_left) = connected();
         let (mitm_right, b_end) = connected();
 
         let left_r = mitm_left.try_clone().unwrap();
-        let left_w = mitm_left;
         let right_r = mitm_right.try_clone().unwrap();
-        let right_w = mitm_right;
-
-        // A -> B untouched.
-        let up = std::thread::spawn(move || relay(left_r, right_w, None, Vec::new()));
-        // B -> A with the identity frame (index 2) swapped.
-        let forged = format!("{FAKE_B}\nTotally Ben's MacBook").into_bytes();
-        let down = std::thread::spawn(move || relay(right_r, left_w, Some(2), forged));
+        let up = std::thread::spawn(move || pump(left_r, mitm_right, None));
+        let down = std::thread::spawn(move || pump(right_r, mitm_left, corrupt_down_after));
 
         let code = PairingCode::parse("135791").unwrap();
         let code_b = code.clone();
@@ -383,22 +423,48 @@ mod adversarial_mitm {
         let mut a = a_end;
         let a_result = run(&mut a, PairingRole::Initiator, &code, (A_ID, "Deck A"));
         let b_result = bt.join().unwrap();
-        up.join().unwrap();
-        down.join().unwrap();
+        drop(a);
+        let _ = up.join();
+        let _ = down.join();
+        (a_result, b_result)
+    }
 
-        let a_paired = a_result.expect("A believes pairing succeeded");
-        let b_paired = b_result.expect("B believes pairing succeeded");
+    /// Regression. Identity used to be exchanged as plain frames on the raw
+    /// socket after `verify_peer`, with no encryption and no MAC. An on-path
+    /// attacker relaying the SPAKE2 messages and confirmation tags verbatim
+    /// never learns the key — both `verify_peer` calls succeed — but it could
+    /// rewrite the identity, so the two honest machines finished pairing on a
+    /// shared key filed under a device id and display name of the attacker's
+    /// choosing: a phishing name in the device list, and a keychain entry keyed
+    /// on an id no real device announces, so sync silently never worked again.
+    ///
+    /// Identity now travels inside a Noise session keyed by the agreed secret.
+    #[test]
+    fn an_on_path_attacker_cannot_rewrite_the_peer_identity() {
+        // Tamper once the SPAKE2 and confirmation phases are behind us, which
+        // is where the old cleartext identity frame used to sit.
+        let (a_result, _b) = pair_through_relay(Some(200));
+        match a_result {
+            Err(_) => {}
+            Ok(p) => {
+                assert_ne!(p.device_id, FAKE_B, "A accepted an attacker-chosen identity");
+                assert_eq!(p.device_id, REAL_B, "A must only ever learn B's real id");
+            }
+        }
+    }
 
-        assert_eq!(
-            a_paired.key.as_bytes(),
-            b_paired.key.as_bytes(),
-            "the attacker did not touch the key: both ends still agree"
-        );
-        assert_eq!(
-            a_paired.device_id, FAKE_B,
-            "A filed the key under an id the attacker chose, not B's"
-        );
-        assert_eq!(a_paired.device_name, "Totally Ben's MacBook");
-        assert_ne!(a_paired.device_id, REAL_B);
+    /// The control: with nothing tampered, pairing through a relay still works
+    /// and yields the real identities. Without this, the test above would pass
+    /// just as well if pairing were broken outright.
+    #[test]
+    fn an_untampered_relay_still_pairs_and_yields_the_real_identity() {
+        let (a_result, b_result) = pair_through_relay(None);
+        let a = a_result.expect("A pairs");
+        let b = b_result.expect("B pairs");
+        assert_eq!(a.key.as_bytes(), b.key.as_bytes());
+        assert_eq!(a.device_id, REAL_B);
+        assert_eq!(a.device_name, "Real B");
+        assert_eq!(b.device_id, A_ID);
     }
 }
+

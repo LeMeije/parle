@@ -70,8 +70,22 @@ impl PairingGuard {
 
     /// Begin showing `code`. Replaces any code already on screen, so a user who
     /// cancels and restarts cannot leave an older code quietly still valid.
+    ///
+    /// A lockout does NOT block this, and that is deliberate. The budget exists
+    /// to stop online guessing against ONE code, and it does: five wrong
+    /// guesses burn that code and it can never be guessed again. Refusing to
+    /// issue a NEW one on top of that did not add any security — guesses
+    /// against a discarded code tell an attacker nothing about a freshly random
+    /// replacement, so the odds stay at five attempts in 10^6 per code — while
+    /// it did hand anyone on the LAN a permanent denial of service: 33 bytes of
+    /// well-formed junk, five times, and the user could not pair a device at
+    /// all for five minutes, repeatable forever.
+    ///
+    /// Issuing a new code therefore clears the failure count with it. The
+    /// lockout still governs guesses against whatever code is currently live.
     pub fn begin(&mut self, code: String, now: Instant) -> Result<(), GuardError> {
-        self.check_lockout(now)?;
+        self.failures = 0;
+        self.locked_until = None;
         self.active = Some(Active { code, started: now });
         Ok(())
     }
@@ -255,20 +269,40 @@ mod tests {
     }
 
     #[test]
-    fn a_locked_out_guard_refuses_to_show_a_fresh_code() {
+    fn a_lockout_governs_the_live_code_but_never_blocks_a_fresh_one() {
+        // The lockout used to refuse a NEW code too, which added nothing and
+        // handed anyone on the LAN a permanent denial of service: junk of the
+        // right shape, five times, and the user could not pair at all.
+        //
+        // It is safe to hand out a new one because guesses against a discarded
+        // code say nothing about a freshly random replacement — the odds stay
+        // at MAX_FAILURES attempts in 10^6 per code.
         let mut g = PairingGuard::new();
         let now = t0();
         g.begin("123456".into(), now).unwrap();
         for _ in 0..MAX_FAILURES {
             let _ = g.reserve(now);
         }
-        match g.begin("654321".into(), now) {
-            Err(GuardError::LockedOut { .. }) => {}
-            other => panic!("must not start a new code while locked out: {other:?}"),
+        // Locked out for the code that was on screen.
+        assert!(matches!(g.reserve(now), Err(GuardError::LockedOut { .. })));
+
+        // But the user can still ask for another one, immediately.
+        g.begin("654321".into(), now).expect("a fresh code must always be available");
+
+        // And that new code gets its own full budget, not a poisoned one.
+        let mut granted = 0;
+        for _ in 0..MAX_FAILURES + 3 {
+            if g.reserve(now).is_ok() {
+                granted += 1;
+            }
         }
-        let after = now + LOCKOUT + Duration::from_secs(1);
-        assert!(g.begin("654321".into(), after).is_ok());
+        assert_eq!(
+            granted,
+            (MAX_FAILURES - 1) as usize,
+            "the new code is rate-limited exactly like the first"
+        );
     }
+
 
     #[test]
     fn codes_that_simply_lapse_do_not_count_as_guesses() {

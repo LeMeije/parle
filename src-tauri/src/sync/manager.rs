@@ -49,6 +49,43 @@ const MAX_DIALS: usize = 4;
 /// to the webview grow without bound.
 const MAX_PEERS: usize = 64;
 
+/// Clears the `starting` flag however start() exits, panic included.
+struct StartGuard(Arc<SyncManager>);
+
+impl Drop for StartGuard {
+    fn drop(&mut self) {
+        self.0.inner.lock().starting = false;
+    }
+}
+
+/// Whatever owns the set of in-flight dials.
+///
+/// A trait rather than a direct `Arc<SyncManager>` so the release behaviour can
+/// actually be tested: `SyncManager` holds a `tauri::AppHandle<Wry>`, which
+/// cannot be constructed in a unit test, and a test that reproduces the shape
+/// with its own HashSet proves nothing about this code.
+trait ReleasesDial: Send + Sync {
+    fn release_dial(&self, id: &str);
+}
+
+impl ReleasesDial for SyncManager {
+    fn release_dial(&self, id: &str) {
+        self.inner.lock().dialing.remove(id);
+    }
+}
+
+/// Releases an outbound dial slot on drop, including on unwind.
+struct DialGuard {
+    owner: Arc<dyn ReleasesDial>,
+    id: String,
+}
+
+impl Drop for DialGuard {
+    fn drop(&mut self) {
+        self.owner.release_dial(&self.id);
+    }
+}
+
 /// Releases an inbound handler slot on drop, including on unwind.
 struct SlotGuard(Arc<AtomicUsize>);
 
@@ -145,6 +182,9 @@ struct Inner {
     /// Peers we owe one full re-offer of our history, because the user widened
     /// what this machine shares. See `set_kinds`.
     resend_owed: std::collections::HashSet<String>,
+    /// Set for the whole of start(), which binds a port and brings up mDNS and
+    /// is far too slow to leave the "already running" test unguarded.
+    starting: bool,
     /// Why sync is not working, surfaced to the UI instead of only the log.
     error: Option<String>,
 }
@@ -154,6 +194,9 @@ pub struct SyncManager {
     app: AppHandle,
     stop: Arc<AtomicBool>,
     store: Arc<Mutex<Store>>,
+    /// Written on every change to pairing state. Never holds `inner` while
+    /// taking this, so the two locks cannot invert.
+    settings: Arc<Mutex<echokey_core::settings::Settings>>,
     inbound: Arc<AtomicUsize>,
     /// Mirrored from settings so the replication path never has to reach back
     /// into AppState (which would invert the lock order).
@@ -161,10 +204,17 @@ pub struct SyncManager {
 }
 
 impl SyncManager {
+    /// `retention_days` is taken here rather than through a setter afterwards
+    /// because this constructor starts the listener. Applied later, a session
+    /// that landed in the gap saw retention_days == 0, so `retention_floor()`
+    /// returned None and the receiver's retention window was not enforced for
+    /// that whole exchange.
     pub fn new(
         app: AppHandle,
         s: &echokey_core::settings::SyncSettings,
         store: Arc<Mutex<Store>>,
+        settings: Arc<Mutex<echokey_core::settings::Settings>>,
+        retention_days: u32,
     ) -> Arc<Self> {
         let m = Arc::new(Self {
             inner: Mutex::new(Inner {
@@ -191,13 +241,15 @@ impl SyncManager {
                 listen_stop: None,
                 dialing: std::collections::HashSet::new(),
                 resend_owed: std::collections::HashSet::new(),
+                starting: false,
                 error: None,
             }),
             app,
             stop: Arc::new(AtomicBool::new(false)),
             store,
+            settings,
             inbound: Arc::new(AtomicUsize::new(0)),
-            retention_days: Arc::new(AtomicUsize::new(0)),
+            retention_days: Arc::new(AtomicUsize::new(retention_days as usize)),
         });
         if s.enabled {
             // A failure here rolls `enabled` back and records the reason, which
@@ -261,13 +313,28 @@ impl SyncManager {
     // -- lifecycle ------------------------------------------------------------
 
     /// Bind the listener, start advertising, and start browsing.
+    ///
+    /// The "already running" slot is CLAIMED under the same lock that tests it.
+    /// Reading `listen_stop`, releasing the lock, and only publishing the flag
+    /// after `bind` and `Discovery::start` left a wide window — mDNS daemon
+    /// creation, a multicast join, a register and a browse are all genuinely
+    /// slow, and `sync_set_enabled` is async, so rapid toggling produces truly
+    /// concurrent calls. Two starts could get through and bind two listeners,
+    /// and the second would drop the first `Discovery` while holding `inner`,
+    /// whose Drop unregisters over the network and joins a worker — wedging
+    /// every publish() and the UI with it. A stop() landing inside the window
+    /// found both fields still None and did nothing, leaving an orphaned
+    /// listener advertising itself with the toggle reading OFF.
     pub fn start(self: Arc<Self>) -> Result<(), String> {
         {
-            let i = self.inner.lock();
-            if i.listen_stop.is_some() {
-                return Ok(()); // already running
+            let mut i = self.inner.lock();
+            if i.listen_stop.is_some() || i.starting {
+                return Ok(()); // already running, or another thread is bringing it up
             }
+            i.starting = true;
         }
+        // From here on every exit path must clear `starting`, so it is RAII.
+        let _starting = StartGuard(self.clone());
         let listener = match TcpListener::bind("0.0.0.0:0") {
             Ok(l) => l,
             Err(e) => {
@@ -326,8 +393,22 @@ impl SyncManager {
                                     if known && fresh && room && i.dialing.insert(id.clone()) {
                                         let me3 = me.clone();
                                         std::thread::spawn(move || {
+                                            // RAII, for the same reason the
+                                            // inbound path uses SlotGuard.
+                                            // Removing the entry as a plain
+                                            // statement after dial() meant any
+                                            // unwind inside keystore::load,
+                                            // the handshake or the exchange
+                                            // skipped it: that peer was then
+                                            // never dialled again for the life
+                                            // of the process, and four such
+                                            // panics exhausted MAX_DIALS so the
+                                            // machine dialled nobody at all.
+                                            let _slot = DialGuard {
+                                                owner: me3.clone(),
+                                                id: id.clone(),
+                                            };
                                             me3.clone().dial(id.clone());
-                                            me3.inner.lock().dialing.remove(&id);
                                         });
                                     }
                                 }
@@ -393,7 +474,17 @@ impl SyncManager {
             return Err(msg);
         }
 
-        self.inner.lock().error = None;
+        // Clear only a STALE error. This used to be unconditional, which wiped
+        // the "no usable network" message recorded a few lines above by the
+        // discovery failure path — the user got an empty peer list, enabled and
+        // not scanning, with no explanation, which is the exact failure the
+        // error field exists to prevent.
+        {
+            let mut i = self.inner.lock();
+            if i.discovery.is_some() {
+                i.error = None;
+            }
+        }
         self.publish();
         Ok(())
     }
@@ -410,7 +501,11 @@ impl SyncManager {
     }
 
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::SeqCst);
+        // Clearing `enabled` here rather than relying on the caller having done
+        // it: `serve` and `run_session` both gate on it, so a stop() that left
+        // it set would keep accepting connections and moving history after a
+        // shutdown.
+        self.inner.lock().enabled = false;
         // Take the daemon OUT under the lock and drop it outside. Discovery's
         // Drop unregisters over the network and joins its worker with no bound;
         // running that while holding `inner` would wedge every publish() and
@@ -448,19 +543,29 @@ impl SyncManager {
             return;
         }
         // Unauthenticated peer: never block on it indefinitely.
+        //
+        // The socket timeouts bound one syscall. The deadline bounds the whole
+        // pre-session conversation, and it is applied HERE, before the very
+        // first byte, rather than after the pre-session reads as it used to be.
+        // A peer that declared a 4096-byte frame and dribbled one byte every 19
+        // seconds renewed the socket timeout on every byte and held this thread
+        // — and one of the eight inbound slots — for about 22 hours. Eight of
+        // them closed the listener to every real peer until the app restarted.
         let _ = s.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
         let _ = s.set_write_timeout(Some(HANDSHAKE_TIMEOUT));
+        let deadline = Deadline::after(HANDSHAKE_TIMEOUT);
+        let mut s = Timed::new(s, deadline.clone());
 
         match read_byte(&mut s) {
-            Ok(MODE_PAIR) => self.serve_pairing(s),
-            Ok(MODE_SESSION) => self.serve_session(s),
+            Ok(MODE_PAIR) => self.serve_pairing(s, deadline),
+            Ok(MODE_SESSION) => self.serve_session(s, deadline),
             Ok(other) => tracing::debug!("sync: unknown mode byte {other:#04x}"),
             Err(e) => tracing::debug!("sync: no mode byte ({e})"),
         }
     }
 
     /// Someone is trying to pair with the code we are displaying.
-    fn serve_pairing(self: Arc<Self>, mut s: TcpStream) {
+    fn serve_pairing(self: Arc<Self>, mut s: Timed<TcpStream>, deadline: Deadline) {
         // Make the peer do real work BEFORE it can cost the user a guess: read
         // its opening SPAKE2 frame first. A bare connect sending one byte would
         // otherwise burn an attempt, and four of those burn the code and lock
@@ -524,7 +629,7 @@ impl SyncManager {
         }
     }
 
-    fn serve_session(self: Arc<Self>, mut s: TcpStream) {
+    fn serve_session(self: Arc<Self>, mut s: Timed<TcpStream>, deadline: Deadline) {
         // Peer announces which device it claims to be so we can find the key.
         let Ok(raw) = read_frame(&mut s) else { return };
         let Ok(peer_id) = String::from_utf8(raw) else { return };
@@ -546,16 +651,9 @@ impl SyncManager {
                 return;
             }
         };
-        // The handshake is still unauthenticated work: keep the deadline ON
-        // across it. Clearing it here previously let a peer that connects and
-        // says nothing park this thread forever, and because the inbound slot
-        // is only released when serve() returns, eight such packets saturated
-        // MAX_INBOUND permanently and killed sync until restart.
-        // A socket read timeout bounds one read(), not the exchange: a peer
-        // dribbling a byte just under the limit renews it forever. The deadline
-        // is wall-clock and survives the loop inside read_exact.
-        let deadline = Deadline::after(HANDSHAKE_TIMEOUT);
-        match echokey_sync::Session::accept(Timed::new(s, deadline.clone()), &key) {
+        // The handshake is still unauthenticated work, so the deadline set
+        // before the first byte stays on across it.
+        match echokey_sync::Session::accept(s, &key) {
             Ok(session) => {
                 // Authenticated: a longer budget, still never unbounded.
                 // The socket timeouts move with it. They are the backstop that
@@ -628,7 +726,13 @@ impl SyncManager {
                 let msg = "That device reported the same identity as this one; refusing to pair"
                     .to_string();
                 drop(i);
-                self.fail(&msg);
+                // Refusing ONE pairing attempt, not a broken subsystem. This
+                // used to call fail(), which sets enabled = false, so a single
+                // odd pairing attempt switched sync off process-wide: every
+                // later inbound connection was dropped and every session
+                // discarded, with settings.json still saying it was on.
+                tracing::info!("sync: {msg}");
+                self.publish();
                 return Err(msg);
             }
             if i.paired.iter().any(|d| d.id == p.device_id) {
@@ -640,7 +744,8 @@ impl SyncManager {
                     i.paired.iter().find(|d| d.id == p.device_id).map(|d| d.name.clone()).unwrap_or_default()
                 );
                 drop(i);
-                self.fail(&msg);
+                tracing::info!("sync: {msg}");
+                self.publish();
                 return Err(msg);
             }
         }
@@ -664,6 +769,9 @@ impl SyncManager {
                 });
             }
         }
+        // Both pairing paths land here, including the inbound one that no
+        // command ever sees.
+        self.persist();
         self.publish();
         Ok(())
     }
@@ -673,6 +781,7 @@ impl SyncManager {
         // device is gone while the secret is still on disk.
         keystore::delete(device_id).map_err(|e| e.to_string())?;
         self.inner.lock().paired.retain(|d| d.id != device_id);
+        self.persist();
         self.publish();
         Ok(())
     }
@@ -749,6 +858,31 @@ impl SyncManager {
     }
 
     /// Snapshot of everything that belongs in settings.json.
+    /// Write the manager's state into settings.json.
+    ///
+    /// This is a method on the manager rather than a helper in `commands.rs`
+    /// because the command layer is not the only thing that changes pairing
+    /// state, and the one path that did not go through it was silently broken.
+    /// An INBOUND pairing completes on a listener thread — no command involved
+    /// — so the roster entry lived only in memory: quit the app and the device
+    /// was forgotten, it was never dialled again, it reappeared in the UI as
+    /// unpaired, and because `unpair` was then unreachable for it the 32-byte
+    /// key was orphaned in the OS credential store permanently.
+    ///
+    /// Paired KEYS are never written here; they live in the keychain.
+    pub fn persist(&self) {
+        let (enabled, name, dictations, clipboard, paired) = self.persistable();
+        let mut s = self.settings.lock();
+        s.sync.enabled = enabled;
+        s.sync.device_name = name;
+        s.sync.sync_dictations = dictations;
+        s.sync.sync_clipboard = clipboard;
+        s.sync.paired = paired;
+        if let Err(e) = s.save(&echokey_core::settings::settings_path()) {
+            tracing::warn!("sync: could not persist sync settings: {e}");
+        }
+    }
+
     pub fn persistable(&self) -> (bool, String, bool, bool, Vec<echokey_core::settings::PairedDevice>) {
         let i = self.inner.lock();
         (
@@ -925,58 +1059,52 @@ mod adversarial {
         );
     }
 
-    /// FINDING: the OUTBOUND dial path leaks its `dialing` entry on a panic.
+    /// Regression: a panicking outbound dial used to leak its slot forever.
     ///
-    /// The inbound path releases its slot through `SlotGuard` (manager.rs:52-59)
-    /// precisely so a panicking handler cannot leak one. The outbound path has
-    /// no equivalent — manager.rs:322-327 is:
+    /// The inbound path released its slot with RAII precisely so an unwind
+    /// could not leak it; the outbound path removed the entry as a plain
+    /// statement after `dial()`, so any panic inside `keystore::load`, the
+    /// handshake or the exchange skipped it. That peer was then never dialled
+    /// again for the life of the process — the spawn requires the insert to
+    /// succeed — and four such panics exhausted MAX_DIALS, so the machine
+    /// silently stopped dialling anybody.
     ///
-    ///     if known && fresh && room && i.dialing.insert(id.clone()) {
-    ///         std::thread::spawn(move || {
-    ///             me3.clone().dial(id.clone());          // may panic
-    ///             me3.inner.lock().dialing.remove(&id);  // skipped on unwind
-    ///         });
-    ///     }
-    ///
-    /// `dial()` reaches `keystore::load` (keyring FFI), `Session::initiate` and
-    /// `replicate::exchange`. Any panic below the spawn unwinds past the
-    /// `remove`, so that peer's id stays in `dialing` for the life of the
-    /// process: it is never dialled again (manager.rs:322 requires the insert to
-    /// succeed) AND it permanently occupies one of the MAX_DIALS slots. Four
-    /// such panics and this machine stops dialling anybody, silently.
-    ///
-    /// Reproduced with the identical spawn shape. The real `dial` could not be
-    /// driven directly: `SyncManager` stores a `tauri::AppHandle` (i.e.
-    /// `AppHandle<Wry>`), so `tauri::test`'s `MockRuntime` does not type-check,
-    /// and enabling tauri's `test` feature to build a real Wry handle made the
-    /// test binary fail to load (STATUS_ENTRYPOINT_NOT_FOUND).
+    /// This drives the real `DialGuard` through a stub owner. `SyncManager`
+    /// holds a `tauri::AppHandle<Wry>` which cannot be built in a unit test, so
+    /// the release step is behind the `ReleasesDial` trait for exactly this
+    /// reason: a test that reproduces the shape with its own HashSet would pass
+    /// whether or not the production code was ever fixed.
     #[test]
-    fn adv_a_panicking_dial_leaks_its_dialing_slot_forever() {
-        let dialing: Arc<Mutex<std::collections::HashSet<String>>> =
-            Arc::new(Mutex::new(std::collections::HashSet::new()));
+    fn a_panicking_dial_releases_its_slot() {
+        #[derive(Default)]
+        struct StubOwner {
+            released: Mutex<Vec<String>>,
+        }
+        impl ReleasesDial for StubOwner {
+            fn release_dial(&self, id: &str) {
+                self.released.lock().push(id.to_string());
+            }
+        }
+
+        let owner = Arc::new(StubOwner::default());
 
         for n in 0..MAX_DIALS {
             let id = format!("peer-{n}");
-            assert!(dialing.lock().len() < MAX_DIALS, "there was room for this dial");
-            assert!(dialing.lock().insert(id.clone()));
-            let d = dialing.clone();
+            let o = owner.clone();
             let h = std::thread::spawn(move || {
-                // Stand-in for dial() panicking anywhere below the spawn.
-                if !id.is_empty() {
-                    panic!("keystore / session / exchange panicked");
-                }
-                d.lock().remove(&id);
+                let _slot = DialGuard { owner: o, id: id.clone() };
+                panic!("keystore / session / exchange panicked");
             });
             assert!(h.join().is_err(), "the worker unwound");
         }
 
         assert_eq!(
-            dialing.lock().len(),
+            owner.released.lock().len(),
             MAX_DIALS,
-            "every dial slot leaked; MAX_DIALS is exhausted and no peer will ever be dialled again"
+            "every dial slot must come back after a panic, or MAX_DIALS is exhausted              and no peer is ever dialled again"
         );
-        // And the inbound path, which DOES use RAII, is unaffected by the same
-        // panic — proving the asymmetry is an omission, not a limitation.
+
+        // And the inbound path, which has always used RAII, still behaves.
         let inbound = Arc::new(AtomicUsize::new(1));
         let slot = SlotGuard(inbound.clone());
         let h = std::thread::spawn(move || {

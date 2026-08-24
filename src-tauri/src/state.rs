@@ -69,12 +69,28 @@ impl AppState {
             s.set_device_id(&device_id);
             s
         }));
+        // Both snapshots are taken and the guard DROPPED before SyncManager::new
+        // runs. Written inline as `&settings.lock().sync.clone()`, the temporary
+        // guard lives to the end of the statement — that is, across
+        // TcpListener::bind, the mDNS daemon start and two thread spawns. The
+        // module header claims no lock is ever held across a blocking network
+        // call, and on this path it was not true. Contention-free today only
+        // because nothing else is running yet, which makes it a trap for the
+        // next person rather than a bug you can see.
+        let (sync_settings, retention_days) = {
+            let s = settings.lock();
+            (s.sync.clone(), s.history.retention_days)
+        };
+        // Retention goes in through the constructor: it starts the listener,
+        // so a setter afterwards leaves a window in which an inbound session
+        // enforces no retention at all.
         let sync = crate::sync::manager::SyncManager::new(
             app.clone(),
-            &settings.lock().sync.clone(),
+            &sync_settings,
             store.clone(),
+            settings.clone(),
+            retention_days,
         );
-        sync.set_retention_days(settings.lock().history.retention_days);
 
         let use_gpu = cfg!(any(target_os = "macos", feature = "cuda"));
         let engine = Arc::new(Mutex::new(EngineManager::new(models_dir(), use_gpu)));
