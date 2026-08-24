@@ -26,7 +26,7 @@ use tauri::{AppHandle, Emitter};
 use super::guard::{GuardError, PairingGuard};
 use super::keystore;
 use super::pair_flow;
-use super::replicate::{self, Kinds, Retention};
+use super::replicate::{self, Attribution, Kinds, Retention};
 use super::wire_tcp::{read_byte, read_frame, write_byte, write_frame, MODE_PAIR, MODE_SESSION};
 use echokey_core::history::Store;
 
@@ -37,6 +37,16 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 /// anyone on the LAN exhaust the process by opening sockets; a paired peer only
 /// ever needs one.
 const MAX_INBOUND: usize = 8;
+/// Read deadline once a session is authenticated. Longer than a handshake,
+/// because a real exchange can be large, but never unbounded.
+const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
+/// Concurrent outbound dials. A flapping (or spoofed) mDNS record would
+/// otherwise spawn a thread per sighting, without bound.
+const MAX_DIALS: usize = 4;
+/// Distinct peers we will track. mDNS is unsigned, so anyone on the LAN can
+/// advertise unlimited records; without a cap both the map and the JSON we push
+/// to the webview grow without bound.
+const MAX_PEERS: usize = 64;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -85,6 +95,9 @@ pub struct SyncStatus {
     pub scanning: bool,
     pub dictations: bool,
     pub clipboard: bool,
+    /// Set when sync is enabled but not actually working, so the UI can say so
+    /// rather than showing an empty list that looks like "no peers yet".
+    pub error: Option<String>,
 }
 
 // -- internals ----------------------------------------------------------------
@@ -102,6 +115,15 @@ struct Inner {
     pairing_started: Option<Instant>,
     discovery: Option<Discovery>,
     port: u16,
+    /// Stop flag for the CURRENT listener generation. Each start() gets its own
+    /// so a listener left over from a previous enable cannot come back to life
+    /// when the flag is cleared for a new one.
+    listen_stop: Option<Arc<AtomicBool>>,
+    /// Peers with a dial in flight, so a flapping record cannot spawn a thread
+    /// per sighting.
+    dialing: std::collections::HashSet<String>,
+    /// Why sync is not working, surfaced to the UI instead of only the log.
+    error: Option<String>,
 }
 
 pub struct SyncManager {
@@ -143,6 +165,9 @@ impl SyncManager {
                 pairing_started: None,
                 discovery: None,
                 port: 0,
+                listen_stop: None,
+                dialing: std::collections::HashSet::new(),
+                error: None,
             }),
             app,
             stop: Arc::new(AtomicBool::new(false)),
@@ -151,7 +176,9 @@ impl SyncManager {
             retention_days: Arc::new(AtomicUsize::new(0)),
         });
         if s.enabled {
-            m.clone().start();
+            // A failure here rolls `enabled` back and records the reason, which
+            // the first sync_status will carry to the UI.
+            let _ = m.clone().start();
         }
         m
     }
@@ -198,6 +225,7 @@ impl SyncManager {
             scanning: i.discovery.is_some(),
             dictations: i.dictations,
             clipboard: i.clipboard,
+            error: i.error.clone(),
         }
     }
 
@@ -209,18 +237,19 @@ impl SyncManager {
     // -- lifecycle ------------------------------------------------------------
 
     /// Bind the listener, start advertising, and start browsing.
-    pub fn start(self: Arc<Self>) {
+    pub fn start(self: Arc<Self>) -> Result<(), String> {
         {
             let i = self.inner.lock();
-            if i.discovery.is_some() {
-                return; // already running
+            if i.listen_stop.is_some() {
+                return Ok(()); // already running
             }
         }
         let listener = match TcpListener::bind("0.0.0.0:0") {
             Ok(l) => l,
             Err(e) => {
-                tracing::warn!("sync: cannot bind a listener ({e}); sync stays off");
-                return;
+                let msg = format!("Could not open a network port for sync: {e}");
+                self.fail(&msg);
+                return Err(msg);
             }
         };
         let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
@@ -234,8 +263,9 @@ impl SyncManager {
         let id = match echokey_sync::DeviceId::parse(&device_id) {
             Ok(id) => id,
             Err(e) => {
-                tracing::warn!("sync: device id is unusable ({e}); sync stays off");
-                return;
+                let msg = format!("This machine has no usable sync identity: {e}");
+                self.fail(&msg);
+                return Err(msg);
             }
         };
 
@@ -255,14 +285,26 @@ impl SyncManager {
                             match ev {
                                 DiscoveryEvent::PeerFound(p) => {
                                     let id = p.id.as_str().to_string();
+                                    if i.peers.len() >= MAX_PEERS && !i.peers.contains_key(&id) {
+                                        continue;
+                                    }
                                     let known = i.paired.iter().any(|d| d.id == id);
                                     let fresh = i.peers.insert(id.clone(), p).is_none();
                                     // Only dial on first sight, so a record
                                     // refresh does not start a new exchange
                                     // every few seconds.
-                                    if known && fresh {
+                                    // First sight only, paired only, one dial
+                                    // in flight per peer, and a hard cap. mDNS
+                                    // is unsigned: a spoofed record flapping
+                                    // between goodbye and announce would
+                                    // otherwise spawn threads without bound.
+                                    let room = i.dialing.len() < MAX_DIALS;
+                                    if known && fresh && room && i.dialing.insert(id.clone()) {
                                         let me3 = me.clone();
-                                        std::thread::spawn(move || me3.dial(id));
+                                        std::thread::spawn(move || {
+                                            me3.clone().dial(id.clone());
+                                            me3.inner.lock().dialing.remove(&id);
+                                        });
                                     }
                                 }
                                 DiscoveryEvent::PeerLost(id) => {
@@ -276,17 +318,25 @@ impl SyncManager {
                     .ok();
             }
             Err(e) => {
-                // A laptop with no network is normal; sync simply finds nobody.
-                tracing::info!("sync: discovery unavailable ({e}); pairing by hand only");
+                // A laptop with no network is normal, but the user should still
+                // be told why nothing ever appears in the list.
+                tracing::info!("sync: discovery unavailable ({e})");
+                self.inner.lock().error =
+                    Some("Not searching: no usable network on this machine right now".into());
             }
         }
 
+        let gen_stop = Arc::new(AtomicBool::new(false));
+        self.inner.lock().listen_stop = Some(gen_stop.clone());
         let me = self.clone();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("echokey-sync-listen".into())
             .spawn(move || {
                 for conn in listener.incoming() {
-                    if me.stop.load(Ordering::SeqCst) {
+                    // This generation's flag, not the process-wide one: a
+                    // listener from a previous enable must stay dead even after
+                    // the flag is cleared for a new one.
+                    if gen_stop.load(Ordering::SeqCst) {
                         break;
                     }
                     match conn {
@@ -310,19 +360,56 @@ impl SyncManager {
                         Err(e) => tracing::debug!("sync: accept failed: {e}"),
                     }
                 }
-            })
-            .ok();
+                tracing::info!("sync: listener stopped");
+            });
+        if let Err(e) = spawned {
+            let msg = format!("Could not start the sync listener: {e}");
+            self.fail(&msg);
+            return Err(msg);
+        }
 
+        self.inner.lock().error = None;
+        self.publish();
+        Ok(())
+    }
+
+    /// Record why sync is not running, and make sure it stops claiming to be.
+    fn fail(&self, msg: &str) {
+        tracing::warn!("sync: {msg}");
+        {
+            let mut i = self.inner.lock();
+            i.enabled = false;
+            i.error = Some(msg.to_string());
+        }
         self.publish();
     }
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
-        let mut i = self.inner.lock();
-        i.discovery = None; // Drop shuts the daemon down
-        i.peers.clear();
-        i.guard.cancel();
-        drop(i);
+        // Take the daemon OUT under the lock and drop it outside. Discovery's
+        // Drop unregisters over the network and joins its worker with no bound;
+        // running that while holding `inner` would wedge every publish() and
+        // the UI thread along with it.
+        let (discovery, gen_stop, port) = {
+            let mut i = self.inner.lock();
+            i.peers.clear();
+            i.guard.cancel();
+            i.dialing.clear();
+            (i.discovery.take(), i.listen_stop.take(), i.port)
+        };
+        drop(discovery);
+
+        // Wake the listener so it observes the flag. accept() blocks until a
+        // connection arrives, so without this the thread and the bound port
+        // outlive the stop, and a later enable would bind a SECOND listener
+        // while the first was still happily serving.
+        if let Some(flag) = gen_stop {
+            flag.store(true, Ordering::SeqCst);
+            if port != 0 {
+                let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(500));
+            }
+        }
         self.publish();
     }
 
@@ -369,7 +456,7 @@ impl SyncManager {
             Ok(p) => {
                 // Correct code: refund the reserved guess and close the window.
                 self.inner.lock().guard.succeed();
-                self.complete_pairing(p);
+                let _ = self.complete_pairing(p);
             }
             Err(e) => {
                 // The guess was already charged by reserve(); nothing to do but
@@ -395,10 +482,19 @@ impl SyncManager {
                 return;
             }
         };
-        // A session lives longer than a handshake; drop the short timeout.
-        let _ = s.set_read_timeout(None);
+        // The handshake is still unauthenticated work: keep the deadline ON
+        // across it. Clearing it here previously let a peer that connects and
+        // says nothing park this thread forever, and because the inbound slot
+        // is only released when serve() returns, eight such packets saturated
+        // MAX_INBOUND permanently and killed sync until restart.
         match echokey_sync::Session::accept(s, &key) {
-            Ok(session) => self.run_session(peer_id, session),
+            Ok(session) => {
+                // Authenticated now, so a longer budget is reasonable — but
+                // never unbounded: a peer that drops off the network mid
+                // exchange without a FIN would otherwise hold this thread.
+                let _ = session.get_ref().set_read_timeout(Some(SESSION_TIMEOUT));
+                self.run_session(peer_id, session)
+            }
             Err(e) => tracing::info!("sync: session handshake failed with {peer_id}: {e}"),
         }
     }
@@ -445,14 +541,40 @@ impl SyncManager {
 
         let p = pair_flow::run(&mut s, PairingRole::Responder, &code, (&me_id, &me_name))
             .map_err(|_| "That code did not match. Check the digits and try again.".to_string())?;
-        self.complete_pairing(p);
-        Ok(())
+        self.complete_pairing(p)
     }
 
-    fn complete_pairing(&self, p: pair_flow::Paired) {
+    fn complete_pairing(&self, p: pair_flow::Paired) -> Result<(), String> {
+        // If the key cannot be stored the pairing is worthless: the peer thinks
+        // it succeeded and every future session fails as "unpaired". The caller
+        // must hear about it rather than showing a paired device that can never
+        // connect.
+        {
+            let i = self.inner.lock();
+            if p.device_id == i.device_id {
+                let msg = "That device reported the same identity as this one; refusing to pair"
+                    .to_string();
+                drop(i);
+                self.fail(&msg);
+                return Err(msg);
+            }
+            if i.paired.iter().any(|d| d.id == p.device_id) {
+                // Overwriting an existing entry would replace that device's key
+                // and lock the real one out while attributing the newcomer's
+                // rows to it. Unpair first, deliberately.
+                let msg = format!(
+                    "A device with that identity is already paired. Unpair \"{}\" first if you                      really mean to replace it.",
+                    i.paired.iter().find(|d| d.id == p.device_id).map(|d| d.name.clone()).unwrap_or_default()
+                );
+                drop(i);
+                self.fail(&msg);
+                return Err(msg);
+            }
+        }
         if let Err(e) = keystore::store(&p.device_id, &p.key) {
-            tracing::error!("sync: could not save the paired key: {e}");
-            return;
+            let msg = format!("Paired, but the key could not be saved to the keychain: {e}");
+            self.fail(&msg);
+            return Err(msg);
         }
         {
             let mut i = self.inner.lock();
@@ -470,6 +592,7 @@ impl SyncManager {
             }
         }
         self.publish();
+        Ok(())
     }
 
     pub fn unpair(&self, device_id: &str) -> Result<(), String> {
@@ -481,21 +604,25 @@ impl SyncManager {
         Ok(())
     }
 
-    pub fn set_enabled(self: &Arc<Self>, on: bool) {
+    pub fn set_enabled(self: &Arc<Self>, on: bool) -> Result<(), String> {
         {
             let mut i = self.inner.lock();
             if i.enabled == on {
-                return;
+                return Ok(());
             }
             i.enabled = on;
+            i.error = None;
         }
         if on {
             self.stop.store(false, Ordering::SeqCst);
-            self.clone().start();
+            // start() rolls `enabled` back and records why if it cannot run, so
+            // the switch never sits on while nothing is listening.
+            self.clone().start()?;
         } else {
             self.stop();
         }
         self.publish();
+        Ok(())
     }
 
     pub fn set_device_name(&self, name: &str) {
@@ -549,9 +676,20 @@ impl SyncManager {
             )
         };
         let retention = Retention { oldest_allowed: self.retention_floor() };
+        // Only the handshake-proven peer, or another device we have paired
+        // with, may author rows — and nobody may author rows as us.
+        let known: Vec<String> = self.inner.lock().paired.iter().map(|d| d.id.clone()).collect();
+        let attribution = Attribution { peer_id: &peer_id, local_id: &me_id, known: &known };
         // The store lock is taken inside the exchange, per statement, never
         // held across a socket read.
-        match replicate::exchange(&mut session, &self.store, (&me_id, &me_name), kinds, retention) {
+        match replicate::exchange(
+            &mut session,
+            &self.store,
+            (&me_id, &me_name),
+            kinds,
+            retention,
+            &attribution,
+        ) {
             Ok(stats) => tracing::info!(
                 "sync: {peer_id} sent {} items / {} tombstones, applied {} / {}, ignored {}",
                 stats.sent_items,
@@ -612,9 +750,11 @@ impl SyncManager {
         if write_frame(&mut s, me_id.as_bytes()).is_err() {
             return;
         }
-        let _ = s.set_read_timeout(None);
         match echokey_sync::Session::initiate(s, &key) {
-            Ok(session) => self.run_session(peer_id, session),
+            Ok(session) => {
+                let _ = session.get_ref().set_read_timeout(Some(SESSION_TIMEOUT));
+                self.run_session(peer_id, session)
+            }
             Err(e) => tracing::info!("sync: handshake with {peer_id} failed: {e}"),
         }
     }

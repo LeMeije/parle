@@ -82,6 +82,6 @@ pub use pairing::{
 };
 pub use session::{Session, SessionError, NOISE_PATTERN};
 pub use wire::{
-    ItemKind, SyncItem, SyncMessage, Tombstone, Watermark, WireError, MAX_ITEM_TEXT_BYTES,
-    MAX_MESSAGE_BYTES, PROTOCOL_VERSION,
+    ItemKind, SyncItem, SyncMessage, Tombstone, Watermark, WireError, MAX_BATCH_LEN,
+    MAX_ITEM_TEXT_BYTES, MAX_MESSAGE_BYTES, PROTOCOL_VERSION,
 };

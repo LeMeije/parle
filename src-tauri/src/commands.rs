@@ -487,35 +487,60 @@ pub fn complete_onboarding(state: State<'_, Arc<AppState>>, app: AppHandle) -> R
 }
 
 // -- Sync --------------------------------------------------------------------
+//
+// Every one of these is async + spawn_blocking. A non-async Tauri command runs
+// on the MAIN thread, and these bind sockets, start the mDNS daemon, talk to the
+// OS credential store and write settings.json. This app has already deadlocked
+// its UI thread once on blocking I/O; none of that belongs there.
 
 #[tauri::command]
 pub fn sync_status(state: State<'_, Arc<AppState>>) -> Result<crate::sync::manager::SyncStatus> {
+    // Only takes the state mutex, which is never held across I/O.
     Ok(state.sync.status())
 }
 
 #[tauri::command]
-pub fn sync_set_enabled(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<()> {
-    state.sync.set_enabled(enabled);
-    persist_sync(&state);
-    Ok(())
+pub async fn sync_set_enabled(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<()> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // A failure here has already rolled `enabled` back and recorded why, so
+        // the switch cannot sit on while nothing is listening.
+        let r = st.sync.set_enabled(enabled);
+        persist_sync(&st);
+        r
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
-pub fn sync_set_device_name(state: State<'_, Arc<AppState>>, name: String) -> Result<()> {
-    let name = name.trim();
+pub async fn sync_set_device_name(state: State<'_, Arc<AppState>>, name: String) -> Result<()> {
+    let name = name.trim().to_string();
     if name.is_empty() {
         return Err("Give this device a name so you can recognise it when pairing".into());
     }
-    state.sync.set_device_name(&name.chars().take(64).collect::<String>());
-    persist_sync(&state);
-    Ok(())
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        st.sync.set_device_name(&name.chars().take(64).collect::<String>());
+        persist_sync(&st);
+    })
+    .await
+    .map_err(err)
 }
 
 #[tauri::command]
-pub fn sync_set_kinds(state: State<'_, Arc<AppState>>, dictations: bool, clipboard: bool) -> Result<()> {
-    state.sync.set_kinds(dictations, clipboard);
-    persist_sync(&state);
-    Ok(())
+pub async fn sync_set_kinds(
+    state: State<'_, Arc<AppState>>,
+    dictations: bool,
+    clipboard: bool,
+) -> Result<()> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        st.sync.set_kinds(dictations, clipboard);
+        persist_sync(&st);
+    })
+    .await
+    .map_err(err)
 }
 
 #[derive(serde::Serialize)]
@@ -526,9 +551,15 @@ pub struct StartPairing {
 }
 
 #[tauri::command]
-pub fn sync_start_pairing(state: State<'_, Arc<AppState>>) -> Result<StartPairing> {
-    let (code, expires_at) = state.sync.start_pairing()?;
-    Ok(StartPairing { code, expires_at })
+pub async fn sync_start_pairing(state: State<'_, Arc<AppState>>) -> Result<StartPairing> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        st.sync
+            .start_pairing()
+            .map(|(code, expires_at)| StartPairing { code, expires_at })
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
@@ -543,27 +574,38 @@ pub async fn sync_pair_with(
     peer_id: String,
     code: String,
 ) -> Result<()> {
-    // Pairing does blocking network I/O; never on the UI thread.
-    let sync = state.sync.clone();
-    tauri::async_runtime::spawn_blocking(move || sync.pair_with(&peer_id, &code))
-        .await
-        .map_err(err)??;
-    persist_sync(&state);
-    Ok(())
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let r = st.sync.pair_with(&peer_id, &code);
+        if r.is_ok() {
+            persist_sync(&st);
+        }
+        r
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
-pub fn sync_unpair(state: State<'_, Arc<AppState>>, device_id: String) -> Result<()> {
-    state.sync.unpair(&device_id)?;
-    persist_sync(&state);
-    Ok(())
+pub async fn sync_unpair(state: State<'_, Arc<AppState>>, device_id: String) -> Result<()> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Credential-store RPC; can block for a surprising while.
+        let r = st.sync.unpair(&device_id);
+        if r.is_ok() {
+            persist_sync(&st);
+        }
+        r
+    })
+    .await
+    .map_err(err)?
 }
 
 /// Mirror the manager's state into settings.json.
 ///
 /// The manager is the source of truth while running; settings is only where it
-/// survives a restart. Paired KEYS are never written here — they live in the
-/// OS keychain.
+/// survives a restart. Paired KEYS are never written here — they live in the OS
+/// keychain.
 fn persist_sync(state: &Arc<AppState>) {
     let (enabled, name, dictations, clipboard, paired) = state.sync.persistable();
     let mut s = state.settings.lock();

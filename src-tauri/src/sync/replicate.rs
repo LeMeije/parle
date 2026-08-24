@@ -26,8 +26,15 @@ use echokey_sync::{DeviceId, ItemKind, Session, SessionError, SyncItem, SyncMess
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-/// Rows per batch. Large enough that a same-millisecond burst rarely fills one.
-const PAGE: usize = 512;
+/// Rows per batch.
+///
+/// MUST stay at or below the wire's batch limit. It was 512 against a limit of
+/// 256, so `session.send` refused every full page and aborted the whole
+/// exchange — replication was dead for anyone with more than 256 rows above the
+/// peer's watermark, which is essentially every real user on a first sync. The
+/// assert below makes that a build error rather than a silent runtime failure.
+const PAGE: usize = echokey_sync::MAX_BATCH_LEN;
+const _: () = assert!(PAGE <= echokey_sync::MAX_BATCH_LEN);
 /// Ceiling for the widened re-fetch when a whole page shares one millisecond.
 const WIDE_PAGE: usize = 20_000;
 /// Hard stop on a single exchange, so a peer cannot keep us here forever.
@@ -53,6 +60,9 @@ pub struct RoundStats {
     pub applied_items: usize,
     pub applied_tombstones: usize,
     pub ignored: usize,
+    /// Rows a peer was not entitled to send. Distinct from `ignored`, which is
+    /// ordinary no-ops, because this one means someone misbehaved.
+    pub refused: usize,
 }
 
 /// Which kinds the user has agreed to share.
@@ -97,12 +107,39 @@ impl Kinds {
     }
 }
 
+/// Who a peer is allowed to speak for.
+///
+/// The Noise handshake proves the peer holds the key we agreed with ONE device.
+/// It does not vouch for the `source_device` field inside the messages, which is
+/// just a string the peer chose. Without this check a paired peer could claim to
+/// be any device — including ours — and last-writer-wins would let it rewrite
+/// our own dictations in place, or wipe them with tombstones dated i64::MAX.
+pub struct Attribution<'a> {
+    /// The device id proven by the handshake.
+    pub peer_id: &'a str,
+    /// Our own id, which a peer may never speak for.
+    pub local_id: &'a str,
+    /// Devices we have paired with, which the peer may legitimately relay for.
+    pub known: &'a [String],
+}
+
+impl Attribution<'_> {
+    fn accepts(&self, source: &str) -> bool {
+        if source.is_empty() || source == self.local_id {
+            // Nobody gets to author rows on our behalf.
+            return false;
+        }
+        source == self.peer_id || self.known.iter().any(|k| k == source)
+    }
+}
+
 pub fn exchange<S: Read + Write>(
     session: &mut Session<S>,
     store: &Arc<Mutex<Store>>,
     me: (&str, &str),
     kinds: Kinds,
     retention: Retention,
+    attribution: &Attribution<'_>,
 ) -> Result<RoundStats, ReplicateError> {
     let mut stats = RoundStats::default();
 
@@ -211,9 +248,30 @@ pub fn exchange<S: Read + Write>(
         match session.recv()? {
             SyncMessage::Items { items, more } => {
                 for it in &items {
+                    if !attribution.accepts(it.source_device.as_str()) {
+                        tracing::warn!(
+                            "sync: {} tried to author rows for {}; refused",
+                            attribution.peer_id,
+                            it.source_device.as_str()
+                        );
+                        stats.refused += 1;
+                        continue;
+                    }
                     if !retention.keeps(it.created_at) {
                         // Older than this machine keeps. Refusing is what stops
                         // prune and replication fighting each other forever.
+                        stats.ignored += 1;
+                        continue;
+                    }
+                    // The toggles are a statement about what this machine
+                    // stores, not merely what it offers. Filtering outbound
+                    // only would still let a peer put clipboard rows into a
+                    // history where the user switched clipboard sync off.
+                    let kind = match it.kind {
+                        ItemKind::Transcription => "transcription",
+                        ItemKind::Clipboard => "clipboard",
+                    };
+                    if !kinds.allows(kind) {
                         stats.ignored += 1;
                         continue;
                     }
@@ -225,6 +283,15 @@ pub fn exchange<S: Read + Write>(
             }
             SyncMessage::Tombstones { entries, .. } => {
                 for t in &entries {
+                    if !attribution.accepts(t.source_device.as_str()) {
+                        tracing::warn!(
+                            "sync: {} tried to delete rows belonging to {}; refused",
+                            attribution.peer_id,
+                            t.source_device.as_str()
+                        );
+                        stats.refused += 1;
+                        continue;
+                    }
                     let rt = RemoteTombstone {
                         source_machine: t.source_device.as_str().to_string(),
                         origin_id: t.origin_id.clone(),
@@ -389,5 +456,39 @@ mod tests {
         let none = Retention { oldest_allowed: None };
         assert!(none.keeps(0));
         assert!(none.keeps(i64::MIN));
+    }
+
+    fn attrib<'a>(peer: &'a str, local: &'a str, known: &'a [String]) -> Attribution<'a> {
+        Attribution { peer_id: peer, local_id: local, known }
+    }
+
+    #[test]
+    fn a_peer_may_speak_only_for_itself_or_a_device_we_know() {
+        let known = vec!["33333333-3333-4333-8333-333333333333".to_string()];
+        let a = attrib(
+            "22222222-2222-4222-8222-222222222222",
+            "11111111-1111-4111-8111-111111111111",
+            &known,
+        );
+        assert!(a.accepts("22222222-2222-4222-8222-222222222222"), "itself");
+        assert!(a.accepts("33333333-3333-4333-8333-333333333333"), "a device we also paired with");
+        assert!(!a.accepts("44444444-4444-4444-8444-444444444444"), "a device we have never met");
+    }
+
+    #[test]
+    fn nobody_may_author_rows_as_us() {
+        // The attack this exists to stop: a paired peer claiming our own id and
+        // rewriting our dictations in place under last-writer-wins.
+        let known = vec!["11111111-1111-4111-8111-111111111111".to_string()];
+        let a = attrib(
+            "22222222-2222-4222-8222-222222222222",
+            "11111111-1111-4111-8111-111111111111",
+            &known,
+        );
+        assert!(
+            !a.accepts("11111111-1111-4111-8111-111111111111"),
+            "our own id must be refused even if it appears in the roster"
+        );
+        assert!(!a.accepts(""), "an empty source is refused");
     }
 }
