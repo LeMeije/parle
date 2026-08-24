@@ -215,16 +215,36 @@ fn peer_from(service: &ResolvedService) -> Option<PeerInfo> {
 
 /// Pick one address to dial: routable IPv4 first (what a home LAN actually
 /// uses), then any IPv4, then anything at all.
+/// Is this an address we are willing to dial?
+///
+/// mDNS records are unsigned, so the address in one is simply whatever the
+/// sender put there. Without this check a spoofed announcement carrying a
+/// paired device's id and an arbitrary A record sent us off to any host and
+/// port the attacker liked — including a public one, which breaks the
+/// "LAN-local only, no relay" rule outright, and which we would then hand our
+/// device id to in cleartext before the Noise handshake.
+///
+/// The handshake still protects the CONTENTS: an attacker without the paired
+/// key gets nothing out of the connection. This is about not making it in the
+/// first place.
+fn is_lan_addr(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+        // Unique-local and link-local only; no global IPv6.
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80,
+    }
+}
+
 fn preferred_addr(service: &ResolvedService) -> Option<IpAddr> {
     let addrs: Vec<IpAddr> = service
         .get_addresses()
         .iter()
         .map(|ip| ip.to_ip_addr())
+        .filter(|ip| !ip.is_loopback() && is_lan_addr(ip))
         .collect();
     addrs
         .iter()
-        .find(|ip| ip.is_ipv4() && !ip.is_loopback())
-        .or_else(|| addrs.iter().find(|ip| ip.is_ipv4()))
+        .find(|ip| ip.is_ipv4())
         .or_else(|| addrs.first())
         .copied()
 }

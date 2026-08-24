@@ -256,6 +256,16 @@ pub fn run() {
                 hud::show_main(handle);
             }
             if let tauri::RunEvent::Exit = event {
+                // Take sync down POLITELY first. _exit skips every destructor,
+                // including Discovery's, so without this the _echokey._tcp
+                // record stayed advertised on the LAN until its TTL lapsed and
+                // peers kept dialling a closed port on a machine that had quit.
+                {
+                    use tauri::Manager;
+                    if let Some(state) = handle.try_state::<std::sync::Arc<state::AppState>>() {
+                        state.sync.stop();
+                    }
+                }
                 // whisper.cpp's ggml-metal static device destructor calls
                 // ggml_abort during atexit (upstream teardown bug), turning
                 // every normal quit into a "quit unexpectedly" dialog. All our

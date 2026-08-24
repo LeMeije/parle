@@ -166,17 +166,6 @@ impl PairingGuard {
 }
 
 
-/// Length-independent, value-constant comparison.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
 
 #[cfg(test)]
 mod tests {
@@ -186,13 +175,6 @@ mod tests {
         Instant::now()
     }
 
-    #[test]
-    fn constant_time_eq_matches_normal_equality() {
-        assert!(constant_time_eq(b"123456", b"123456"));
-        assert!(!constant_time_eq(b"123456", b"123457"));
-        assert!(!constant_time_eq(b"123456", b"12345"));
-        assert!(constant_time_eq(b"", b""));
-    }
 
     #[test]
     fn concurrent_guesses_cannot_exceed_the_budget() {

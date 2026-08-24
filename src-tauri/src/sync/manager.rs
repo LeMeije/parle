@@ -185,6 +185,9 @@ struct Inner {
     /// Set for the whole of start(), which binds a port and brings up mDNS and
     /// is far too slow to leave the "already running" test unguarded.
     starting: bool,
+    /// Devices unpaired while a session with them was already running. Checked
+    /// as that session finishes each batch so it stops writing their rows.
+    unpaired_mid_session: std::collections::HashSet<String>,
     /// Why sync is not working, surfaced to the UI instead of only the log.
     error: Option<String>,
 }
@@ -192,7 +195,6 @@ struct Inner {
 pub struct SyncManager {
     inner: Mutex<Inner>,
     app: AppHandle,
-    stop: Arc<AtomicBool>,
     store: Arc<Mutex<Store>>,
     /// Written on every change to pairing state. Never holds `inner` while
     /// taking this, so the two locks cannot invert.
@@ -201,6 +203,7 @@ pub struct SyncManager {
     /// Mirrored from settings so the replication path never has to reach back
     /// into AppState (which would invert the lock order).
     retention_days: Arc<AtomicUsize>,
+    max_items: Arc<AtomicUsize>,
 }
 
 impl SyncManager {
@@ -242,14 +245,15 @@ impl SyncManager {
                 dialing: std::collections::HashSet::new(),
                 resend_owed: std::collections::HashSet::new(),
                 starting: false,
+                unpaired_mid_session: std::collections::HashSet::new(),
                 error: None,
             }),
             app,
-            stop: Arc::new(AtomicBool::new(false)),
             store,
             settings,
             inbound: Arc::new(AtomicUsize::new(0)),
             retention_days: Arc::new(AtomicUsize::new(retention_days as usize)),
+            max_items: Arc::new(AtomicUsize::new(0)),
         });
         if s.enabled {
             // A failure here rolls `enabled` back and records the reason, which
@@ -535,7 +539,7 @@ impl SyncManager {
 
     // -- inbound --------------------------------------------------------------
 
-    fn serve(self: Arc<Self>, mut s: TcpStream) {
+    fn serve(self: Arc<Self>, s: TcpStream) {
         // stop() wakes accept(), but a connection already accepted, or one that
         // arrives in the gap, would otherwise run to completion and move
         // history after the user switched sync off.
@@ -557,7 +561,7 @@ impl SyncManager {
         let mut s = Timed::new(s, deadline.clone());
 
         match read_byte(&mut s) {
-            Ok(MODE_PAIR) => self.serve_pairing(s, deadline),
+            Ok(MODE_PAIR) => self.serve_pairing(s),
             Ok(MODE_SESSION) => self.serve_session(s, deadline),
             Ok(other) => tracing::debug!("sync: unknown mode byte {other:#04x}"),
             Err(e) => tracing::debug!("sync: no mode byte ({e})"),
@@ -565,7 +569,7 @@ impl SyncManager {
     }
 
     /// Someone is trying to pair with the code we are displaying.
-    fn serve_pairing(self: Arc<Self>, mut s: Timed<TcpStream>, deadline: Deadline) {
+    fn serve_pairing(self: Arc<Self>, mut s: Timed<TcpStream>) {
         // Make the peer do real work BEFORE it can cost the user a guess: read
         // its opening SPAKE2 frame first. A bare connect sending one byte would
         // otherwise burn an attempt, and four of those burn the code and lock
@@ -780,7 +784,14 @@ impl SyncManager {
         // Destroy the key first: if that fails we must not tell the user the
         // device is gone while the secret is still on disk.
         keystore::delete(device_id).map_err(|e| e.to_string())?;
-        self.inner.lock().paired.retain(|d| d.id != device_id);
+        {
+            let mut i = self.inner.lock();
+            i.paired.retain(|d| d.id != device_id);
+            // A session already in flight took its roster snapshot before this
+            // and would otherwise run to completion, writing that device's rows
+            // into a history the user just told us to stop syncing with it.
+            i.unpaired_mid_session.insert(device_id.to_string());
+        }
         self.persist();
         self.publish();
         Ok(())
@@ -796,7 +807,6 @@ impl SyncManager {
             i.error = None;
         }
         if on {
-            self.stop.store(false, Ordering::SeqCst);
             // start() rolls `enabled` back and records why if it cannot run, so
             // the switch never sits on while nothing is listening.
             self.clone().start()?;
@@ -815,6 +825,10 @@ impl SyncManager {
     /// Kept in step with history.retention_days by apply_settings.
     pub fn set_retention_days(&self, days: u32) {
         self.retention_days.store(days as usize, Ordering::SeqCst);
+    }
+
+    pub fn set_max_items(&self, max: u32) {
+        self.max_items.store(max as usize, Ordering::SeqCst);
     }
 
     /// Turning a kind ON has to refill the gap it left behind, in BOTH
@@ -907,9 +921,16 @@ impl SyncManager {
         mut session: echokey_sync::Session<S>,
         turn: Turn,
     ) {
-        if !self.inner.lock().enabled {
-            tracing::info!("sync: dropping a session for {peer_id}; sync was turned off");
-            return;
+        {
+            let i = self.inner.lock();
+            if !i.enabled {
+                tracing::info!("sync: dropping a session for {peer_id}; sync was turned off");
+                return;
+            }
+            if i.unpaired_mid_session.contains(&peer_id) {
+                tracing::info!("sync: dropping a session for {peer_id}; it was just unpaired");
+                return;
+            }
         }
         let (me_id, me_name, kinds) = {
             let i = self.inner.lock();
@@ -949,6 +970,7 @@ impl SyncManager {
                     stats.applied_tombstones,
                     stats.ignored
                 );
+                self.prune_after_exchange();
             }
             Err(e) => tracing::info!("sync: exchange with {peer_id} ended: {e}"),
         }
@@ -962,6 +984,23 @@ impl SyncManager {
 
     /// Oldest `created_at` this machine will keep, from the retention setting.
     /// None when retention is off.
+    /// Retention and the item cap are enforced after every exchange, not only
+    /// at startup.
+    ///
+    /// `prune` used to run once in `lib.rs` at launch, so `max_items` was not
+    /// enforced at all while the app was running — and a paired peer that keeps
+    /// its history forever pushes as much as it likes into ours. A long-running
+    /// session is exactly when this matters.
+    fn prune_after_exchange(&self) {
+        let days = self.retention_days.load(Ordering::SeqCst) as u32;
+        let max = self.max_items.load(Ordering::SeqCst) as u32;
+        match self.store.lock().prune(days, max) {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!("sync: pruned {n} rows after an exchange"),
+            Err(e) => tracing::warn!("sync: prune after exchange failed: {e}"),
+        }
+    }
+
     fn retention_floor(&self) -> Option<i64> {
         let days = self.retention_days.load(Ordering::SeqCst);
         if days == 0 {

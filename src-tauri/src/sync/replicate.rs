@@ -766,7 +766,6 @@ mod tests {
 
         let b = std::thread::spawn(move || {
             let mut session = Session::accept(srv, &k2).unwrap();
-            let known = vec![A.to_string()];
             let attr = Attribution { peer_id: A, local_id: B };
             exchange(
                 &mut session,
@@ -781,7 +780,6 @@ mod tests {
         });
 
         let mut session = Session::initiate(c, &key).unwrap();
-        let known = vec![B.to_string()];
         let attr = Attribution { peer_id: B, local_id: A };
         let a_stats = exchange(
             &mut session,
@@ -982,7 +980,6 @@ mod adversarial {
         let k2 = key.clone();
         let bt = std::thread::spawn(move || {
             let mut s = Session::accept(srv, &k2).unwrap();
-            let known = vec![A.to_string()];
             let attr = Attribution { peer_id: A, local_id: B };
             let _ = exchange(
                 &mut s,
@@ -1204,7 +1201,6 @@ mod adversarial_convergence {
 
         let bt = std::thread::spawn(move || {
             let mut session = Session::accept(srv, &k2).unwrap();
-            let known = vec![A.to_string()];
             let attr = Attribution { peer_id: A, local_id: B };
             exchange(
                 &mut session,
@@ -1219,7 +1215,6 @@ mod adversarial_convergence {
         });
 
         let mut session = Session::initiate(c, &key).unwrap();
-        let known = vec![B.to_string()];
         let attr = Attribution { peer_id: B, local_id: A };
         let a_stats = exchange(
             &mut session,

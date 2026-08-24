@@ -77,9 +77,9 @@ impl AppState {
         // call, and on this path it was not true. Contention-free today only
         // because nothing else is running yet, which makes it a trap for the
         // next person rather than a bug you can see.
-        let (sync_settings, retention_days) = {
+        let (sync_settings, retention_days, max_items) = {
             let s = settings.lock();
-            (s.sync.clone(), s.history.retention_days)
+            (s.sync.clone(), s.history.retention_days, s.history.max_items)
         };
         // Retention goes in through the constructor: it starts the listener,
         // so a setter afterwards leaves a window in which an inbound session
@@ -91,6 +91,7 @@ impl AppState {
             settings.clone(),
             retention_days,
         );
+        sync.set_max_items(max_items);
 
         let use_gpu = cfg!(any(target_os = "macos", feature = "cuda"));
         let engine = Arc::new(Mutex::new(EngineManager::new(models_dir(), use_gpu)));

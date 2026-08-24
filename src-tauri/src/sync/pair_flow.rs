@@ -157,26 +157,7 @@ pub fn run_with<S: std::io::Read + std::io::Write>(
     Ok(Paired { key, device_id, device_name })
 }
 
-fn encode_identity(id: &str, name: &str) -> Vec<u8> {
-    // id is a UUID and contains no '\n', so a single newline separates them
-    // unambiguously. The name is truncated because it is user-supplied.
-    let name: String = name.chars().take(64).collect();
-    format!("{id}\n{name}").into_bytes()
-}
 
-fn decode_identity(buf: &[u8]) -> Option<(String, String)> {
-    let s = std::str::from_utf8(buf).ok()?;
-    let (id, name) = s.split_once('\n')?;
-    let id = id.trim();
-    // Must look like the UUID we issue, or it is not something we will key a
-    // keychain entry on.
-    if id.len() != 36 || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
-        return None;
-    }
-    let name = name.trim();
-    let name = if name.is_empty() { "Unnamed device" } else { name };
-    Some((id.to_string(), name.chars().take(64).collect()))
-}
 
 #[cfg(test)]
 mod tests {
@@ -222,27 +203,7 @@ mod tests {
         assert!(resp.is_err(), "responder must not derive a key");
     }
 
-    #[test]
-    fn identity_round_trips() {
-        let e = encode_identity("11111111-1111-4111-8111-111111111111", "Ben's G14");
-        let (id, name) = decode_identity(&e).unwrap();
-        assert_eq!(id, "11111111-1111-4111-8111-111111111111");
-        assert_eq!(name, "Ben's G14");
-    }
 
-    #[test]
-    fn hostile_identities_are_rejected_not_coerced() {
-        assert!(decode_identity(b"no-newline").is_none());
-        assert!(decode_identity(b"not-a-uuid\nName").is_none());
-        assert!(decode_identity(&[0xff, 0xfe, b'\n']).is_none(), "invalid utf-8");
-        // A blank name is replaced rather than shown as an empty row.
-        let (_, name) = decode_identity(b"11111111-1111-4111-8111-111111111111\n   ").unwrap();
-        assert_eq!(name, "Unnamed device");
-        // An over-long name is truncated, not rejected.
-        let long = format!("11111111-1111-4111-8111-111111111111\n{}", "x".repeat(500));
-        let (_, name) = decode_identity(long.as_bytes()).unwrap();
-        assert_eq!(name.chars().count(), 64);
-    }
 
     #[test]
     fn only_a_real_spake2_message_can_cost_a_pairing_attempt() {
@@ -291,7 +252,7 @@ mod tests {
 #[cfg(test)]
 mod adversarial {
     use super::*;
-    use crate::sync::guard::{GuardError, PairingGuard, LOCKOUT, MAX_FAILURES};
+    use crate::sync::guard::{GuardError, PairingGuard, MAX_FAILURES};
     use std::time::Instant;
 
     /// FINDING: `looks_like_pairing_message` checks LENGTH ONLY, so the gate it
