@@ -12,6 +12,8 @@
 //!   anything is handed to the protocol, never after.
 
 pub mod guard;
+pub mod manager;
 pub mod keystore;
 pub mod pair_flow;
+pub mod replicate;
 pub mod wire_tcp;

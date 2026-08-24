@@ -16,6 +16,7 @@ use tauri::{AppHandle, Emitter, Manager};
 pub struct AppState {
     pub settings: Arc<Mutex<Settings>>,
     pub store: Arc<Mutex<Store>>,
+    pub sync: Arc<crate::sync::manager::SyncManager>,
     pub engine: Arc<Mutex<EngineManager>>,
     pub pipeline: Arc<Pipeline>,
     pub downloads: Mutex<HashMap<String, CancelToken>>,
@@ -68,6 +69,11 @@ impl AppState {
             s.set_device_id(&device_id);
             s
         }));
+        let sync = crate::sync::manager::SyncManager::new(
+            app.clone(),
+            &settings.lock().sync.clone(),
+            store.clone(),
+        );
 
         let use_gpu = cfg!(any(target_os = "macos", feature = "cuda"));
         let engine = Arc::new(Mutex::new(EngineManager::new(models_dir(), use_gpu)));
@@ -155,6 +161,7 @@ impl AppState {
             downloads: Mutex::new(HashMap::new()),
             gesture: Mutex::new(GestureMachine::new(mode, latch)),
             gesture_alt: Mutex::new(GestureMachine::new(mode_alt, latch)),
+            sync,
             recording_flag: Arc::new(AtomicBool::new(false)),
             work_tx,
             platform_tx: Mutex::new(None),

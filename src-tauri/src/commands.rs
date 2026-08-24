@@ -485,3 +485,94 @@ pub fn complete_onboarding(state: State<'_, Arc<AppState>>, app: AppHandle) -> R
     state.prewarm_async(app.clone());
     Ok(())
 }
+
+// -- Sync --------------------------------------------------------------------
+
+#[tauri::command]
+pub fn sync_status(state: State<'_, Arc<AppState>>) -> Result<crate::sync::manager::SyncStatus> {
+    Ok(state.sync.status())
+}
+
+#[tauri::command]
+pub fn sync_set_enabled(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<()> {
+    state.sync.set_enabled(enabled);
+    persist_sync(&state);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn sync_set_device_name(state: State<'_, Arc<AppState>>, name: String) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Give this device a name so you can recognise it when pairing".into());
+    }
+    state.sync.set_device_name(&name.chars().take(64).collect::<String>());
+    persist_sync(&state);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn sync_set_kinds(state: State<'_, Arc<AppState>>, dictations: bool, clipboard: bool) -> Result<()> {
+    state.sync.set_kinds(dictations, clipboard);
+    persist_sync(&state);
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+pub struct StartPairing {
+    pub code: String,
+    /// Epoch ms.
+    pub expires_at: i64,
+}
+
+#[tauri::command]
+pub fn sync_start_pairing(state: State<'_, Arc<AppState>>) -> Result<StartPairing> {
+    let (code, expires_at) = state.sync.start_pairing()?;
+    Ok(StartPairing { code, expires_at })
+}
+
+#[tauri::command]
+pub fn sync_cancel_pairing(state: State<'_, Arc<AppState>>) -> Result<()> {
+    state.sync.cancel_pairing();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sync_pair_with(
+    state: State<'_, Arc<AppState>>,
+    peer_id: String,
+    code: String,
+) -> Result<()> {
+    // Pairing does blocking network I/O; never on the UI thread.
+    let sync = state.sync.clone();
+    tauri::async_runtime::spawn_blocking(move || sync.pair_with(&peer_id, &code))
+        .await
+        .map_err(err)??;
+    persist_sync(&state);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn sync_unpair(state: State<'_, Arc<AppState>>, device_id: String) -> Result<()> {
+    state.sync.unpair(&device_id)?;
+    persist_sync(&state);
+    Ok(())
+}
+
+/// Mirror the manager's state into settings.json.
+///
+/// The manager is the source of truth while running; settings is only where it
+/// survives a restart. Paired KEYS are never written here — they live in the
+/// OS keychain.
+fn persist_sync(state: &Arc<AppState>) {
+    let (enabled, name, dictations, clipboard, paired) = state.sync.persistable();
+    let mut s = state.settings.lock();
+    s.sync.enabled = enabled;
+    s.sync.device_name = name;
+    s.sync.sync_dictations = dictations;
+    s.sync.sync_clipboard = clipboard;
+    s.sync.paired = paired;
+    if let Err(e) = s.save(&settings_path()) {
+        tracing::warn!("could not persist sync settings: {e}");
+    }
+}

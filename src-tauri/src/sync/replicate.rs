@@ -1,0 +1,350 @@
+//! One replication exchange over an established session.
+//!
+//! Both sides run the identical routine, because the protocol is symmetric —
+//! there is no client and no server once the session is up. A round is:
+//!
+//!   1. Hello (protocol version + who we are)
+//!   2. Watermarks (per source device, the newest clock we already hold)
+//!   3. everything we hold that is above the peer's watermarks, then tombstones
+//!   4. apply whatever the peer sends us
+//!
+//! Two things here are load-bearing and easy to get wrong:
+//!
+//! - We serve rows for EVERY source we know about, not just our own. Pinning a
+//!   Mac row on the Windows box bumps that row's clock but leaves its source as
+//!   the Mac; if each side only offered its own rows, that edit would never
+//!   leave the machine.
+//! - Paging is by millisecond, so a page that is entirely one millisecond wide
+//!   would otherwise silently drop the rest of that millisecond. That case is
+//!   detected and re-fetched rather than skipped.
+
+use std::collections::HashMap;
+use std::io::{Read, Write};
+
+use echokey_core::history::{RemoteItem, RemoteTombstone, Store};
+use echokey_sync::{DeviceId, ItemKind, Session, SessionError, SyncItem, SyncMessage, Tombstone, Watermark, PROTOCOL_VERSION};
+use parking_lot::Mutex;
+use std::sync::Arc;
+
+/// Rows per batch. Large enough that a same-millisecond burst rarely fills one.
+const PAGE: usize = 512;
+/// Ceiling for the widened re-fetch when a whole page shares one millisecond.
+const WIDE_PAGE: usize = 20_000;
+/// Hard stop on a single exchange, so a peer cannot keep us here forever.
+const MAX_BATCHES: usize = 64;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReplicateError {
+    #[error("session: {0}")]
+    Session(#[from] SessionError),
+    #[error("store: {0}")]
+    Store(String),
+    #[error("peer speaks protocol {peer}, we speak {ours}")]
+    Version { peer: u16, ours: u16 },
+    #[error("peer did not say hello first")]
+    NoHello,
+}
+
+/// What one exchange did, for logging and for the tests.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RoundStats {
+    pub sent_items: usize,
+    pub sent_tombstones: usize,
+    pub applied_items: usize,
+    pub applied_tombstones: usize,
+    pub ignored: usize,
+}
+
+/// Which kinds the user has agreed to share.
+#[derive(Debug, Clone, Copy)]
+pub struct Kinds {
+    pub dictations: bool,
+    pub clipboard: bool,
+}
+
+impl Kinds {
+    fn allows(&self, kind: &str) -> bool {
+        match kind {
+            "transcription" => self.dictations,
+            "clipboard" => self.clipboard,
+            // An unknown kind is not something we have asked the user about,
+            // so it does not leave the machine.
+            _ => false,
+        }
+    }
+}
+
+pub fn exchange<S: Read + Write>(
+    session: &mut Session<S>,
+    store: &Arc<Mutex<Store>>,
+    me: (&str, &str),
+    kinds: Kinds,
+) -> Result<RoundStats, ReplicateError> {
+    let mut stats = RoundStats::default();
+
+    // 1. Hello, both ways. Version mismatch is a clean refusal, not a
+    //    mysterious decode failure three messages later.
+    let my_id = DeviceId::parse(me.0).map_err(|e| ReplicateError::Store(e.to_string()))?;
+    session.send(&SyncMessage::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        device_id: my_id,
+        device_name: me.1.chars().take(64).collect(),
+    })?;
+    match session.recv()? {
+        SyncMessage::Hello { protocol_version, .. } if protocol_version == PROTOCOL_VERSION => {}
+        SyncMessage::Hello { protocol_version, .. } => {
+            return Err(ReplicateError::Version { peer: protocol_version, ours: PROTOCOL_VERSION })
+        }
+        _ => return Err(ReplicateError::NoHello),
+    }
+
+    // 2. Watermarks, both ways.
+    let mine = store.lock().watermarks().map_err(|e| ReplicateError::Store(e.to_string()))?;
+    session.send(&SyncMessage::Watermarks {
+        entries: mine
+            .iter()
+            .filter_map(|(src, clock)| {
+                DeviceId::parse(src).ok().map(|d| Watermark {
+                    source_device: d,
+                    clock: (*clock).max(0) as u64,
+                })
+            })
+            .collect(),
+    })?;
+    let peer_marks: HashMap<String, i64> = match session.recv()? {
+        SyncMessage::Watermarks { entries } => entries
+            .into_iter()
+            .map(|w| (w.source_device.as_str().to_string(), w.clock as i64))
+            .collect(),
+        _ => HashMap::new(),
+    };
+
+    // 3. Serve. Every source we hold, not just our own — otherwise an edit made
+    //    here to a row that originated elsewhere never propagates.
+    for (source, _) in mine.iter() {
+        let mut after = peer_marks.get(source).copied().unwrap_or(0);
+        for _ in 0..MAX_BATCHES {
+            let page = fetch_page(store, source, after)?;
+            if page.is_empty() {
+                break;
+            }
+            let last = page.last().map(|r| r.updated_at).unwrap_or(after);
+            let out: Vec<SyncItem> = page
+                .iter()
+                .filter(|r| kinds.allows(&r.kind))
+                .filter_map(to_wire)
+                .collect();
+            let more = page.len() >= PAGE;
+            if !out.is_empty() {
+                stats.sent_items += out.len();
+                session.send(&SyncMessage::Items { items: out, more })?;
+            }
+            if !more {
+                break;
+            }
+            after = last;
+        }
+
+        // Tombstones for the same source.
+        let mut after = peer_marks.get(source).copied().unwrap_or(0);
+        for _ in 0..MAX_BATCHES {
+            let page = store
+                .lock()
+                .tombstones_since(source, after, PAGE)
+                .map_err(|e| ReplicateError::Store(e.to_string()))?;
+            if page.is_empty() {
+                break;
+            }
+            let last = page.last().map(|t| t.deleted_at).unwrap_or(after);
+            let more = page.len() >= PAGE;
+            stats.sent_tombstones += page.len();
+            session.send(&SyncMessage::Tombstones {
+                entries: page
+                    .iter()
+                    .filter_map(|t| {
+                        DeviceId::parse(&t.source_machine).ok().map(|d| Tombstone {
+                            source_device: d,
+                            origin_id: t.origin_id.clone(),
+                            deleted_at: t.deleted_at,
+                            clock: t.deleted_at.max(0) as u64,
+                        })
+                    })
+                    .collect(),
+                more,
+            })?;
+            if !more || last == after {
+                break;
+            }
+            after = last;
+        }
+    }
+
+    // Tell the peer we are done sending.
+    session.send(&SyncMessage::Items { items: Vec::new(), more: false })?;
+
+    // 4. Drain whatever the peer sends until it says it is finished.
+    for _ in 0..MAX_BATCHES * 4 {
+        match session.recv()? {
+            SyncMessage::Items { items, more } => {
+                for it in &items {
+                    apply_item(store, it, &mut stats)?;
+                }
+                if !more && items.is_empty() {
+                    break;
+                }
+            }
+            SyncMessage::Tombstones { entries, .. } => {
+                for t in &entries {
+                    let rt = RemoteTombstone {
+                        source_machine: t.source_device.as_str().to_string(),
+                        origin_id: t.origin_id.clone(),
+                        deleted_at: t.deleted_at,
+                    };
+                    let outcome = store
+                        .lock()
+                        .apply_remote_tombstone(&rt)
+                        .map_err(|e| ReplicateError::Store(e.to_string()))?;
+                    match outcome {
+                        echokey_core::history::ApplyOutcome::Ignored => stats.ignored += 1,
+                        _ => stats.applied_tombstones += 1,
+                    }
+                }
+            }
+            // Anything else at this point is out of order; stop rather than
+            // guess what the peer meant.
+            _ => break,
+        }
+    }
+
+    Ok(stats)
+}
+
+/// One page, re-fetched wider if the whole page shares a single millisecond.
+///
+/// `items_since` pages on `updated_at`, so a page entirely inside one
+/// millisecond would advance the cursor past rows never sent. Rare, but it is
+/// silent data loss, and a burst of clipboard captures is exactly how it would
+/// happen.
+fn fetch_page(
+    store: &Arc<Mutex<Store>>,
+    source: &str,
+    after: i64,
+) -> Result<Vec<RemoteItem>, ReplicateError> {
+    let page = store
+        .lock()
+        .items_since(source, after, PAGE)
+        .map_err(|e| ReplicateError::Store(e.to_string()))?;
+    let saturated = page.len() >= PAGE
+        && page.first().map(|r| r.updated_at) == page.last().map(|r| r.updated_at);
+    if !saturated {
+        return Ok(page);
+    }
+    tracing::warn!(
+        "sync: {} rows share one millisecond for {source}; widening the page",
+        page.len()
+    );
+    let wide = store
+        .lock()
+        .items_since(source, after, WIDE_PAGE)
+        .map_err(|e| ReplicateError::Store(e.to_string()))?;
+    if wide.len() >= WIDE_PAGE {
+        tracing::error!("sync: more than {WIDE_PAGE} rows in one millisecond for {source}; some may not replicate");
+    }
+    Ok(wide)
+}
+
+fn apply_item(
+    store: &Arc<Mutex<Store>>,
+    it: &SyncItem,
+    stats: &mut RoundStats,
+) -> Result<(), ReplicateError> {
+    let r = RemoteItem {
+        source_machine: it.source_device.as_str().to_string(),
+        origin_id: it.origin_id.clone(),
+        kind: match it.kind {
+            ItemKind::Transcription => "transcription".into(),
+            ItemKind::Clipboard => "clipboard".into(),
+        },
+        text: it.text.clone(),
+        created_at: it.created_at,
+        updated_at: it.updated_at,
+        pinned: it.pinned,
+    };
+    let outcome = store
+        .lock()
+        .apply_remote_item(&r)
+        .map_err(|e| ReplicateError::Store(e.to_string()))?;
+    match outcome {
+        echokey_core::history::ApplyOutcome::Ignored => stats.ignored += 1,
+        _ => stats.applied_items += 1,
+    }
+    Ok(())
+}
+
+fn to_wire(r: &RemoteItem) -> Option<SyncItem> {
+    let kind = match r.kind.as_str() {
+        "transcription" => ItemKind::Transcription,
+        "clipboard" => ItemKind::Clipboard,
+        _ => return None,
+    };
+    Some(SyncItem {
+        source_device: DeviceId::parse(&r.source_machine).ok()?,
+        origin_id: r.origin_id.clone(),
+        kind,
+        text: r.text.clone(),
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        pinned: r.pinned,
+        clock: r.updated_at.max(0) as u64,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kind_filter_respects_the_user_toggles() {
+        let both = Kinds { dictations: true, clipboard: true };
+        assert!(both.allows("transcription") && both.allows("clipboard"));
+
+        let only_dict = Kinds { dictations: true, clipboard: false };
+        assert!(only_dict.allows("transcription"));
+        assert!(!only_dict.allows("clipboard"), "clipboard must not leave when disabled");
+
+        let none = Kinds { dictations: false, clipboard: false };
+        assert!(!none.allows("transcription") && !none.allows("clipboard"));
+
+        // A kind we have never shown the user is never shared, whatever it is.
+        assert!(!both.allows("secrets"));
+        assert!(!both.allows(""));
+    }
+
+    #[test]
+    fn unknown_kinds_do_not_round_trip_to_the_wire() {
+        let r = RemoteItem {
+            source_machine: "11111111-1111-4111-8111-111111111111".into(),
+            origin_id: "1".into(),
+            kind: "mystery".into(),
+            text: "x".into(),
+            created_at: 1,
+            updated_at: 1,
+            pinned: false,
+        };
+        assert!(to_wire(&r).is_none());
+    }
+
+    #[test]
+    fn a_malformed_source_id_is_dropped_rather_than_sent() {
+        let r = RemoteItem {
+            source_machine: "not-a-uuid".into(),
+            origin_id: "1".into(),
+            kind: "clipboard".into(),
+            text: "x".into(),
+            created_at: 1,
+            updated_at: 1,
+            pinned: false,
+        };
+        assert!(to_wire(&r).is_none());
+    }
+}
