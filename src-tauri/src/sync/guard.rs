@@ -133,36 +133,6 @@ impl PairingGuard {
         self.reset();
     }
 
-    /// Check a code supplied by a peer.
-    ///
-    /// A wrong code counts against the failure budget; an expired or absent one
-    /// does not, since neither is evidence of guessing.
-    pub fn attempt(&mut self, supplied: &str, now: Instant) -> Result<(), GuardError> {
-        self.check_lockout(now)?;
-        let Some(active) = self.active.as_ref() else {
-            return Err(GuardError::NotPairing);
-        };
-        if now.saturating_duration_since(active.started) >= CODE_TTL {
-            self.active = None;
-            return Err(GuardError::Expired);
-        }
-        // Compare in constant time: the code is a shared secret, and a timing
-        // oracle on a 6-digit space is worth closing even on a LAN.
-        if constant_time_eq(active.code.as_bytes(), supplied.as_bytes()) {
-            self.reset();
-            return Ok(());
-        }
-        self.failures += 1;
-        if self.failures >= MAX_FAILURES {
-            self.locked_until = Some(now + LOCKOUT);
-            // Burn the code: an attacker who has been grinding must not get to
-            // keep guessing the same one after the lockout lifts.
-            self.active = None;
-        }
-        Err(GuardError::LockedOut { retry_in: Duration::ZERO }
-            .lockout_or(GuardError::NotPairing, self.locked_until, now))
-    }
-
     fn reset(&mut self) {
         self.active = None;
         self.failures = 0;
@@ -181,15 +151,6 @@ impl PairingGuard {
     }
 }
 
-impl GuardError {
-    /// Report a lockout if one is now in force, otherwise the fallback.
-    fn lockout_or(self, fallback: GuardError, until: Option<Instant>, now: Instant) -> GuardError {
-        match until {
-            Some(t) if now < t => GuardError::LockedOut { retry_in: t - now },
-            _ => fallback,
-        }
-    }
-}
 
 /// Length-independent, value-constant comparison.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -209,79 +170,6 @@ mod tests {
 
     fn t0() -> Instant {
         Instant::now()
-    }
-
-    #[test]
-    fn a_correct_code_pairs_and_clears_the_window() {
-        let mut g = PairingGuard::new();
-        let now = t0();
-        g.begin("123456".into(), now).unwrap();
-        assert!(g.attempt("123456", now).is_ok());
-        // The code is single-use: replaying it must not work.
-        assert_eq!(g.attempt("123456", now), Err(GuardError::NotPairing));
-    }
-
-    #[test]
-    fn a_code_expires() {
-        let mut g = PairingGuard::new();
-        let now = t0();
-        g.begin("123456".into(), now).unwrap();
-        let later = now + CODE_TTL + Duration::from_secs(1);
-        assert_eq!(g.attempt("123456", later), Err(GuardError::Expired));
-        assert!(g.code(later).is_none());
-    }
-
-    #[test]
-    fn grinding_locks_pairing_out() {
-        let mut g = PairingGuard::new();
-        let now = t0();
-        g.begin("123456".into(), now).unwrap();
-        // Four wrong guesses are merely wrong.
-        for _ in 0..MAX_FAILURES - 1 {
-            assert_eq!(g.attempt("000000", now), Err(GuardError::NotPairing));
-        }
-        // The fifth closes the door.
-        match g.attempt("000000", now) {
-            Err(GuardError::LockedOut { .. }) => {}
-            other => panic!("expected lockout, got {other:?}"),
-        }
-        // And the real code is burned, so waiting out the lockout does not
-        // hand the attacker back the same target.
-        let after = now + LOCKOUT + Duration::from_secs(1);
-        assert_eq!(g.attempt("123456", after), Err(GuardError::NotPairing));
-    }
-
-    #[test]
-    fn lockout_blocks_starting_a_fresh_code() {
-        let mut g = PairingGuard::new();
-        let now = t0();
-        g.begin("123456".into(), now).unwrap();
-        for _ in 0..MAX_FAILURES {
-            let _ = g.attempt("000000", now);
-        }
-        match g.begin("654321".into(), now) {
-            Err(GuardError::LockedOut { .. }) => {}
-            other => panic!("a locked-out guard must not start a new code: {other:?}"),
-        }
-        // Once it lifts, pairing works again.
-        let after = now + LOCKOUT + Duration::from_secs(1);
-        assert!(g.begin("654321".into(), after).is_ok());
-        assert!(g.attempt("654321", after).is_ok());
-    }
-
-    #[test]
-    fn expiry_alone_does_not_count_as_a_failure() {
-        let mut g = PairingGuard::new();
-        let mut now = t0();
-        // Let several codes lapse untouched; that is a user wandering off, not
-        // an attacker, and must not push them toward a lockout.
-        for _ in 0..MAX_FAILURES + 2 {
-            g.begin("123456".into(), now).unwrap();
-            now += CODE_TTL + Duration::from_secs(1);
-            assert_eq!(g.attempt("123456", now), Err(GuardError::Expired));
-        }
-        g.begin("123456".into(), now).unwrap();
-        assert!(g.attempt("123456", now).is_ok());
     }
 
     #[test]
@@ -336,5 +224,63 @@ mod tests {
         g.begin("123456".into(), now).unwrap();
         let late = now + CODE_TTL + Duration::from_secs(1);
         assert_eq!(g.reserve(late), Err(GuardError::Expired));
+    }
+
+    #[test]
+    fn a_reserved_code_expires() {
+        let mut g = PairingGuard::new();
+        let now = t0();
+        g.begin("123456".into(), now).unwrap();
+        let late = now + CODE_TTL + Duration::from_secs(1);
+        assert_eq!(g.reserve(late), Err(GuardError::Expired));
+        assert!(g.code(late).is_none());
+    }
+
+    #[test]
+    fn grinding_locks_pairing_out_and_burns_the_code() {
+        let mut g = PairingGuard::new();
+        let now = t0();
+        g.begin("123456".into(), now).unwrap();
+        for _ in 0..MAX_FAILURES - 1 {
+            assert!(g.reserve(now).is_ok(), "within budget");
+        }
+        match g.reserve(now) {
+            Err(GuardError::LockedOut { .. }) => {}
+            other => panic!("expected lockout, got {other:?}"),
+        }
+        // The code is burned, so waiting out the lockout does not hand the
+        // attacker back the same target.
+        let after = now + LOCKOUT + Duration::from_secs(1);
+        assert_eq!(g.reserve(after), Err(GuardError::NotPairing));
+    }
+
+    #[test]
+    fn a_locked_out_guard_refuses_to_show_a_fresh_code() {
+        let mut g = PairingGuard::new();
+        let now = t0();
+        g.begin("123456".into(), now).unwrap();
+        for _ in 0..MAX_FAILURES {
+            let _ = g.reserve(now);
+        }
+        match g.begin("654321".into(), now) {
+            Err(GuardError::LockedOut { .. }) => {}
+            other => panic!("must not start a new code while locked out: {other:?}"),
+        }
+        let after = now + LOCKOUT + Duration::from_secs(1);
+        assert!(g.begin("654321".into(), after).is_ok());
+    }
+
+    #[test]
+    fn codes_that_simply_lapse_do_not_count_as_guesses() {
+        let mut g = PairingGuard::new();
+        let mut now = t0();
+        // A user who walks away is not an attacker and must not be locked out.
+        for _ in 0..MAX_FAILURES + 2 {
+            g.begin("123456".into(), now).unwrap();
+            now += CODE_TTL + Duration::from_secs(1);
+            assert_eq!(g.reserve(now), Err(GuardError::Expired));
+        }
+        g.begin("123456".into(), now).unwrap();
+        assert!(g.reserve(now).is_ok());
     }
 }

@@ -51,9 +51,31 @@ pub fn run(
     code: &PairingCode,
     me: (&str, &str),
 ) -> Result<Paired, PairFlowError> {
+    run_with(stream, role, code, me, None)
+}
+
+/// As [`run`], but with the peer's opening message already in hand.
+///
+/// The inbound path reads that frame BEFORE charging a guess against the rate
+/// limit. Otherwise a bare TCP connect sending a single byte costs the user one
+/// of their four attempts, and four such connects burn the code and lock
+/// pairing out for five minutes — a trivial denial of service from anyone on
+/// the LAN. Requiring a well-formed frame first costs the attacker real work
+/// and reveals nothing, so it does not reintroduce the TOCTOU that the
+/// charge-before-exchange ordering exists to close.
+pub fn run_with(
+    stream: &mut TcpStream,
+    role: PairingRole,
+    code: &PairingCode,
+    me: (&str, &str),
+    peer_first: Option<Vec<u8>>,
+) -> Result<Paired, PairFlowError> {
     let (state, my_msg) = Pairing::start(role, code);
     write_frame(stream, &my_msg)?;
-    let peer_msg = read_frame(stream)?;
+    let peer_msg = match peer_first {
+        Some(m) => m,
+        None => read_frame(stream)?,
+    };
 
     let (confirm, my_tag) = state.finish(&peer_msg)?;
     write_frame(stream, my_tag.as_bytes())?;

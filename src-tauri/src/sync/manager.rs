@@ -430,9 +430,22 @@ impl SyncManager {
 
     /// Someone is trying to pair with the code we are displaying.
     fn serve_pairing(self: Arc<Self>, mut s: TcpStream) {
-        // Charge the guess up front. Reading the code and checking the budget
-        // afterwards is a TOCTOU race: concurrent connections would each read
-        // the same live code and each get a free guess.
+        // Make the peer do real work BEFORE it can cost the user a guess: read
+        // its opening SPAKE2 frame first. A bare connect sending one byte would
+        // otherwise burn an attempt, and four of those burn the code and lock
+        // pairing out for five minutes from anywhere on the LAN. Reading the
+        // frame reveals nothing, so the charge-before-exchange ordering that
+        // closes the TOCTOU still holds.
+        let peer_first = match read_frame(&mut s) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::debug!("sync: pairing connection sent no opening frame ({e})");
+                return;
+            }
+        };
+        // Now charge it. Checking the budget only after the exchange completes
+        // is a TOCTOU race: concurrent connections would each read the same
+        // live code and each get a free guess.
         let code = {
             let mut i = self.inner.lock();
             match i.guard.reserve(Instant::now()) {
@@ -452,7 +465,13 @@ impl SyncManager {
             (i.device_id.clone(), i.device_name.clone())
         };
 
-        match pair_flow::run(&mut s, PairingRole::Initiator, &code, (&me_id, &me_name)) {
+        match pair_flow::run_with(
+            &mut s,
+            PairingRole::Initiator,
+            &code,
+            (&me_id, &me_name),
+            Some(peer_first),
+        ) {
             Ok(p) => {
                 // Correct code: refund the reserved guess and close the window.
                 self.inner.lock().guard.succeed();

@@ -200,7 +200,10 @@ pub fn exchange<S: Read + Write>(
                 stats.sent_items += out.len();
                 session.send(&SyncMessage::Items { items: out, more })?;
             }
-            if !more {
+            // `last == after` means the cursor cannot advance: every row in a
+            // full page shared one millisecond even after widening. Without
+            // this the identical page is re-sent up to MAX_BATCHES times.
+            if !more || last == after {
                 break;
             }
             after = last;
