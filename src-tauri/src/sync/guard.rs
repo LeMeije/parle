@@ -94,6 +94,45 @@ impl PairingGuard {
         Some(a.code.as_str())
     }
 
+    /// Reserve one guess BEFORE the network exchange runs, returning the code
+    /// to attempt with.
+    ///
+    /// This ordering is the whole point. Checking the budget only after the
+    /// exchange completes is a TOCTOU race: an attacker opening a thousand
+    /// concurrent connections would read the same live code a thousand times
+    /// and get a thousand guesses before any of them incremented the counter,
+    /// which defeats the rate limit completely. Charging the attempt up front,
+    /// atomically under the lock, bounds concurrent guessing to the budget.
+    ///
+    /// The cost is that an exchange interrupted by a dropped network still
+    /// spends a guess. That is the right trade at five attempts per five
+    /// minutes, and `succeed` refunds the whole budget on the happy path.
+    pub fn reserve(&mut self, now: Instant) -> Result<String, GuardError> {
+        self.check_lockout(now)?;
+        let Some(active) = self.active.as_ref() else {
+            return Err(GuardError::NotPairing);
+        };
+        if now.saturating_duration_since(active.started) >= CODE_TTL {
+            self.active = None;
+            return Err(GuardError::Expired);
+        }
+        let code = active.code.clone();
+        self.failures += 1;
+        if self.failures >= MAX_FAILURES {
+            self.locked_until = Some(now + LOCKOUT);
+            // Burn the code so waiting out the lockout does not hand the
+            // attacker back the same target.
+            self.active = None;
+            return Err(GuardError::LockedOut { retry_in: LOCKOUT });
+        }
+        Ok(code)
+    }
+
+    /// The reserved guess was correct: clear the window and refund the budget.
+    pub fn succeed(&mut self) {
+        self.reset();
+    }
+
     /// Check a code supplied by a peer.
     ///
     /// A wrong code counts against the failure budget; an expired or absent one
@@ -251,5 +290,51 @@ mod tests {
         assert!(!constant_time_eq(b"123456", b"123457"));
         assert!(!constant_time_eq(b"123456", b"12345"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn concurrent_guesses_cannot_exceed_the_budget() {
+        // The attack the reserve/succeed split exists to stop: many peers
+        // reading the same live code before any of them has been charged.
+        let mut g = PairingGuard::new();
+        let now = t0();
+        g.begin("123456".into(), now).unwrap();
+
+        let mut granted = 0;
+        for _ in 0..1000 {
+            if g.reserve(now).is_ok() {
+                granted += 1;
+            }
+        }
+        assert_eq!(
+            granted,
+            (MAX_FAILURES - 1) as usize,
+            "a thousand simultaneous attempts must not buy a thousand guesses"
+        );
+    }
+
+    #[test]
+    fn a_reserved_guess_that_succeeds_refunds_the_budget() {
+        let mut g = PairingGuard::new();
+        let now = t0();
+        g.begin("123456".into(), now).unwrap();
+        let code = g.reserve(now).unwrap();
+        assert_eq!(code, "123456");
+        g.succeed();
+        // Budget restored and the window closed.
+        g.begin("654321".into(), now).unwrap();
+        for _ in 0..MAX_FAILURES - 1 {
+            assert!(g.reserve(now).is_ok());
+        }
+    }
+
+    #[test]
+    fn reserve_refuses_when_no_code_is_live_or_it_expired() {
+        let mut g = PairingGuard::new();
+        let now = t0();
+        assert_eq!(g.reserve(now), Err(GuardError::NotPairing));
+        g.begin("123456".into(), now).unwrap();
+        let late = now + CODE_TTL + Duration::from_secs(1);
+        assert_eq!(g.reserve(late), Err(GuardError::Expired));
     }
 }

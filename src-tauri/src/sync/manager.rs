@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -33,6 +33,10 @@ use echokey_core::history::Store;
 /// How long we will sit in a blocking read on an unauthenticated socket.
 /// Without this a peer that connects and says nothing pins a thread forever.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Concurrent inbound handlers. One thread per connection with no ceiling lets
+/// anyone on the LAN exhaust the process by opening sockets; a paired peer only
+/// ever needs one.
+const MAX_INBOUND: usize = 8;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -105,6 +109,7 @@ pub struct SyncManager {
     app: AppHandle,
     stop: Arc<AtomicBool>,
     store: Arc<Mutex<Store>>,
+    inbound: Arc<AtomicUsize>,
 }
 
 impl SyncManager {
@@ -139,6 +144,7 @@ impl SyncManager {
             app,
             stop: Arc::new(AtomicBool::new(false)),
             store,
+            inbound: Arc::new(AtomicUsize::new(0)),
         });
         if s.enabled {
             m.clone().start();
@@ -281,8 +287,21 @@ impl SyncManager {
                     }
                     match conn {
                         Ok(s) => {
+                            if me.inbound.load(Ordering::SeqCst) >= MAX_INBOUND {
+                                tracing::debug!("sync: refusing connection, {MAX_INBOUND} already in flight");
+                                drop(s); // closes it; the peer can retry
+                                continue;
+                            }
+                            me.inbound.fetch_add(1, Ordering::SeqCst);
                             let me2 = me.clone();
-                            std::thread::spawn(move || me2.serve(s));
+                            let slot = me.inbound.clone();
+                            std::thread::spawn(move || {
+                                me2.serve(s);
+                                // Released however serve() exits, including on
+                                // an early return, so a peer that connects and
+                                // says nothing cannot leak a slot.
+                                slot.fetch_sub(1, Ordering::SeqCst);
+                            });
                         }
                         Err(e) => tracing::debug!("sync: accept failed: {e}"),
                     }
@@ -320,13 +339,15 @@ impl SyncManager {
 
     /// Someone is trying to pair with the code we are displaying.
     fn serve_pairing(self: Arc<Self>, mut s: TcpStream) {
-        let now = Instant::now();
+        // Charge the guess up front. Reading the code and checking the budget
+        // afterwards is a TOCTOU race: concurrent connections would each read
+        // the same live code and each get a free guess.
         let code = {
-            let i = self.inner.lock();
-            match i.guard.code(now) {
-                Some(c) => c.to_string(),
-                None => {
-                    tracing::info!("sync: pairing attempt while no code is displayed");
+            let mut i = self.inner.lock();
+            match i.guard.reserve(Instant::now()) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::info!("sync: pairing attempt refused: {e}");
                     return;
                 }
             }
@@ -342,20 +363,13 @@ impl SyncManager {
 
         match pair_flow::run(&mut s, PairingRole::Initiator, &code, (&me_id, &me_name)) {
             Ok(p) => {
-                // The guard is told AFTER the cryptographic result, so a wrong
-                // code counts against the budget exactly once and a right one
-                // clears it.
-                {
-                    let mut i = self.inner.lock();
-                    let _ = i.guard.attempt(code.as_str(), Instant::now());
-                }
+                // Correct code: refund the reserved guess and close the window.
+                self.inner.lock().guard.succeed();
                 self.complete_pairing(p);
             }
             Err(e) => {
-                let mut i = self.inner.lock();
-                // Any failed exchange is a guess against the displayed code.
-                let _ = i.guard.attempt("", Instant::now());
-                drop(i);
+                // The guess was already charged by reserve(); nothing to do but
+                // report it. Publishing refreshes the countdown/lockout in the UI.
                 tracing::info!("sync: pairing failed: {e}");
                 self.publish();
             }
