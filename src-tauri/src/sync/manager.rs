@@ -142,6 +142,9 @@ struct Inner {
     /// Peers with a dial in flight, so a flapping record cannot spawn a thread
     /// per sighting.
     dialing: std::collections::HashSet<String>,
+    /// Peers we owe one full re-offer of our history, because the user widened
+    /// what this machine shares. See `set_kinds`.
+    resend_owed: std::collections::HashSet<String>,
     /// Why sync is not working, surfaced to the UI instead of only the log.
     error: Option<String>,
 }
@@ -187,6 +190,7 @@ impl SyncManager {
                 port: 0,
                 listen_stop: None,
                 dialing: std::collections::HashSet::new(),
+                resend_owed: std::collections::HashSet::new(),
                 error: None,
             }),
             app,
@@ -704,25 +708,41 @@ impl SyncManager {
         self.retention_days.store(days as usize, Ordering::SeqCst);
     }
 
-    /// Turning a kind ON has to refill the gap it left behind.
+    /// Turning a kind ON has to refill the gap it left behind, in BOTH
+    /// directions. They need different mechanisms, which is why this is not one
+    /// line.
     ///
-    /// While a kind is off we drop the rows a peer sends AND still advance that
-    /// peer's mark past them — the alternative is the peer re-offering the same
-    /// rows on every exchange for as long as the switch is off. That leaves a
-    /// hole, so switching back on drops every receipt and the next exchange
-    /// re-offers the full history. Applying it again is idempotent and takes a
-    /// second on a LAN; a hole is silent and permanent.
+    /// Inbound is ours to fix: while the kind was off we dropped the rows a
+    /// peer sent and still advanced its receipt past them, because the
+    /// alternative is that peer re-sending the same rows on every exchange for
+    /// as long as the switch is off. Clearing our receipts makes the next
+    /// exchange re-offer everything.
+    ///
+    /// Outbound is not ours to fix, and clearing our own receipts does nothing
+    /// for it. While the kind was off, our outbound filter dropped those rows
+    /// from the batch but the cursor still advanced, so the PEER's mark for us
+    /// moved past them. We cannot reach into its receipts. So we record that we
+    /// owe every paired device one full re-offer of our history, ignoring its
+    /// cursor for one exchange. Re-applying is idempotent; without it every
+    /// clipboard item captured while clipboard sync was off is unreachable
+    /// forever.
     pub fn set_kinds(&self, dictations: bool, clipboard: bool) {
         let mut i = self.inner.lock();
         let widened = (dictations && !i.dictations) || (clipboard && !i.clipboard);
         i.dictations = dictations;
         i.clipboard = clipboard;
+        if widened {
+            let owed: Vec<String> = i.paired.iter().map(|d| d.id.clone()).collect();
+            i.resend_owed.extend(owed);
+        }
         drop(i);
         if widened {
             if let Err(e) = self.store.lock().reset_source_marks() {
                 tracing::warn!("sync: could not reset receipts after enabling a kind: {e}");
             } else {
-                tracing::info!("sync: a sync kind was enabled; next exchange refetches in full");
+                tracing::info!(
+                    "sync: a sync kind was enabled; the next exchange refetches and re-offers in full"
+                );
             }
         }
         self.publish();
@@ -766,10 +786,11 @@ impl SyncManager {
             )
         };
         let retention = Retention { oldest_allowed: self.retention_floor() };
-        // Only the handshake-proven peer, or another device we have paired
-        // with, may author rows — and nobody may author rows as us.
-        let known: Vec<String> = self.inner.lock().paired.iter().map(|d| d.id.clone()).collect();
-        let attribution = Attribution { peer_id: &peer_id, local_id: &me_id, known: &known };
+        // Cleared only after the exchange actually succeeds, so a session that
+        // dies halfway does not consume the debt and leave the hole open.
+        let resend_all = self.inner.lock().resend_owed.contains(&peer_id);
+        // Only the handshake-proven peer may author rows, and only for itself.
+        let attribution = Attribution { peer_id: &peer_id, local_id: &me_id };
         // The store lock is taken inside the exchange, per statement, never
         // held across a socket read.
         match replicate::exchange(
@@ -780,15 +801,21 @@ impl SyncManager {
             retention,
             &attribution,
             turn,
+            resend_all,
         ) {
-            Ok(stats) => tracing::info!(
-                "sync: {peer_id} sent {} items / {} tombstones, applied {} / {}, ignored {}",
-                stats.sent_items,
-                stats.sent_tombstones,
-                stats.applied_items,
-                stats.applied_tombstones,
-                stats.ignored
-            ),
+            Ok(stats) => {
+                if resend_all {
+                    self.inner.lock().resend_owed.remove(&peer_id);
+                }
+                tracing::info!(
+                    "sync: {peer_id} sent {} items / {} tombstones, applied {} / {}, ignored {}",
+                    stats.sent_items,
+                    stats.sent_tombstones,
+                    stats.applied_items,
+                    stats.applied_tombstones,
+                    stats.ignored
+                );
+            }
             Err(e) => tracing::info!("sync: exchange with {peer_id} ended: {e}"),
         }
         let mut i = self.inner.lock();
@@ -851,5 +878,112 @@ impl SyncManager {
             }
             Err(e) => tracing::info!("sync: handshake with {peer_id} failed: {e}"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW — lifecycle / threading / wiring.
+// Demonstrations of live findings. NOT fixes.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial {
+    use super::*;
+    use std::net::TcpListener;
+
+    /// FINDING: the settings mutex IS held across network I/O at app startup.
+    ///
+    /// `AppState::new` (state.rs:72-76) writes
+    ///
+    ///     SyncManager::new(app.clone(), &settings.lock().sync.clone(), store.clone());
+    ///
+    /// The `MutexGuard` from `settings.lock()` is a temporary in argument
+    /// position, so it lives to the END of that statement — i.e. across the
+    /// whole of `SyncManager::new`, which calls `start()`, which does
+    /// `TcpListener::bind` (manager.rs:267), `Discovery::start` (manager.rs:292
+    /// — mDNS daemon creation, multicast join, service registration, browse)
+    /// and two thread spawns. The module header of manager.rs states the lock
+    /// "is never held across a blocking network call"; for the settings mutex,
+    /// on the startup path, that is false.
+    ///
+    /// This test pins the language rule the claim rests on, using the same
+    /// non-reentrant mutex type the app uses.
+    #[test]
+    fn adv_a_guard_temporary_in_an_argument_lives_across_the_whole_call() {
+        let m: Mutex<String> = Mutex::new("payload".into());
+
+        fn callee(_borrowed: &String, m: &Mutex<String>) -> bool {
+            // Stands in for start(): network work while the CALLER's guard is
+            // still alive. A second lock() here would deadlock outright, which
+            // is why this probes with try_lock.
+            let _l = TcpListener::bind("127.0.0.1:0").unwrap();
+            m.try_lock().is_none()
+        }
+
+        assert!(
+            callee(&m.lock().clone(), &m),
+            "the settings guard is released before the callee runs — claim withdrawn"
+        );
+    }
+
+    /// FINDING: the OUTBOUND dial path leaks its `dialing` entry on a panic.
+    ///
+    /// The inbound path releases its slot through `SlotGuard` (manager.rs:52-59)
+    /// precisely so a panicking handler cannot leak one. The outbound path has
+    /// no equivalent — manager.rs:322-327 is:
+    ///
+    ///     if known && fresh && room && i.dialing.insert(id.clone()) {
+    ///         std::thread::spawn(move || {
+    ///             me3.clone().dial(id.clone());          // may panic
+    ///             me3.inner.lock().dialing.remove(&id);  // skipped on unwind
+    ///         });
+    ///     }
+    ///
+    /// `dial()` reaches `keystore::load` (keyring FFI), `Session::initiate` and
+    /// `replicate::exchange`. Any panic below the spawn unwinds past the
+    /// `remove`, so that peer's id stays in `dialing` for the life of the
+    /// process: it is never dialled again (manager.rs:322 requires the insert to
+    /// succeed) AND it permanently occupies one of the MAX_DIALS slots. Four
+    /// such panics and this machine stops dialling anybody, silently.
+    ///
+    /// Reproduced with the identical spawn shape. The real `dial` could not be
+    /// driven directly: `SyncManager` stores a `tauri::AppHandle` (i.e.
+    /// `AppHandle<Wry>`), so `tauri::test`'s `MockRuntime` does not type-check,
+    /// and enabling tauri's `test` feature to build a real Wry handle made the
+    /// test binary fail to load (STATUS_ENTRYPOINT_NOT_FOUND).
+    #[test]
+    fn adv_a_panicking_dial_leaks_its_dialing_slot_forever() {
+        let dialing: Arc<Mutex<std::collections::HashSet<String>>> =
+            Arc::new(Mutex::new(std::collections::HashSet::new()));
+
+        for n in 0..MAX_DIALS {
+            let id = format!("peer-{n}");
+            assert!(dialing.lock().len() < MAX_DIALS, "there was room for this dial");
+            assert!(dialing.lock().insert(id.clone()));
+            let d = dialing.clone();
+            let h = std::thread::spawn(move || {
+                // Stand-in for dial() panicking anywhere below the spawn.
+                if !id.is_empty() {
+                    panic!("keystore / session / exchange panicked");
+                }
+                d.lock().remove(&id);
+            });
+            assert!(h.join().is_err(), "the worker unwound");
+        }
+
+        assert_eq!(
+            dialing.lock().len(),
+            MAX_DIALS,
+            "every dial slot leaked; MAX_DIALS is exhausted and no peer will ever be dialled again"
+        );
+        // And the inbound path, which DOES use RAII, is unaffected by the same
+        // panic — proving the asymmetry is an omission, not a limitation.
+        let inbound = Arc::new(AtomicUsize::new(1));
+        let slot = SlotGuard(inbound.clone());
+        let h = std::thread::spawn(move || {
+            let _slot = slot;
+            panic!("serve panicked");
+        });
+        assert!(h.join().is_err());
+        assert_eq!(inbound.load(Ordering::SeqCst), 0, "the inbound slot came back");
     }
 }

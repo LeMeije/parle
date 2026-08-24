@@ -130,3 +130,64 @@ mod tests {
         assert!(matches!(read_frame(&mut b), Err(TcpError::Truncated)));
     }
 }
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW — demonstration of a live finding. Not a fix.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial {
+    use super::*;
+    use std::io::Write;
+    use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
+
+    /// FINDING: `read_frame` takes a bare `TcpStream` and is therefore
+    /// unreachable by `deadline::Timed`. Both pre-session read paths in
+    /// `manager.rs` call it on the raw socket:
+    ///   * `serve_pairing`   (manager.rs:466)  — the opening SPAKE2 frame
+    ///   * `serve_session`   (manager.rs:525)  — the claimed device id frame
+    /// Only a per-syscall socket timeout guards them, and `read_exact` renews
+    /// that budget on every byte that arrives. A peer that dribbles one byte
+    /// per timeout-minus-epsilon holds the handler thread — and its
+    /// `MAX_INBOUND` slot — for (declared frame length x timeout).
+    ///
+    /// Scaled down 100x here so the test is quick: a 200 ms socket timeout
+    /// stands in for the real HANDSHAKE_TIMEOUT of 20 s.
+    #[test]
+    fn adv_a_dribbling_peer_outlives_the_socket_timeout_on_the_pre_session_path() {
+        const SOCK_TIMEOUT: Duration = Duration::from_millis(200);
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+
+        let attacker = std::thread::spawn(move || {
+            let mut s = TcpStream::connect(addr).unwrap();
+            // Declare a frame the length limit happily accepts.
+            s.write_all(&(MAX_FRAME as u16).to_be_bytes()).unwrap();
+            s.flush().unwrap();
+            // One byte per (timeout - epsilon), forever. Stop after enough to
+            // prove the point rather than actually hanging the suite.
+            for _ in 0..20 {
+                std::thread::sleep(SOCK_TIMEOUT - Duration::from_millis(40));
+                if s.write_all(b"\x00").is_err() {
+                    return;
+                }
+                let _ = s.flush();
+            }
+        });
+
+        let (mut victim, _) = l.accept().unwrap();
+        victim.set_read_timeout(Some(SOCK_TIMEOUT)).unwrap();
+        let t0 = Instant::now();
+        let _ = read_frame(&mut victim);
+        let held = t0.elapsed();
+        attacker.join().unwrap();
+
+        assert!(
+            held > SOCK_TIMEOUT * 10,
+            "read_frame should have been pinned far past the socket timeout; \
+             held for {held:?} against a {SOCK_TIMEOUT:?} timeout"
+        );
+        // Extrapolation: 20 s timeout x 4096 declared bytes = ~22 hours per
+        // connection, and MAX_INBOUND is 8.
+    }
+}

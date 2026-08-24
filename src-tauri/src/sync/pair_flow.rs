@@ -251,3 +251,154 @@ mod tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW — demonstration of a live finding. Not a fix.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial {
+    use super::*;
+    use crate::sync::guard::{GuardError, PairingGuard, LOCKOUT, MAX_FAILURES};
+    use std::time::Instant;
+
+    /// FINDING: `looks_like_pairing_message` checks LENGTH ONLY, so the gate it
+    /// is documented to provide ("costs an attacker real work") costs an
+    /// attacker nothing. Any unpaired machine on the LAN can send
+    /// `spake2_msg_len()` bytes of zeroes and charge a guess.
+    ///
+    /// This replays `manager::serve_pairing` exactly: read the opening frame,
+    /// shape-check it, then `guard.reserve`. Five connections carrying 33 zero
+    /// bytes each burn the code and lock pairing out for five minutes — and the
+    /// attacker simply repeats it against every code the user displays, so the
+    /// user can never pair a device at all while the attacker is on the LAN.
+    #[test]
+    fn adv_junk_of_the_right_length_burns_the_pairing_budget() {
+        let junk = vec![0u8; spake2_msg_len()];
+        assert!(
+            looks_like_pairing_message(&junk),
+            "the shape gate accepts {} bytes of zeroes",
+            junk.len()
+        );
+
+        let mut g = PairingGuard::new();
+        let now = Instant::now();
+        g.begin("123456".into(), now).unwrap();
+
+        let mut charged = 0;
+        let mut locked = false;
+        for _ in 0..MAX_FAILURES {
+            // exactly manager.rs:466-489
+            if !looks_like_pairing_message(&junk) {
+                continue;
+            }
+            match g.reserve(now) {
+                Ok(_) => charged += 1,
+                Err(GuardError::LockedOut { .. }) => {
+                    locked = true;
+                    break;
+                }
+                Err(e) => panic!("unexpected {e:?}"),
+            }
+        }
+        assert_eq!(charged, (MAX_FAILURES - 1) as usize);
+        assert!(locked, "{MAX_FAILURES} junk connections locked pairing out");
+
+        // The code is gone and a fresh one cannot even be displayed.
+        assert!(g.code(now).is_none(), "the live code was burned");
+        assert!(
+            matches!(g.begin("654321".into(), now), Err(GuardError::LockedOut { .. })),
+            "the user cannot start a new pairing for {LOCKOUT:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW — demonstration of a live finding. Not a fix.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_mitm {
+    use super::*;
+    use crate::sync::wire_tcp::{read_frame, write_frame};
+    use std::net::TcpListener;
+
+    const A_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const REAL_B: &str = "22222222-2222-4222-8222-222222222222";
+    const FAKE_B: &str = "deadbeef-dead-4ead-8ead-deadbeefdead";
+
+    fn connected() -> (TcpStream, TcpStream) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let c = TcpStream::connect(addr).unwrap();
+        let (s, _) = l.accept().unwrap();
+        (c, s)
+    }
+
+    /// Pump three frames one way, optionally replacing one of them. SPAKE2 and
+    /// the confirmation tags pass through byte for byte, so both honest ends
+    /// still derive the same key and both `verify_peer` calls succeed.
+    fn relay(mut from: TcpStream, mut to: TcpStream, swap_ix: Option<usize>, replacement: Vec<u8>) {
+        for ix in 0..3 {
+            let Ok(f) = read_frame(&mut from) else { return };
+            let out = if Some(ix) == swap_ix { replacement.clone() } else { f };
+            if write_frame(&mut to, &out).is_err() {
+                return;
+            }
+        }
+    }
+
+    /// FINDING: the identity frame exchanged after `verify_peer` travels in
+    /// CLEARTEXT over the raw TCP socket with no MAC (`run_with`,
+    /// pair_flow.rs:109-121). An on-path attacker relaying the SPAKE2 messages
+    /// and confirmation tags verbatim never learns the key — but it rewrites
+    /// the identity, so the two honest machines finish pairing on a shared key
+    /// filed under a device id and display name of the attacker's choosing.
+    ///
+    /// Fallout: the paired-devices list shows an attacker-chosen name; the
+    /// keychain entry is keyed on an id the real peer will never announce, so
+    /// `serve_session` finds no key for it and sync silently never works; and
+    /// the bogus id lands in `Attribution::known`, where any other paired peer
+    /// is then allowed to author rows for it.
+    #[test]
+    fn adv_an_on_path_attacker_rewrites_the_peer_identity_after_key_agreement() {
+        let (a_end, mitm_left) = connected();
+        let (mitm_right, b_end) = connected();
+
+        let left_r = mitm_left.try_clone().unwrap();
+        let left_w = mitm_left;
+        let right_r = mitm_right.try_clone().unwrap();
+        let right_w = mitm_right;
+
+        // A -> B untouched.
+        let up = std::thread::spawn(move || relay(left_r, right_w, None, Vec::new()));
+        // B -> A with the identity frame (index 2) swapped.
+        let forged = format!("{FAKE_B}\nTotally Ben's MacBook").into_bytes();
+        let down = std::thread::spawn(move || relay(right_r, left_w, Some(2), forged));
+
+        let code = PairingCode::parse("135791").unwrap();
+        let code_b = code.clone();
+        let bt = std::thread::spawn(move || {
+            let mut b = b_end;
+            run(&mut b, PairingRole::Responder, &code_b, (REAL_B, "Real B"))
+        });
+        let mut a = a_end;
+        let a_result = run(&mut a, PairingRole::Initiator, &code, (A_ID, "Deck A"));
+        let b_result = bt.join().unwrap();
+        up.join().unwrap();
+        down.join().unwrap();
+
+        let a_paired = a_result.expect("A believes pairing succeeded");
+        let b_paired = b_result.expect("B believes pairing succeeded");
+
+        assert_eq!(
+            a_paired.key.as_bytes(),
+            b_paired.key.as_bytes(),
+            "the attacker did not touch the key: both ends still agree"
+        );
+        assert_eq!(
+            a_paired.device_id, FAKE_B,
+            "A filed the key under an id the attacker chose, not B's"
+        );
+        assert_eq!(a_paired.device_name, "Totally Ben's MacBook");
+        assert_ne!(a_paired.device_id, REAL_B);
+    }
+}
