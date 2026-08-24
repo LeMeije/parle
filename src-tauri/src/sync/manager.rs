@@ -27,7 +27,7 @@ use super::guard::{GuardError, PairingGuard};
 use super::keystore;
 use super::pair_flow;
 use super::deadline::{Deadline, Timed};
-use super::replicate::{self, Attribution, Kinds, Retention};
+use super::replicate::{self, Attribution, Kinds, Retention, Turn};
 use super::wire_tcp::{read_byte, read_frame, write_byte, write_frame, MODE_PAIR, MODE_SESSION};
 use echokey_core::history::Store;
 
@@ -56,6 +56,16 @@ impl Drop for SlotGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// Widen the socket timeouts once the peer has proved it holds the key.
+///
+/// These bound one syscall, not the exchange — that is the `Deadline`'s job —
+/// so they only need to be short enough that an expired deadline is noticed
+/// promptly, and long enough not to punish a legitimate pause.
+fn relax_socket(s: &std::net::TcpStream) {
+    let _ = s.set_read_timeout(Some(SESSION_TIMEOUT));
+    let _ = s.set_write_timeout(Some(SESSION_TIMEOUT));
 }
 
 pub fn now_ms() -> i64 {
@@ -544,8 +554,15 @@ impl SyncManager {
         match echokey_sync::Session::accept(Timed::new(s, deadline.clone()), &key) {
             Ok(session) => {
                 // Authenticated: a longer budget, still never unbounded.
+                // The socket timeouts move with it. They are the backstop that
+                // bounds the single syscall we are sitting in when the deadline
+                // expires, but left at the handshake value they would also kill
+                // a legitimate peer that went quiet for 20s mid-transfer.
                 deadline.extend(SESSION_TIMEOUT);
-                self.run_session(peer_id, session)
+                relax_socket(session.get_ref().get_ref());
+                // We accepted, so we read first. The dialler and the acceptor
+                // must disagree here or both block writing; see Turn.
+                self.run_session(peer_id, session, Turn::Second)
             }
             Err(e) => tracing::info!("sync: session handshake failed with {peer_id}: {e}"),
         }
@@ -687,11 +704,27 @@ impl SyncManager {
         self.retention_days.store(days as usize, Ordering::SeqCst);
     }
 
+    /// Turning a kind ON has to refill the gap it left behind.
+    ///
+    /// While a kind is off we drop the rows a peer sends AND still advance that
+    /// peer's mark past them — the alternative is the peer re-offering the same
+    /// rows on every exchange for as long as the switch is off. That leaves a
+    /// hole, so switching back on drops every receipt and the next exchange
+    /// re-offers the full history. Applying it again is idempotent and takes a
+    /// second on a LAN; a hole is silent and permanent.
     pub fn set_kinds(&self, dictations: bool, clipboard: bool) {
         let mut i = self.inner.lock();
+        let widened = (dictations && !i.dictations) || (clipboard && !i.clipboard);
         i.dictations = dictations;
         i.clipboard = clipboard;
         drop(i);
+        if widened {
+            if let Err(e) = self.store.lock().reset_source_marks() {
+                tracing::warn!("sync: could not reset receipts after enabling a kind: {e}");
+            } else {
+                tracing::info!("sync: a sync kind was enabled; next exchange refetches in full");
+            }
+        }
         self.publish();
     }
 
@@ -718,6 +751,7 @@ impl SyncManager {
         &self,
         peer_id: String,
         mut session: echokey_sync::Session<S>,
+        turn: Turn,
     ) {
         if !self.inner.lock().enabled {
             tracing::info!("sync: dropping a session for {peer_id}; sync was turned off");
@@ -745,6 +779,7 @@ impl SyncManager {
             kinds,
             retention,
             &attribution,
+            turn,
         ) {
             Ok(stats) => tracing::info!(
                 "sync: {peer_id} sent {} items / {} tombstones, applied {} / {}, ignored {}",
@@ -810,7 +845,9 @@ impl SyncManager {
         match echokey_sync::Session::initiate(Timed::new(s, deadline.clone()), &key) {
             Ok(session) => {
                 deadline.extend(SESSION_TIMEOUT);
-                self.run_session(peer_id, session)
+                relax_socket(session.get_ref().get_ref());
+                // We dialled, so we speak first.
+                self.run_session(peer_id, session, Turn::First)
             }
             Err(e) => tracing::info!("sync: handshake with {peer_id} failed: {e}"),
         }

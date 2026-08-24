@@ -142,6 +142,7 @@ fn pair_then_replicate_in_both_directions() {
                         source_device: DeviceId::parse(DEVICE_B).unwrap(),
                         clock: 4,
                     }],
+                    more: false,
                 })
                 .unwrap();
             session
@@ -220,7 +221,7 @@ fn pair_then_replicate_in_both_directions() {
 
     // B received A's watermark and both of A's rows, tagged with A's device id.
     match b_saw_watermarks {
-        SyncMessage::Watermarks { entries } => {
+        SyncMessage::Watermarks { entries, .. } => {
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].clock, 4);
         }

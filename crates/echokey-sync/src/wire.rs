@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::identity::{validate_device_name, DeviceId};
 
 /// Version of the message format below. Bump on any breaking change.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Hard cap on the text of a single item: 1 MiB.
 ///
@@ -142,7 +142,14 @@ pub enum SyncMessage {
     },
     /// What the sender already holds, per source device. The receiver replies
     /// with everything it has above those clocks.
-    Watermarks { entries: Vec<Watermark> },
+    ///
+    /// `more` works exactly as it does for `Items`: the list is capped at
+    /// `MAX_BATCH_LEN` per message, and a sender with more sources than that
+    /// splits across several. Without the flag the receiver read exactly one
+    /// message and the remaining chunks arrived where rows were expected,
+    /// desynchronising the stream and ending the exchange early — a store that
+    /// had ever seen more than `MAX_BATCH_LEN` sources could never sync again.
+    Watermarks { entries: Vec<Watermark>, more: bool },
     /// A batch of rows. `more` is true when the sender intends to follow this
     /// batch with another, so the receiver knows the stream is not finished.
     Items { items: Vec<SyncItem>, more: bool },
@@ -169,7 +176,7 @@ impl SyncMessage {
                 validate_device_name(device_name)?;
                 Ok(())
             }
-            SyncMessage::Watermarks { entries } => check_len(entries.len()),
+            SyncMessage::Watermarks { entries, .. } => check_len(entries.len()),
             SyncMessage::Items { items, .. } => {
                 check_len(items.len())?;
                 items.iter().try_for_each(SyncItem::validate)
@@ -279,6 +286,7 @@ mod tests {
                     source_device: device(),
                     clock: 42,
                 }],
+                more: false,
             },
             SyncMessage::Items {
                 items: vec![item("hello".into())],

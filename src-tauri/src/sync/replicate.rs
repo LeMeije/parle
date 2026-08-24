@@ -133,6 +133,25 @@ impl Attribution<'_> {
     }
 }
 
+/// Which side writes first.
+///
+/// The exchange used to be fully symmetric: both peers sent their entire
+/// history and only then started reading. That works only while everything
+/// fits in the socket and Noise buffers. A first sync of any real size fills
+/// them, both sides block in `write`, neither ever reaches its `read`, and the
+/// session hangs until the session timeout kills it — every time, so two
+/// machines with a large history could never complete a first sync at all.
+///
+/// Turn-taking removes the possibility rather than enlarging the buffers: at
+/// every point exactly one side is writing and the other is reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Turn {
+    /// Dialled out. Sends its watermarks first, then serves, then drains.
+    First,
+    /// Accepted the connection. Reads first, then drains, then serves.
+    Second,
+}
+
 pub fn exchange<S: Read + Write>(
     session: &mut Session<S>,
     store: &Arc<Mutex<Store>>,
@@ -140,6 +159,7 @@ pub fn exchange<S: Read + Write>(
     kinds: Kinds,
     retention: Retention,
     attribution: &Attribution<'_>,
+    turn: Turn,
 ) -> Result<RoundStats, ReplicateError> {
     let mut stats = RoundStats::default();
 
@@ -159,37 +179,45 @@ pub fn exchange<S: Read + Write>(
         _ => return Err(ReplicateError::NoHello),
     }
 
-    // 2. Watermarks, both ways.
-    let mine = store.lock().watermarks().map_err(|e| ReplicateError::Store(e.to_string()))?;
-    // Chunked: the wire caps a batch at MAX_BATCH_LEN, and a store polluted
-    // before attribution was enforced can hold more sources than that. Sending
-    // one oversized message would fail every exchange with an opaque wire error
-    // instead of degrading.
-    let marks: Vec<Watermark> = mine
-        .iter()
-        .filter_map(|(src, clock)| {
-            DeviceId::parse(src).ok().map(|d| Watermark {
-                source_device: d,
-                clock: (*clock).max(0) as u64,
-            })
-        })
-        .collect();
-    if marks.is_empty() {
-        session.send(&SyncMessage::Watermarks { entries: Vec::new() })?;
-    } else {
-        for chunk in marks.chunks(PAGE) {
-            session.send(&SyncMessage::Watermarks { entries: chunk.to_vec() })?;
+    // 2. Watermarks, in turn order rather than both-at-once.
+    let peer_marks = match turn {
+        Turn::First => {
+            send_watermarks(session, store)?;
+            recv_watermarks(session)?
         }
-    }
-    let peer_marks: HashMap<String, i64> = match session.recv()? {
-        SyncMessage::Watermarks { entries } => entries
-            .into_iter()
-            .map(|w| (w.source_device.as_str().to_string(), w.clock as i64))
-            .collect(),
-        _ => HashMap::new(),
+        Turn::Second => {
+            let peer = recv_watermarks(session)?;
+            send_watermarks(session, store)?;
+            peer
+        }
     };
 
-    // 3. Serve. Every source we hold ANYTHING for — live rows or only
+    // 3 and 4. Serve and drain, again in turn order: the side that spoke
+    //          first also sends its rows first, so its peer is already reading
+    //          them while it works through the store.
+    match turn {
+        Turn::First => {
+            serve(session, store, &peer_marks, kinds, &mut stats)?;
+            drain(session, store, kinds, retention, attribution, &mut stats)?;
+        }
+        Turn::Second => {
+            drain(session, store, kinds, retention, attribution, &mut stats)?;
+            serve(session, store, &peer_marks, kinds, &mut stats)?;
+        }
+    }
+
+    Ok(stats)
+}
+
+/// Everything we hold that the peer has not seen, per source device.
+fn serve<S: Read + Write>(
+    session: &mut Session<S>,
+    store: &Arc<Mutex<Store>>,
+    peer_marks: &HashMap<String, i64>,
+    kinds: Kinds,
+    stats: &mut RoundStats,
+) -> Result<(), ReplicateError> {
+    // Every source we hold ANYTHING for — live rows or only
     //    tombstones. Iterating live rows alone meant that deleting the last
     //    surviving row from a source made its tombstone unreachable, and the
     //    peer kept that row forever while we kept refusing its copy.
@@ -276,8 +304,18 @@ pub fn exchange<S: Read + Write>(
 
     // Tell the peer we are done sending.
     session.send(&SyncMessage::Items { items: Vec::new(), more: false })?;
+    Ok(())
+}
 
-    // 4. Drain whatever the peer sends until it says it is finished.
+/// Whatever the peer sends, until it says it is finished.
+fn drain<S: Read + Write>(
+    session: &mut Session<S>,
+    store: &Arc<Mutex<Store>>,
+    kinds: Kinds,
+    retention: Retention,
+    attribution: &Attribution<'_>,
+    stats: &mut RoundStats,
+) -> Result<(), ReplicateError> {
     for _ in 0..MAX_BATCHES * 4 {
         match session.recv()? {
             SyncMessage::Items { items, more } => {
@@ -291,6 +329,19 @@ pub fn exchange<S: Read + Write>(
                         stats.refused += 1;
                         continue;
                     }
+                    // The receipt is taken here, after attribution and before
+                    // any policy refusal. Attribution matters: a peer forging
+                    // rows for a third device must not be able to advance that
+                    // device's mark and silence it. The policy refusals below
+                    // do not: retention is permanent (a row only gets older),
+                    // and a disabled kind is undone by reset_source_marks when
+                    // the user switches it back on. If the mark stalled on a
+                    // refused row instead, the peer would re-offer the same
+                    // rows on every exchange for as long as the switch was off.
+                    store
+                        .lock()
+                        .note_received(it.source_device.as_str(), it.updated_at)
+                        .map_err(|e| ReplicateError::Store(e.to_string()))?;
                     if !retention.keeps(it.created_at) {
                         // Older than this machine keeps. Refusing is what stops
                         // prune and replication fighting each other forever.
@@ -309,7 +360,7 @@ pub fn exchange<S: Read + Write>(
                         stats.ignored += 1;
                         continue;
                     }
-                    apply_item(store, it, &mut stats)?;
+                    apply_item(store, it, stats)?;
                 }
                 if !more && items.is_empty() {
                     break;
@@ -326,6 +377,10 @@ pub fn exchange<S: Read + Write>(
                         stats.refused += 1;
                         continue;
                     }
+                    store
+                        .lock()
+                        .note_received(t.source_device.as_str(), t.deleted_at)
+                        .map_err(|e| ReplicateError::Store(e.to_string()))?;
                     let rt = RemoteTombstone {
                         source_machine: t.source_device.as_str().to_string(),
                         origin_id: t.origin_id.clone(),
@@ -346,9 +401,70 @@ pub fn exchange<S: Read + Write>(
             _ => break,
         }
     }
-
-    Ok(stats)
+    Ok(())
 }
+
+/// Our marks, chunked, because the wire caps a batch at `MAX_BATCH_LEN` and a
+/// store that has ever seen more sources than that would otherwise send one
+/// oversized message and fail every exchange with an opaque wire error.
+fn send_watermarks<S: Read + Write>(
+    session: &mut Session<S>,
+    store: &Arc<Mutex<Store>>,
+) -> Result<(), ReplicateError> {
+    let mine = store.lock().watermarks().map_err(|e| ReplicateError::Store(e.to_string()))?;
+    let marks: Vec<Watermark> = mine
+        .iter()
+        .filter_map(|(src, clock)| {
+            DeviceId::parse(src).ok().map(|d| Watermark {
+                source_device: d,
+                clock: (*clock).max(0) as u64,
+            })
+        })
+        .collect();
+    if marks.is_empty() {
+        session.send(&SyncMessage::Watermarks { entries: Vec::new(), more: false })?;
+        return Ok(());
+    }
+    let chunks: Vec<_> = marks.chunks(PAGE).map(|c| c.to_vec()).collect();
+    let last = chunks.len() - 1;
+    for (ix, chunk) in chunks.into_iter().enumerate() {
+        session.send(&SyncMessage::Watermarks { entries: chunk, more: ix < last })?;
+    }
+    Ok(())
+}
+
+/// Read every watermark chunk the peer sends.
+///
+/// Reading exactly one message was a real defect once chunking existed: the
+/// remaining chunks surfaced where rows were expected and ended the exchange.
+fn recv_watermarks<S: Read + Write>(
+    session: &mut Session<S>,
+) -> Result<HashMap<String, i64>, ReplicateError> {
+    let mut out = HashMap::new();
+    // Bounded so a peer cannot hold us here forever with more:true.
+    for _ in 0..MAX_BATCHES {
+        match session.recv()? {
+            SyncMessage::Watermarks { entries, more } => {
+                for w in entries {
+                    // A duplicated source across chunks takes the higher mark:
+                    // sending less than the peer already has is the only unsafe
+                    // direction.
+                    let e = out.entry(w.source_device.as_str().to_string()).or_insert(0);
+                    *e = (*e).max(w.clock as i64);
+                }
+                if !more {
+                    break;
+                }
+            }
+            // Anything else means the peer is not speaking the protocol we
+            // agreed on. Proceeding with no marks would re-send our whole
+            // history, so stop instead.
+            _ => return Err(ReplicateError::NoHello),
+        }
+    }
+    Ok(out)
+}
+
 
 /// One page, re-fetched wider if the whole page shares a single millisecond.
 ///
@@ -539,5 +655,236 @@ mod tests {
             );
         }
         assert_eq!(big.chunks(PAGE).map(|c| c.len()).sum::<usize>(), 20_000, "nothing dropped");
+    }
+
+    // ---- Two real peers over a real socket -------------------------------
+    //
+    // Everything above tests a predicate in isolation. These run the whole
+    // exchange twice over a genuine TCP pair, which is the only way the
+    // write/write deadlock and the watermark desync were ever going to show up.
+
+    use echokey_core::history::{RemoteItem, Store};
+    use echokey_sync::{PairedKey, Session};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    const A: &str = "11111111-1111-4111-8111-111111111111";
+    const B: &str = "22222222-2222-4222-8222-222222222222";
+
+    fn socket_pair() -> (TcpStream, TcpStream) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let c = TcpStream::connect(addr).unwrap();
+        let (srv, _) = l.accept().unwrap();
+        // Timeouts on BOTH directions. A read timeout alone does not save this
+        // test: the deadlock parks both peers in `write`, so neither ever
+        // reaches a read and the suite hangs indefinitely. Verified by running
+        // these tests with both sides set to Turn::First — they hang past ten
+        // minutes without the write timeout and fail in seconds with it.
+        for sock in [&c, &srv] {
+            sock.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+            sock.set_write_timeout(Some(Duration::from_secs(20))).unwrap();
+        }
+        (c, srv)
+    }
+
+    fn store_for(me: &str) -> Arc<Mutex<Store>> {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_device_id(me);
+        Arc::new(Mutex::new(s))
+    }
+
+    fn seed(store: &Arc<Mutex<Store>>, source: &str, n: usize, text_len: usize) {
+        let g = store.lock();
+        for i in 0..n {
+            g.apply_remote_item(&RemoteItem {
+                source_machine: source.into(),
+                origin_id: format!("row-{i}"),
+                kind: "transcription".into(),
+                text: "x".repeat(text_len),
+                created_at: 1_700_000_000_000 + i as i64,
+                updated_at: 1_700_000_000_000 + i as i64,
+                pinned: false,
+            })
+            .unwrap();
+        }
+    }
+
+    /// Run one full exchange between two stores, each in its own thread.
+    fn run_pair(
+        a_store: Arc<Mutex<Store>>,
+        b_store: Arc<Mutex<Store>>,
+    ) -> (RoundStats, RoundStats) {
+        let (c, srv) = socket_pair();
+        let key = PairedKey::from_bytes([7u8; 32]);
+        let k2 = key.clone();
+
+        let b = std::thread::spawn(move || {
+            let mut session = Session::accept(srv, &k2).unwrap();
+            let known = vec![A.to_string()];
+            let attr = Attribution { peer_id: A, local_id: B, known: &known };
+            exchange(
+                &mut session,
+                &b_store,
+                (B, "Deck B"),
+                Kinds { dictations: true, clipboard: true },
+                Retention { oldest_allowed: None },
+                &attr,
+                Turn::Second,
+            )
+        });
+
+        let mut session = Session::initiate(c, &key).unwrap();
+        let known = vec![B.to_string()];
+        let attr = Attribution { peer_id: B, local_id: A, known: &known };
+        let a_stats = exchange(
+            &mut session,
+            &a_store,
+            (A, "Deck A"),
+            Kinds { dictations: true, clipboard: true },
+            Retention { oldest_allowed: None },
+            &attr,
+            Turn::First,
+        );
+        let b_stats = b.join().expect("the accepting side must not panic");
+        (
+            a_stats.expect("dialling side"),
+            b_stats.expect("accepting side"),
+        )
+    }
+
+    #[test]
+    fn a_large_first_sync_completes_in_both_directions() {
+        // The deadlock this exists for: both peers used to send their entire
+        // history before either started reading. That is fine while everything
+        // fits in the socket and Noise buffers and hangs forever once it does
+        // not — so this seeds far past any plausible buffer, in BOTH stores at
+        // once, which is the case a one-sided test would miss.
+        //
+        // 400 rows x 4 KB is ~1.6 MB each way, against a socket buffer measured
+        // in tens of KB.
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+        seed(&a_store, A, 400, 4096);
+        seed(&b_store, B, 400, 4096);
+
+        let (a_stats, b_stats) = run_pair(a_store.clone(), b_store.clone());
+
+        assert_eq!(a_stats.sent_items, 400, "A serves its whole history");
+        assert_eq!(b_stats.sent_items, 400, "B serves its whole history");
+        assert_eq!(a_stats.applied_items, 400, "A takes all of B's rows");
+        assert_eq!(b_stats.applied_items, 400, "B takes all of A's rows");
+        assert_eq!(a_stats.refused, 0);
+        assert_eq!(b_stats.refused, 0);
+
+        assert_eq!(a_store.lock().count().unwrap(), 800);
+        assert_eq!(b_store.lock().count().unwrap(), 800);
+    }
+
+    #[test]
+    fn a_second_exchange_moves_nothing() {
+        // Convergence: once both sides agree, syncing again must be silent.
+        // If receipts were wrong this is where an endless re-send would show.
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+        seed(&a_store, A, 20, 64);
+        seed(&b_store, B, 20, 64);
+        run_pair(a_store.clone(), b_store.clone());
+
+        let (a2, b2) = run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(a2.sent_items, 0, "nothing left to send: {a2:?}");
+        assert_eq!(b2.sent_items, 0, "nothing left to send: {b2:?}");
+        assert_eq!(a2.applied_items, 0);
+        assert_eq!(b2.applied_items, 0);
+        assert_eq!(a_store.lock().count().unwrap(), 40);
+        assert_eq!(b_store.lock().count().unwrap(), 40);
+    }
+
+    #[test]
+    fn evicting_a_synced_row_does_not_pull_it_back() {
+        // Retention and replication used to fight: a row pruned locally was
+        // re-pulled from the peer, re-inserted, pruned again, forever. The
+        // receipt is what settles it — we have SEEN the row, so the peer stops
+        // offering it whether or not we still hold it.
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+        seed(&b_store, B, 30, 64);
+        run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(a_store.lock().count().unwrap(), 30);
+
+        // A keeps only 5 rows, exactly as the count-based prune does.
+        a_store.lock().prune(0, 5).unwrap();
+        assert_eq!(a_store.lock().count().unwrap(), 5);
+
+        let (a2, _) = run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(a2.applied_items, 0, "evicted rows must not come back");
+        assert_eq!(a_store.lock().count().unwrap(), 5);
+    }
+
+    #[test]
+    fn a_delete_on_one_side_reaches_the_other_and_stays_deleted() {
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+        seed(&b_store, B, 5, 32);
+        run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(a_store.lock().count().unwrap(), 5);
+
+        b_store.lock().clear(None).unwrap();
+        run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(a_store.lock().count().unwrap(), 0, "the delete propagated");
+
+        // And the row does not crawl back on the next exchange.
+        run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(a_store.lock().count().unwrap(), 0);
+        assert_eq!(b_store.lock().count().unwrap(), 0);
+    }
+
+    #[test]
+    fn many_sources_survive_the_watermark_chunking() {
+        // Chunked watermarks used to be sent as several messages and read as
+        // one, so the leftovers surfaced where rows were expected and ended
+        // the exchange. Anything past MAX_BATCH_LEN sources triggered it.
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+        {
+            let g = a_store.lock();
+            for i in 0..(PAGE + 40) {
+                // Distinct, well-formed device ids so they survive DeviceId::parse.
+                let src = format!("33333333-3333-4333-8333-{:012x}", i);
+                g.note_received(&src, 1_000 + i as i64).unwrap();
+            }
+        }
+        seed(&b_store, B, 3, 32);
+
+        let (a_stats, _) = run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(
+            a_stats.applied_items, 3,
+            "the exchange must still complete with more sources than one batch holds"
+        );
+    }
+
+    #[test]
+    fn a_peer_may_not_author_rows_for_us_or_for_a_stranger() {
+        // Attribution is the only thing standing between a paired peer and
+        // rewriting our own dictations, so prove it end to end rather than
+        // through the predicate alone.
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+        // B fabricates rows attributed to A itself and to an unpaired third id.
+        seed(&b_store, A, 4, 32);
+        seed(&b_store, "44444444-4444-4444-8444-444444444444", 4, 32);
+        seed(&b_store, B, 2, 32);
+
+        let (a_stats, _) = run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(a_stats.refused, 8, "both forgeries refused: {a_stats:?}");
+        assert_eq!(a_stats.applied_items, 2, "only B's own rows land");
+        assert_eq!(a_store.lock().count().unwrap(), 2);
+
+        // And the forged sources never got a receipt, so they are not silenced.
+        let marks = a_store.lock().watermarks().unwrap();
+        assert!(
+            marks.iter().all(|(src, _)| src != "44444444-4444-4444-8444-444444444444"),
+            "a forged source must not gain a watermark: {marks:?}"
+        );
     }
 }

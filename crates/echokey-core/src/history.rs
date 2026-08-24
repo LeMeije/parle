@@ -8,7 +8,13 @@ use crate::types::{HistoryItem, HistoryKind, TranscriptionResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
+/// How far ahead of us a peer's clock may be before we stop believing it.
+/// Generous enough for a real timezone or NTP wobble, small enough that a
+/// nonsense timestamp cannot win every conflict forever.
+const MAX_CLOCK_SKEW_MS: i64 = 24 * 60 * 60 * 1000;
+/// Tombstones are never dropped sooner than this, whatever retention says.
+const TOMBSTONE_MIN_DAYS: u32 = 180;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -219,6 +225,53 @@ impl Store {
                 "#,
             )?;
         }
+
+        if version < 4 {
+            // v4: stop deriving "what we have received from a peer" from the
+            // rows we are currently holding for it.
+            //
+            // The advertised watermark used to be MAX(updated_at) over every
+            // row of a source. Two things poisoned it. A local edit — pinning a
+            // peer's row on a machine whose clock ran fast — wrote that peer's
+            // watermark into the future, so every genuine row it produced
+            // afterwards fell below the mark and was never offered again:
+            // silent, permanent, and not repaired by fixing the clock. And a
+            // single row stamped i64::MAX, by a dead RTC or by a peer that
+            // simply says so, muted that source forever.
+            //
+            // A receipt is not a property of a row, so it does not belong on
+            // one: clear() deletes the rows and retention evicts them, and the
+            // receipt has to outlive both or every exchange re-offers the whole
+            // history. It lives in its own table, is written only when
+            // something actually arrives from that source, and only ever moves
+            // forward.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS source_marks (
+                     source_machine TEXT PRIMARY KEY,
+                     received_clock INTEGER NOT NULL
+                 );",
+            )?;
+            // Seed from what we hold, which is the best estimate available for
+            // a store that predates the table. Slightly conservative is fine —
+            // re-offered rows are idempotent — but a hole would not be.
+            conn.execute(
+                "INSERT INTO source_marks (source_machine, received_clock)
+                 SELECT source_machine, MAX(clock) FROM (
+                     SELECT source_machine, COALESCE(updated_at, created_at) AS clock
+                       FROM items WHERE source_machine IS NOT NULL AND origin_id IS NOT NULL
+                     UNION ALL
+                     SELECT source_machine, deleted_at AS clock FROM tombstones
+                 )
+                 GROUP BY source_machine
+                 ON CONFLICT(source_machine) DO NOTHING",
+                [],
+            )?;
+            version = 4;
+        }
+        // Every step leaves `version` at its own level so the next one can read
+        // it. The last assignment has no reader yet, and will the moment a v5
+        // step is added; dropping it would make that addition a silent bug.
+        let _ = version;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self { conn, device_id: None })
     }
@@ -558,6 +611,23 @@ impl Store {
                 params![max_items],
             )?;
         }
+        // Tombstones are pruned here rather than by a caller, because a caller
+        // that forgets means a table that only ever grows — one row per delete,
+        // for the life of the install.
+        //
+        // Dropping a tombstone is only safe because the receipt for its source
+        // outlives it: a peer is offered nothing at or below the mark we have
+        // already recorded, so a row we deleted long ago is not re-sent even
+        // after its tombstone is gone. A peer that EDITS that row raises its
+        // clock above the mark and legitimately wins, which is the documented
+        // "an edit after a delete survives it" rule, not a resurrection.
+        //
+        // The floor is deliberately far longer than any retention setting a
+        // user is likely to pick: the cost of keeping a tombstone is one small
+        // row, and the cost of dropping one too early is a deleted dictation
+        // coming back.
+        let tombstone_floor_days = retention_days.max(TOMBSTONE_MIN_DAYS) as i64;
+        self.prune_tombstones(now_ms() - tombstone_floor_days * 86_400_000)?;
         Ok(removed)
     }
 
@@ -567,38 +637,84 @@ impl Store {
 
     // -- replication --------------------------------------------------------
 
-    /// Per source machine, the newest `updated_at` we hold locally. The caller
-    /// sends these to a peer as "I have everything from you up to here".
+    /// What to advertise to a peer: the highest clock we will not need again,
+    /// per source device.
     ///
-    /// Deliberately computed over items only, NOT over tombstones. A tombstone
-    /// can be newer than every surviving row from that source; folding it in
-    /// would raise the watermark past items we have never seen and lose them
-    /// permanently. The cost of leaving it out is that deleting the newest row
-    /// from a source lowers that source's watermark, so the peer may re-send a
-    /// handful of rows we already have — those are cheap and idempotent, and a
-    /// row we tombstoned is refused by `apply_remote_item`.
-    ///
-    /// A source with no surviving rows is absent from the result, not zero.
+    /// The two directions are deliberately different. For OUR OWN rows this is
+    /// what we hold, because that is exactly what a peer still needs from us.
+    /// For every other source it is what we have RECEIVED, read from
+    /// `source_marks` — never derived from the rows themselves, so neither a
+    /// local edit with a fast clock nor a hostile timestamp on one row can
+    /// advertise a future we have not actually seen and silence that peer.
     pub fn watermarks(&self) -> Result<Vec<(String, i64)>, StoreError> {
-        // The union of live rows AND tombstones, deliberately.
-        //
-        // Taking it from surviving rows alone had two consequences, both of
-        // which lost data. A source whose last row was deleted disappeared from
-        // the list entirely, so its tombstone was never served and the peer
-        // kept the row forever; and after a clear, the peer saw no watermark at
-        // all and served the whole history straight back.
         let mut stmt = self.conn.prepare(
             "SELECT source_machine, MAX(clock) FROM (
                  SELECT source_machine, COALESCE(updated_at, created_at) AS clock
                    FROM items
                   WHERE source_machine IS NOT NULL AND origin_id IS NOT NULL
+                    AND source_machine IS ?1
                  UNION ALL
-                 SELECT source_machine, deleted_at AS clock FROM tombstones
+                 SELECT source_machine, deleted_at AS clock
+                   FROM tombstones WHERE source_machine IS ?1
+                 UNION ALL
+                 SELECT source_machine, received_clock AS clock
+                   FROM source_marks WHERE source_machine IS NOT ?1
              )
              GROUP BY source_machine ORDER BY source_machine",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let rows = stmt.query_map(params![self.source()], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Record that something at `clock` arrived from `source`. Monotonic: a
+    /// late or out-of-order row can never walk the mark backwards.
+    ///
+    /// Callers use this for rows they saw but deliberately did NOT apply — a
+    /// row older than retention keeps, or of a kind the user switched off.
+    /// Rows that ARE applied record themselves; see `mark_received_in`.
+    pub fn note_received(&self, source: &str, clock: i64) -> Result<(), StoreError> {
+        Self::mark_received_in(&self.conn, self.source(), source, clock)
+    }
+
+    /// The receipt write itself, usable inside an open transaction.
+    ///
+    /// `apply_remote_item` and `apply_remote_tombstone` call this in the same
+    /// transaction that stores the row, so "we hold it" and "we have seen it"
+    /// commit together or not at all. Leaving it to the caller would make the
+    /// invariant something every call site had to remember, and forgetting it
+    /// once means a peer re-sending its whole history on every exchange.
+    fn mark_received_in(
+        conn: &Connection,
+        me: Option<&str>,
+        source: &str,
+        clock: i64,
+    ) -> Result<(), StoreError> {
+        if source.is_empty() || Some(source) == me {
+            return Ok(());
+        }
+        // Same ceiling the rows themselves get. A peer that stamps one row
+        // i64::MAX must not be able to park its own mark there and never be
+        // asked for anything again.
+        let clock = clock.min(now_ms() + MAX_CLOCK_SKEW_MS);
+        conn.execute(
+            "INSERT INTO source_marks (source_machine, received_clock) VALUES (?1, ?2)
+             ON CONFLICT(source_machine)
+             DO UPDATE SET received_clock = MAX(received_clock, excluded.received_clock)",
+            params![source, clock],
+        )?;
+        Ok(())
+    }
+
+    /// Forget every receipt, so the next exchange re-offers everything.
+    ///
+    /// Called when the user turns a sync kind back ON. While a kind is off we
+    /// still advance the mark past the rows we drop — otherwise the peer would
+    /// re-send them on every exchange forever — which would leave a permanent
+    /// hole the moment the switch came back on. Re-applying a whole history is
+    /// idempotent and takes a second on a LAN; a hole is silent and forever.
+    pub fn reset_source_marks(&self) -> Result<(), StoreError> {
+        self.conn.execute("DELETE FROM source_marks", [])?;
+        Ok(())
     }
 
     /// Every source we hold anything for, live or deleted.
@@ -699,8 +815,24 @@ impl Store {
         {
             return Ok(ApplyOutcome::Ignored);
         }
+        // Clamp the peer's clock. Nothing on the wire bounds these, so a peer
+        // with a dead RTC — or one that simply says so — could stamp a row
+        // i64::MAX, win every future conflict under last-writer-wins, and pin
+        // our watermark for that source at the ceiling so its genuine rows were
+        // never requested again. A little forward skew is normal; a century is
+        // not.
+        let ceiling = now_ms() + MAX_CLOCK_SKEW_MS;
+        let item = &RemoteItem {
+            updated_at: item.updated_at.min(ceiling),
+            created_at: item.created_at.min(ceiling),
+            ..item.clone()
+        };
 
         let tx = self.conn.unchecked_transaction()?;
+        // Taken before the tombstone and conflict checks: we have seen this row
+        // whether or not it wins, and a losing row we forget would be offered
+        // again on every single exchange.
+        Self::mark_received_in(&tx, self.source(), &item.source_machine, item.updated_at)?;
         let tombstone: Option<i64> = tx
             .query_row(
                 "SELECT deleted_at FROM tombstones WHERE source_machine=?1 AND origin_id=?2",
@@ -774,7 +906,14 @@ impl Store {
         if t.source_machine.is_empty() || t.origin_id.is_empty() {
             return Ok(ApplyOutcome::Ignored);
         }
+        // Same clamp as items: an unbounded deleted_at would beat every future
+        // edit forever and park the source watermark at the ceiling.
+        let t = &RemoteTombstone {
+            deleted_at: t.deleted_at.min(now_ms() + MAX_CLOCK_SKEW_MS),
+            ..t.clone()
+        };
         let tx = self.conn.unchecked_transaction()?;
+        Self::mark_received_in(&tx, self.source(), &t.source_machine, t.deleted_at)?;
         let prior: Option<i64> = tx
             .query_row(
                 "SELECT deleted_at FROM tombstones WHERE source_machine=?1 AND origin_id=?2",
@@ -1183,7 +1322,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_v3_schema_matches_a_migrated_one() {
+    fn a_fresh_schema_matches_a_migrated_one() {
         let dir = tempfile::tempdir().unwrap();
         let migrated_path = dir.path().join("migrated.db");
         seed_v2_db(&migrated_path);
@@ -1617,5 +1756,210 @@ mod tests {
 
         let store = Store::from_connection_for_test(conn);
         assert!(store.is_ok(), "a half-applied migration must be recoverable: {:?}", store.err());
+    }
+
+    // ---- Receipts: what we advertise is what we have RECEIVED ------------
+
+    fn peer_row(source: &str, origin: &str, text: &str, clock: i64) -> RemoteItem {
+        RemoteItem {
+            source_machine: source.into(),
+            origin_id: origin.into(),
+            kind: "transcription".into(),
+            text: text.into(),
+            created_at: clock,
+            updated_at: clock,
+            pinned: false,
+        }
+    }
+
+    #[test]
+    fn a_local_edit_cannot_raise_a_peers_watermark() {
+        // The bug this exists for: pin a peer's row on a machine whose clock
+        // runs fast, and that peer's watermark jumps into the future. Every
+        // genuine row it produces afterwards falls below the mark and is never
+        // offered again — silently, permanently, and not repaired by fixing
+        // the clock.
+        let s = store_with_device("11111111-1111-4111-8111-111111111111");
+        let peer = "22222222-2222-4222-8222-222222222222";
+        s.apply_remote_item(&peer_row(peer, "a", "from the peer", 1_000)).unwrap();
+
+        let before = s.watermarks().unwrap();
+        assert_eq!(before, vec![(peer.to_string(), 1_000)]);
+
+        // A local edit stamped far in the future, exactly as a fast clock or a
+        // skewed timezone would produce.
+        let id: i64 = s
+            .conn
+            .query_row("SELECT id FROM items WHERE origin_id = 'a'", [], |r| r.get(0))
+            .unwrap();
+        s.conn
+            .execute("UPDATE items SET pinned = 1, updated_at = ?1 WHERE id = ?2",
+                     params![9_000_000_000_000i64, id])
+            .unwrap();
+
+        let after = s.watermarks().unwrap();
+        assert_eq!(
+            after,
+            vec![(peer.to_string(), 1_000)],
+            "our own edit must not tell the peer we already have its future"
+        );
+    }
+
+    #[test]
+    fn a_hostile_timestamp_cannot_mute_a_source_forever() {
+        // A peer that stamps one row i64::MAX would, unclamped, win every
+        // future conflict AND park its own watermark at the ceiling so we never
+        // ask it for anything again.
+        let s = store_with_device("11111111-1111-4111-8111-111111111111");
+        let peer = "22222222-2222-4222-8222-222222222222";
+        s.apply_remote_item(&peer_row(peer, "evil", "far future", i64::MAX)).unwrap();
+
+        let ceiling = now_ms() + MAX_CLOCK_SKEW_MS;
+        let stored: i64 = s
+            .conn
+            .query_row("SELECT updated_at FROM items WHERE origin_id = 'evil'", [], |r| r.get(0))
+            .unwrap();
+        assert!(stored <= ceiling, "stored clock must be clamped, got {stored}");
+
+        let marks = s.watermarks().unwrap();
+        assert_eq!(marks.len(), 1);
+        assert!(marks[0].1 <= ceiling, "watermark must be clamped too");
+
+        // And a genuine later row still wins, which is what "not muted" means.
+        let later = now_ms() + MAX_CLOCK_SKEW_MS + 60_000;
+        s.apply_remote_item(&peer_row(peer, "evil", "the real one", later)).unwrap();
+        let text: String = s
+            .conn
+            .query_row("SELECT text FROM items WHERE origin_id = 'evil'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(text, "the real one");
+    }
+
+    #[test]
+    fn receipts_outlive_the_rows_they_came_from() {
+        // clear() deletes the rows and retention evicts them. If the mark were
+        // derived from the rows, every exchange after a Clear History would
+        // re-offer the peer's entire past.
+        let s = store_with_device("11111111-1111-4111-8111-111111111111");
+        let peer = "22222222-2222-4222-8222-222222222222";
+        s.apply_remote_item(&peer_row(peer, "a", "one", 1_000)).unwrap();
+        s.note_received(peer, 5_000).unwrap();
+        s.clear(None).unwrap();
+
+        let marks = s.watermarks().unwrap();
+        let peer_mark = marks.iter().find(|(src, _)| src == peer).map(|(_, c)| *c);
+        assert_eq!(peer_mark, Some(5_000), "the receipt survives the row");
+    }
+
+    #[test]
+    fn a_receipt_never_walks_backwards() {
+        let s = store_with_device("11111111-1111-4111-8111-111111111111");
+        let peer = "22222222-2222-4222-8222-222222222222";
+        s.note_received(peer, 9_000).unwrap();
+        s.note_received(peer, 10).unwrap();
+        let marks = s.watermarks().unwrap();
+        assert_eq!(marks, vec![(peer.to_string(), 9_000)]);
+    }
+
+    #[test]
+    fn our_own_watermark_is_what_we_hold_not_what_we_received() {
+        // A peer needs everything we have authored, so for our own source the
+        // mark must track the rows themselves.
+        let me = "11111111-1111-4111-8111-111111111111";
+        let s = store_with_device(me);
+        s.insert_transcription(&tr("mine"), None, None).unwrap();
+        let marks = s.watermarks().unwrap();
+        let ours = marks.iter().find(|(src, _)| src == me);
+        assert!(ours.is_some(), "we must advertise our own rows: {marks:?}");
+        assert!(ours.unwrap().1 > 0);
+
+        // And note_received refuses to touch our own source, because nothing
+        // arrives from us.
+        s.note_received(me, i64::MAX).unwrap();
+        let after = s.watermarks().unwrap();
+        assert_eq!(
+            after.iter().find(|(src, _)| src == me).unwrap().1,
+            ours.unwrap().1
+        );
+    }
+
+    #[test]
+    fn resetting_receipts_makes_the_next_exchange_refetch_everything() {
+        let s = store_with_device("11111111-1111-4111-8111-111111111111");
+        let peer = "22222222-2222-4222-8222-222222222222";
+        s.note_received(peer, 8_000).unwrap();
+        assert!(!s.watermarks().unwrap().is_empty());
+        s.reset_source_marks().unwrap();
+        let marks = s.watermarks().unwrap();
+        assert!(
+            marks.iter().all(|(src, _)| src != peer),
+            "no mark means the peer sends its whole history again: {marks:?}"
+        );
+    }
+
+    #[test]
+    fn a_local_clear_cannot_raise_a_peers_watermark_either() {
+        // clear() writes a tombstone over the peer's row stamped with OUR
+        // clock. Deriving the mark from tombstones would reintroduce the same
+        // silencing through a different door.
+        let s = store_with_device("11111111-1111-4111-8111-111111111111");
+        let peer = "22222222-2222-4222-8222-222222222222";
+        s.apply_remote_item(&peer_row(peer, "a", "one", 1_000)).unwrap();
+        s.clear(None).unwrap();
+        s.conn
+            .execute("UPDATE tombstones SET deleted_at = ?1", params![9_000_000_000_000i64])
+            .unwrap();
+        let marks = s.watermarks().unwrap();
+        assert_eq!(marks, vec![(peer.to_string(), 1_000)]);
+    }
+
+    #[test]
+    fn an_upgraded_store_keeps_its_place() {
+        // A v3 store has rows but no receipts. Seeding from what it holds is
+        // the only estimate available; being slightly conservative re-sends
+        // idempotent rows, whereas being optimistic would open a hole.
+        let s = store_with_device("11111111-1111-4111-8111-111111111111");
+        let peer = "22222222-2222-4222-8222-222222222222";
+        s.apply_remote_item(&peer_row(peer, "a", "one", 4_000)).unwrap();
+        s.conn.execute("DELETE FROM source_marks", []).unwrap();
+
+        // Re-run the v4 seed exactly as migration does.
+        s.conn
+            .execute(
+                "INSERT INTO source_marks (source_machine, received_clock)
+                 SELECT source_machine, MAX(clock) FROM (
+                     SELECT source_machine, COALESCE(updated_at, created_at) AS clock
+                       FROM items WHERE source_machine IS NOT NULL AND origin_id IS NOT NULL
+                     UNION ALL
+                     SELECT source_machine, deleted_at AS clock FROM tombstones
+                 )
+                 GROUP BY source_machine
+                 ON CONFLICT(source_machine) DO NOTHING",
+                [],
+            )
+            .unwrap();
+        assert_eq!(s.watermarks().unwrap(), vec![(peer.to_string(), 4_000)]);
+    }
+
+    #[test]
+    fn a_clamped_tombstone_cannot_outrank_every_future_edit() {
+        let s = store_with_device("11111111-1111-4111-8111-111111111111");
+        let peer = "22222222-2222-4222-8222-222222222222";
+        s.apply_remote_tombstone(&RemoteTombstone {
+            source_machine: peer.into(),
+            origin_id: "a".into(),
+            deleted_at: i64::MAX,
+        })
+        .unwrap();
+        let stored: i64 = s
+            .conn
+            .query_row("SELECT deleted_at FROM tombstones WHERE origin_id='a'", [], |r| r.get(0))
+            .unwrap();
+        assert!(stored <= now_ms() + MAX_CLOCK_SKEW_MS);
+
+        // A genuine later edit therefore still survives the delete.
+        let later = now_ms() + MAX_CLOCK_SKEW_MS + 60_000;
+        let out = s.apply_remote_item(&peer_row(peer, "a", "edited after the delete", later)).unwrap();
+        assert_eq!(out, ApplyOutcome::Inserted);
     }
 }
