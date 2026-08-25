@@ -20,7 +20,9 @@
 //! v1 is text-only. There is no binary payload, no image and no attachment;
 //! anything that is not UTF-8 text cannot be expressed here at all.
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::marker::PhantomData;
 
 use crate::identity::{validate_device_name, DeviceId};
 
@@ -127,6 +129,46 @@ pub struct Watermark {
     pub clock: u64,
 }
 
+
+/// Deserialize a batch, refusing to grow past `MAX_BATCH_LEN` as it goes.
+///
+/// `validate()` also checks the length, but only once the whole vector exists.
+/// That is a check after the fact: one well-formed message inside the byte cap
+/// could materialise tens of thousands of entries before anything looked at the
+/// count. Stopping inside the visitor makes the limit a bound on allocation
+/// rather than a verdict on it.
+fn bounded_batch<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Bounded<T>(PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for Bounded<T> {
+        type Value = Vec<T>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "at most {MAX_BATCH_LEN} entries")
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            // No size_hint pre-allocation: the hint is peer-controlled.
+            let mut out: Vec<T> = Vec::new();
+            while let Some(v) = seq.next_element::<T>()? {
+                if out.len() >= MAX_BATCH_LEN {
+                    return Err(de::Error::custom(format!(
+                        "batch exceeds the {MAX_BATCH_LEN} entry limit"
+                    )));
+                }
+                out.push(v);
+            }
+            Ok(out)
+        }
+    }
+
+    d.deserialize_seq(Bounded(PhantomData))
+}
+
 /// Every message that can cross a paired session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -149,12 +191,24 @@ pub enum SyncMessage {
     /// message and the remaining chunks arrived where rows were expected,
     /// desynchronising the stream and ending the exchange early — a store that
     /// had ever seen more than `MAX_BATCH_LEN` sources could never sync again.
-    Watermarks { entries: Vec<Watermark>, more: bool },
+    Watermarks {
+        #[serde(deserialize_with = "bounded_batch")]
+        entries: Vec<Watermark>,
+        more: bool,
+    },
     /// A batch of rows. `more` is true when the sender intends to follow this
     /// batch with another, so the receiver knows the stream is not finished.
-    Items { items: Vec<SyncItem>, more: bool },
+    Items {
+        #[serde(deserialize_with = "bounded_batch")]
+        items: Vec<SyncItem>,
+        more: bool,
+    },
     /// A batch of deletes.
-    Tombstones { entries: Vec<Tombstone>, more: bool },
+    Tombstones {
+        #[serde(deserialize_with = "bounded_batch")]
+        entries: Vec<Tombstone>,
+        more: bool,
+    },
 }
 
 impl SyncMessage {
@@ -412,7 +466,12 @@ mod adversarial_round2 {
     /// handshake. With `MAX_INBOUND` sessions that is a per-round multiple of
     /// what the byte cap suggests.
     #[test]
-    fn adv2_batch_limits_are_enforced_after_the_whole_vector_is_allocated() {
+    fn a_batch_cap_bounds_allocation_rather_than_judging_it_afterwards() {
+        // Regression. `validate()` checked the entry count only once the whole
+        // vector existed, so one well-formed message inside the byte cap could
+        // materialise 60,000 entries — 234x the limit — before anything looked
+        // at the count. The bound now applies inside the deserializer, so the
+        // vector never grows past the limit in the first place.
         const ENTRIES: usize = 60_000;
         let mut json = String::from(r#"{"type":"watermarks","more":false,"entries":["#);
         for i in 0..ENTRIES {
@@ -426,27 +485,28 @@ mod adversarial_round2 {
         json.push_str("]}");
         assert!(
             json.len() < MAX_MESSAGE_BYTES,
-            "the attack fits inside the only limit checked before allocation ({} bytes)",
-            json.len()
+            "the attack has to fit inside the byte cap to be interesting"
         );
 
         match SyncMessage::decode(json.as_bytes()) {
-            Err(WireError::BatchTooLong { len, max }) => {
-                assert_eq!(max, MAX_BATCH_LEN);
-                assert_eq!(
-                    len, ENTRIES,
-                    "the refusal reports {len} entries, which means all {ENTRIES} were \
-                     deserialised and allocated before the limit was looked at"
-                );
-                panic!(
-                    "decode allocated {ENTRIES} entries ({}x the {MAX_BATCH_LEN} limit) from a \
-                     {} byte message before enforcing it; the batch cap is not a pre-allocation \
-                     bound on the decode path",
-                    ENTRIES / MAX_BATCH_LEN,
-                    json.len()
-                );
-            }
-            other => panic!("unexpected: {other:?}"),
+            Err(WireError::BatchTooLong { len, .. }) => panic!(
+                "decode built the whole {len}-entry vector before refusing it; the cap is                  still a verdict rather than a bound"
+            ),
+            Err(_) => {}
+            Ok(_) => panic!("an oversized batch must not decode"),
         }
+
+        // A batch at the limit still decodes, so the bound is not off by one.
+        let mut ok = String::from(r#"{"type":"watermarks","more":false,"entries":["#);
+        for i in 0..MAX_BATCH_LEN {
+            if i > 0 {
+                ok.push(',');
+            }
+            ok.push_str(
+                r#"{"source_device":"3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d","clock":1}"#,
+            );
+        }
+        ok.push_str("]}");
+        assert!(SyncMessage::decode(ok.as_bytes()).is_ok(), "exactly at the limit is fine");
     }
 }

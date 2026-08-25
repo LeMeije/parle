@@ -38,6 +38,24 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 /// anyone on the LAN exhaust the process by opening sockets; a paired peer only
 /// ever needs one.
 const MAX_INBOUND: usize = 8;
+/// How long an unauthenticated connection has to reach the handshake.
+///
+/// Separate from, and much shorter than, `HANDSHAKE_TIMEOUT`. A real peer sends
+/// its mode byte the instant the socket opens; nothing legitimate is still
+/// silent seconds later. The long budget only ever benefited an attacker.
+const PREAUTH_TIMEOUT: Duration = Duration::from_secs(3);
+/// Concurrent pre-authentication connections allowed from one address.
+///
+/// `MAX_INBOUND` alone is a single first-come budget, so eight sockets that
+/// connect and say nothing held every slot for the full handshake timeout and
+/// could be reopened forever — closing the listener to every real peer at a
+/// cost of eight sockets and zero bytes. Worse than an outage, because a dial
+/// only starts on FIRST sight of an mDNS record, so a paired peer refused
+/// entry does not retry.
+///
+/// Two is generous: a peer needs one, and one more covers a reconnect racing a
+/// half-closed socket.
+const MAX_PREAUTH_PER_SOURCE: usize = 2;
 /// Read deadline once a session is authenticated. Longer than a handshake,
 /// because a real exchange can be large, but never unbounded.
 const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -83,6 +101,44 @@ struct DialGuard {
 impl Drop for DialGuard {
     fn drop(&mut self) {
         self.owner.release_dial(&self.id);
+    }
+}
+
+/// Releases one per-address pre-authentication slot on drop.
+///
+/// Paired with the global `SlotGuard`: the global budget bounds total work, and
+/// this bounds how much of it any single address can occupy.
+struct PreauthGuard {
+    map: Arc<Mutex<std::collections::HashMap<std::net::IpAddr, usize>>>,
+    ip: std::net::IpAddr,
+}
+
+impl PreauthGuard {
+    fn claim(
+        map: &Arc<Mutex<std::collections::HashMap<std::net::IpAddr, usize>>>,
+        ip: std::net::IpAddr,
+    ) -> Option<Self> {
+        let mut m = map.lock();
+        let n = m.entry(ip).or_insert(0);
+        if *n >= MAX_PREAUTH_PER_SOURCE {
+            return None;
+        }
+        *n += 1;
+        Some(Self { map: map.clone(), ip })
+    }
+}
+
+impl Drop for PreauthGuard {
+    fn drop(&mut self) {
+        let mut m = self.map.lock();
+        if let Some(n) = m.get_mut(&self.ip) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                // Do not let the map grow without bound from a churn of
+                // addresses that never come back.
+                m.remove(&self.ip);
+            }
+        }
     }
 }
 
@@ -200,6 +256,8 @@ pub struct SyncManager {
     /// taking this, so the two locks cannot invert.
     settings: Arc<Mutex<echokey_core::settings::Settings>>,
     inbound: Arc<AtomicUsize>,
+    /// Pre-authentication connections in flight, per source address.
+    preauth: Arc<Mutex<std::collections::HashMap<std::net::IpAddr, usize>>>,
     /// Mirrored from settings so the replication path never has to reach back
     /// into AppState (which would invert the lock order).
     retention_days: Arc<AtomicUsize>,
@@ -252,6 +310,7 @@ impl SyncManager {
             store,
             settings,
             inbound: Arc::new(AtomicUsize::new(0)),
+            preauth: Arc::new(Mutex::new(std::collections::HashMap::new())),
             retention_days: Arc::new(AtomicUsize::new(retention_days as usize)),
             max_items: Arc::new(AtomicUsize::new(0)),
         });
@@ -455,15 +514,39 @@ impl SyncManager {
                                 drop(s); // closes it; the peer can retry
                                 continue;
                             }
+                            // A per-address share on top of the global budget.
+                            // Without it the global budget is first-come, so
+                            // eight sockets that connect and say nothing hold
+                            // every slot for the whole timeout — and can be
+                            // reopened forever, closing the listener to every
+                            // real peer for eight sockets and zero bytes.
+                            let src = s.peer_addr().map(|a| a.ip()).ok();
+                            let slot = match src {
+                                Some(ip) => match PreauthGuard::claim(&me.preauth, ip) {
+                                    Some(g) => g,
+                                    None => {
+                                        tracing::debug!(
+                                            "sync: refusing connection, {ip} already has {MAX_PREAUTH_PER_SOURCE} in flight"
+                                        );
+                                        drop(s);
+                                        continue;
+                                    }
+                                },
+                                None => {
+                                    drop(s);
+                                    continue;
+                                }
+                            };
                             me.inbound.fetch_add(1, Ordering::SeqCst);
                             let me2 = me.clone();
-                            let slot = SlotGuard(me.inbound.clone());
+                            let _global = SlotGuard(me.inbound.clone());
                             std::thread::spawn(move || {
                                 // RAII: released on every exit including a
                                 // panic. Decrementing after the call would leak
                                 // a slot per unwind, and eight leaks close the
                                 // listener to everyone.
                                 let _slot = slot;
+                                let _global = _global;
                                 me2.serve(s);
                             });
                         }
@@ -547,6 +630,9 @@ impl SyncManager {
             return;
         }
         // Unauthenticated peer: never block on it indefinitely.
+        // PREAUTH_TIMEOUT, not HANDSHAKE_TIMEOUT: reaching the handshake at all
+        // is supposed to be instant, and the deadline is widened once the peer
+        // has proved it holds a key.
         //
         // The socket timeouts bound one syscall. The deadline bounds the whole
         // pre-session conversation, and it is applied HERE, before the very
@@ -555,9 +641,9 @@ impl SyncManager {
         // seconds renewed the socket timeout on every byte and held this thread
         // — and one of the eight inbound slots — for about 22 hours. Eight of
         // them closed the listener to every real peer until the app restarted.
-        let _ = s.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
-        let _ = s.set_write_timeout(Some(HANDSHAKE_TIMEOUT));
-        let deadline = Deadline::after(HANDSHAKE_TIMEOUT);
+        let _ = s.set_read_timeout(Some(PREAUTH_TIMEOUT));
+        let _ = s.set_write_timeout(Some(PREAUTH_TIMEOUT));
+        let deadline = Deadline::after(PREAUTH_TIMEOUT);
         let mut s = Timed::new(s, deadline.clone());
 
         match read_byte(&mut s) {
@@ -593,9 +679,19 @@ impl SyncManager {
         // Now charge it. Checking the budget only after the exchange completes
         // is a TOCTOU race: concurrent connections would each read the same
         // live code and each get a free guess.
+        // The budget is counted per source address as well as per code, so an
+        // attacker grinding from its own address cannot spend the allowance the
+        // user's second device will need.
+        let from = match s.get_ref().peer_addr() {
+            Ok(a) => a.ip(),
+            Err(e) => {
+                tracing::debug!("sync: pairing connection with no peer address ({e})");
+                return;
+            }
+        };
         let code = {
             let mut i = self.inner.lock();
-            match i.guard.reserve(Instant::now()) {
+            match i.guard.reserve(Instant::now(), from) {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::info!("sync: pairing attempt refused: {e}");
@@ -712,6 +808,14 @@ impl SyncManager {
             .map_err(|e| format!("Could not reach that device: {e}"))?;
         let _ = s.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
         let _ = s.set_write_timeout(Some(HANDSHAKE_TIMEOUT));
+        // The same wall-clock deadline the inbound path gets, and for the same
+        // reason. Socket timeouts bound one syscall, so a peer dribbling a byte
+        // just under the limit renews the budget forever — and this path runs
+        // on a spawn_blocking thread that the pairing command never releases,
+        // so each attempt leaks one. mDNS is unsigned, which means the "device"
+        // the user taps in the list is whatever answered.
+        let deadline = Deadline::after(HANDSHAKE_TIMEOUT);
+        let mut s = Timed::new(s, deadline);
         write_byte(&mut s, MODE_PAIR).map_err(|e| e.to_string())?;
 
         let p = pair_flow::run(&mut s, PairingRole::Responder, &code, (&me_id, &me_name))
@@ -1209,71 +1313,82 @@ mod adversarial_round2 {
     ///
     /// This drives the real constants and the real first read of `serve`.
     #[test]
-    fn adv2_eight_silent_sockets_close_the_listener_to_every_real_peer() {
+    fn silent_sockets_from_one_address_cannot_close_the_listener() {
+        // Regression. MAX_INBOUND was a single first-come budget, so eight
+        // sockets that connected and said nothing held every slot for the whole
+        // handshake timeout — reopenable forever, at a cost of eight sockets
+        // and zero bytes. It was worse than an outage: a dial only starts on
+        // FIRST sight of an mDNS record, so a paired peer refused entry does
+        // not retry.
+        //
+        // Two things fix it, and this exercises both: a per-address share of
+        // the budget, and a pre-auth deadline measured in seconds rather than
+        // the full handshake timeout.
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         let inbound = Arc::new(AtomicUsize::new(0));
-        let refused = Arc::new(AtomicUsize::new(0));
+        let preauth: Arc<Mutex<std::collections::HashMap<std::net::IpAddr, usize>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let admitted = Arc::new(AtomicUsize::new(0));
 
-        let (inb, refu) = (inbound.clone(), refused.clone());
-        // Verbatim shape of the accept loop, with the production constants.
+        let (inb, pre, adm) = (inbound.clone(), preauth.clone(), admitted.clone());
+        // The accept loop's shape, with the production constants.
         std::thread::spawn(move || {
-            for conn in l.incoming().take(MAX_INBOUND + 1) {
+            for conn in l.incoming().take(MAX_INBOUND * 2) {
                 let Ok(s) = conn else { break };
                 if inb.load(Ordering::SeqCst) >= MAX_INBOUND {
-                    refu.fetch_add(1, Ordering::SeqCst);
-                    drop(s); // exactly what the listener does: closes it
+                    drop(s);
                     continue;
                 }
+                let Ok(peer) = s.peer_addr() else { continue };
+                let Some(slot) = PreauthGuard::claim(&pre, peer.ip()) else {
+                    drop(s); // the per-address share is spent
+                    continue;
+                };
                 inb.fetch_add(1, Ordering::SeqCst);
-                let slot = SlotGuard(inb.clone());
+                adm.fetch_add(1, Ordering::SeqCst);
+                let global = SlotGuard(inb.clone());
                 std::thread::spawn(move || {
                     let _slot = slot;
-                    // The prologue of serve(), unchanged.
-                    let _ = s.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
-                    let _ = s.set_write_timeout(Some(HANDSHAKE_TIMEOUT));
-                    let deadline = Deadline::after(HANDSHAKE_TIMEOUT);
+                    let _global = global;
+                    let _ = s.set_read_timeout(Some(PREAUTH_TIMEOUT));
+                    let deadline = Deadline::after(PREAUTH_TIMEOUT);
                     let mut s = Timed::new(s, deadline);
                     let _ = read_byte(&mut s);
                 });
             }
         });
 
-        // The attacker: MAX_INBOUND connections, not one byte sent on any.
+        // The attacker: many connections, not one byte sent on any.
         let mut held = Vec::new();
-        for _ in 0..MAX_INBOUND {
-            held.push(TcpStream::connect(addr).unwrap());
+        for _ in 0..MAX_INBOUND * 2 {
+            if let Ok(c) = TcpStream::connect(addr) {
+                held.push(c);
+            }
         }
-        let t0 = Instant::now();
-        while inbound.load(Ordering::SeqCst) < MAX_INBOUND {
-            assert!(t0.elapsed() < Duration::from_secs(5), "listener never filled up");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        // Still held a full second later, having received nothing at all.
-        std::thread::sleep(Duration::from_secs(1));
-        assert_eq!(
-            inbound.load(Ordering::SeqCst),
-            MAX_INBOUND,
-            "every slot is still occupied by a socket that has sent zero bytes"
-        );
 
-        // A real paired peer now dials in.
-        let mut honest = TcpStream::connect(addr).unwrap();
-        honest.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        let mut b = [0u8; 1];
-        let served = match honest.read(&mut b) {
-            Ok(0) => false,                    // closed on us: refused
-            Ok(_) => true,
-            Err(_) => true,                    // still open, waiting on us
-        };
-        drop(held); // release the attacker's sockets so nothing outlives the test
-
+        // Only its per-address share is ever admitted, so slots stay free for
+        // everyone else however many sockets it opens.
+        std::thread::sleep(Duration::from_millis(300));
         assert!(
-            served,
-            "a paired peer was refused ({} refusals) because {MAX_INBOUND} silent sockets from an \
-             unauthenticated machine hold every handler slot for the full {HANDSHAKE_TIMEOUT:?} \
-             budget, and re-opening them sustains it indefinitely",
-            refused.load(Ordering::SeqCst)
+            admitted.load(Ordering::SeqCst) <= MAX_PREAUTH_PER_SOURCE,
+            "one address occupied {} slots",
+            admitted.load(Ordering::SeqCst)
         );
+        assert!(
+            inbound.load(Ordering::SeqCst) < MAX_INBOUND,
+            "the listener still has room for a real peer"
+        );
+
+        // And what it did take is released on the pre-auth deadline, not the
+        // much longer handshake one.
+        let t0 = Instant::now();
+        while inbound.load(Ordering::SeqCst) > 0 {
+            assert!(
+                t0.elapsed() < PREAUTH_TIMEOUT * 3,
+                "silent sockets outlived the pre-auth deadline"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }

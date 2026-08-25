@@ -252,7 +252,8 @@ mod tests {
 #[cfg(test)]
 mod adversarial {
     use super::*;
-    use crate::sync::guard::{GuardError, PairingGuard, MAX_FAILURES};
+    use crate::sync::guard::{PairingGuard, MAX_PER_SOURCE};
+    use std::net::{IpAddr, Ipv4Addr};
     use std::time::Instant;
 
     /// FINDING: `looks_like_pairing_message` checks LENGTH ONLY, so the gate it
@@ -266,44 +267,44 @@ mod adversarial {
     /// attacker simply repeats it against every code the user displays, so the
     /// user can never pair a device at all while the attacker is on the LAN.
     #[test]
-    fn junk_can_burn_one_code_but_cannot_deny_pairing() {
+    fn junk_from_an_attacker_cannot_spend_the_honest_devices_allowance() {
         // Honest about what is and is not fixable. `looks_like_pairing_message`
-        // is a length check, and it cannot be much more: a genuine SPAKE2
-        // opening message is indistinguishable from one generated against a
-        // random code, so an attacker can always produce something that costs a
-        // real guess. Junk of the right shape therefore still burns the code
-        // that is currently on screen.
+        // is a length check and cannot be much more: a genuine SPAKE2 opening
+        // message is indistinguishable from one generated against a random
+        // code, so an attacker can always produce something that costs a real
+        // guess.
         //
-        // What must NOT happen is the user being unable to pair at all. That
-        // was the actual defect: the lockout refused to issue a replacement, so
-        // five 33-byte connections denied pairing for five minutes, repeatable
-        // forever by anyone on the LAN.
+        // What must not happen is the user being unable to pair AT ALL. The
+        // budget is therefore counted per source address as well as per code:
+        // the attacker grinds away its own allowance while the user's second
+        // device, dialling from a different address, finds its own untouched.
         let junk = vec![0u8; spake2_msg_len()];
         assert!(looks_like_pairing_message(&junk), "the shape gate is length-only");
+
+        let evil = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 66));
+        let honest = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 7));
 
         let mut g = PairingGuard::new();
         let now = Instant::now();
         g.begin("123456".into(), now).unwrap();
 
-        let mut locked = false;
-        for _ in 0..MAX_FAILURES {
-            // exactly what serve_pairing does
+        // The attacker spends everything it can, as fast as it can.
+        let mut spent = 0;
+        for _ in 0..50 {
             if !looks_like_pairing_message(&junk) {
                 continue;
             }
-            if let Err(GuardError::LockedOut { .. }) = g.reserve(now) {
-                locked = true;
-                break;
+            if g.reserve(now, evil).is_ok() {
+                spent += 1;
             }
         }
-        assert!(locked, "the code on screen is burnt, as designed");
+        assert!(spent <= MAX_PER_SOURCE as usize, "one source got {spent} guesses");
 
-        // The user shows a new code and is immediately able to pair again.
-        g.begin("654321".into(), now)
-            .expect("a fresh code must be available despite the lockout");
-        assert!(
-            g.reserve(now).is_ok(),
-            "a real device must be able to pair against the new code"
+        // The user's real device now tries, with the right code, immediately.
+        assert_eq!(
+            g.reserve(now, honest).as_deref(),
+            Ok("123456"),
+            "an attacker must not be able to spend the honest device's allowance"
         );
     }
 
@@ -491,15 +492,26 @@ mod adversarial_round2 {
     /// This drives the real `pair_flow::run` over a real socket, set up exactly
     /// as `pair_with` sets it up.
     #[test]
-    fn adv2_pair_with_has_no_wall_clock_deadline_so_a_hostile_peer_pins_the_thread() {
+    fn pair_with_cuts_off_a_dribbling_peer_on_a_wall_clock() {
+        // Regression. `pair_with` used to hand `pair_flow::run` a bare
+        // TcpStream with only per-syscall timeouts, so `read_exact` renewed the
+        // budget on every dribbled byte — at the real 20s HANDSHAKE_TIMEOUT,
+        // one byte every 19 seconds, forever. It runs on a spawn_blocking
+        // thread the pairing command never releases, so each attempt leaked
+        // one, and mDNS is unsigned so the "device" the user taps is whatever
+        // answered.
+        //
+        // This mirrors pair_with's shape exactly, wrapper included.
+        const BUDGET: Duration = Duration::from_millis(600);
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         let peer = hostile_peer(l, DRIBBLE_FOR);
 
-        // Verbatim from pair_with: connect, socket timeouts, mode byte, run().
-        let mut s = TcpStream::connect(addr).unwrap();
+        let s = TcpStream::connect(addr).unwrap();
         s.set_read_timeout(Some(SOCK_TIMEOUT)).unwrap();
         s.set_write_timeout(Some(SOCK_TIMEOUT)).unwrap();
+        let deadline = crate::sync::deadline::Deadline::after(BUDGET);
+        let mut s = crate::sync::deadline::Timed::new(s, deadline);
         s.write_all(&[crate::sync::wire_tcp::MODE_PAIR]).unwrap();
         s.flush().unwrap();
 
@@ -516,10 +528,8 @@ mod adversarial_round2 {
 
         assert!(r.is_err(), "the hostile peer never completes a pairing");
         assert!(
-            held < SOCK_TIMEOUT * 3,
-            "pair_with held its thread for {held:?} against a {SOCK_TIMEOUT:?} socket timeout: \
-             read_exact renews the budget on every dribbled byte and there is no wall clock \
-             (at the real HANDSHAKE_TIMEOUT of 20s this is one byte every 19s, forever)"
+            held < BUDGET * 4,
+            "pair_with held its thread for {held:?} against a {BUDGET:?} deadline"
         );
     }
 
@@ -590,7 +600,8 @@ mod adversarial_round2_pairing_dos {
         if !looks_like_pairing_message(&first) {
             return false;
         }
-        matches!(guard.lock().reserve(Instant::now()), Ok(_))
+        let Ok(from) = s.peer_addr() else { return false };
+        matches!(guard.lock().reserve(Instant::now(), from.ip()), Ok(_))
     }
 
     /// One connection carrying `body` as its opening frame.
@@ -626,10 +637,17 @@ mod adversarial_round2_pairing_dos {
     /// long as the attacker stays on the LAN. Five rounds here; nothing bounds
     /// it in production.
     #[test]
-    fn adv2_an_unpaired_lan_machine_burns_every_fresh_code_before_the_human_can_type_it() {
+    fn an_attacker_grinding_the_lan_cannot_stop_the_user_pairing() {
+        // Regression for the denial of service. Previously five bytes of
+        // well-formed junk burnt the code, and the user could never get a
+        // usable one while the attacker was present: an automated grinder
+        // always beats a human reading six digits off a screen.
+        //
+        // The budget is now counted per source address as well as per code, so
+        // the attacker exhausts its own allowance and the user's second device
+        // still has one.
         const ROUNDS: usize = 5;
-        // The attacker's whole budget per round: MAX_FAILURES connections.
-        let per_round = crate::sync::guard::MAX_FAILURES as usize;
+        let per_round = (crate::sync::guard::MAX_PER_SOURCE as usize) + 2;
         let guard = Arc::new(Mutex::new(PairingGuard::new()));
         let done = Arc::new(AtomicUsize::new(0));
         let charged = Arc::new(AtomicUsize::new(0));
@@ -637,7 +655,6 @@ mod adversarial_round2_pairing_dos {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         let (g, d, c) = (guard.clone(), done.clone(), charged.clone());
-        // Bounded: exactly the connections the test makes, then the thread ends.
         let total = ROUNDS * per_round;
         let server = std::thread::spawn(move || {
             for _ in 0..total {
@@ -652,42 +669,32 @@ mod adversarial_round2_pairing_dos {
         let junk = vec![0u8; spake2_msg_len()];
         let mut honest_got_a_guess = 0;
         for round in 0..ROUNDS {
-            // The user presses "Show code". A fresh random code, and begin()
-            // clears the previous lockout — as designed.
             let code = PairingCode::generate().unwrap();
             guard
                 .lock()
                 .begin(code.as_str().to_string(), Instant::now())
                 .expect("a fresh code is always available");
 
-            // The attacker, already connected to the LAN, spends the budget
-            // before the human has finished reading the first digit.
             for _ in 0..per_round {
                 knock(addr, &junk);
             }
             wait_for(&done, (round + 1) * per_round);
 
-            // Now the user's real second device tries, with the RIGHT code.
-            // This is `serve_pairing`'s charge step for an honest connection.
-            let outcome = guard.lock().reserve(Instant::now());
-            if outcome.is_ok() {
+            // The user's real second device, dialling from its own address.
+            // 127.0.0.2 stands in for "not the attacker" — every knock above
+            // came from 127.0.0.1.
+            let honest = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2));
+            if guard.lock().reserve(Instant::now(), honest).is_ok() {
                 honest_got_a_guess += 1;
-            } else {
-                assert!(
-                    matches!(outcome, Err(GuardError::LockedOut { .. }) | Err(GuardError::NotPairing)),
-                    "round {round}: unexpected {outcome:?}"
-                );
             }
         }
-        server.join().unwrap();
+        let _ = server.join();
 
-        assert!(
-            charged.load(Ordering::SeqCst) > 0,
-            "sanity: the attacker's zero-filled frames really are charged as guesses"
-        );
-        assert!(
-            honest_got_a_guess > 0,
-            "over {ROUNDS} rounds the user's own device never once got to attempt the code it              was shown: an unpaired machine on the LAN denies pairing for as long as it is there"
+        assert_eq!(
+            honest_got_a_guess, ROUNDS,
+            "the honest device must get its guess in every round; the attacker              charged {} of {}",
+            charged.load(Ordering::SeqCst),
+            total
         );
     }
 }

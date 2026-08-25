@@ -6,20 +6,69 @@
 //! crate deliberately has no timer and no cross-run memory — that state has to
 //! live somewhere that outlives a single pairing, which is here.
 //!
-//! The policy: a code is valid for two minutes and only one is live at a time;
-//! five failures locks pairing out for five minutes and burns the code. An
-//! attacker therefore gets 5 guesses per 5 minutes against a keyspace of a
-//! million, and every failure is visible to the user who is watching the code
-//! on screen.
+//! The policy: a code lives two minutes, only one is live at a time, and the
+//! budget is counted BOTH per source address (3 guesses, with 1s/2s/4s backoff
+//! between them) and per code (12 in total).
+//!
+//! Both halves are load-bearing, and neither works alone.
+//!
+//! The per-code total is the crypto bound: it is what keeps a 10^6 keyspace
+//! meaningful against online guessing.
+//!
+//! The per-source limit is what keeps pairing USABLE while someone is
+//! attacking it. Two earlier designs failed here. Burning the code after five
+//! failures meant anyone on the LAN could kill every fresh code with a few
+//! bytes of well-formed junk, faster than a human can read six digits off one
+//! screen and type them into another — pairing simply never worked while they
+//! were present. Global backoff failed the same way for the same reason: an
+//! automated attacker always wins the race to the next open slot. Keyed by
+//! source, the honest device dials from its own address and finds its own
+//! allowance untouched.
+//!
+//! Residual, stated plainly: an attacker with many addresses on the same
+//! segment can still spend a code's 12 guesses and retire it. They cannot stop
+//! the user showing another, and a fresh code is independently random, so
+//! nothing carries over — the cost is a retry, not a lockout.
 
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 /// How long a displayed code stays valid.
 pub const CODE_TTL: Duration = Duration::from_secs(120);
-/// Failures before pairing locks out.
-pub const MAX_FAILURES: u32 = 5;
-/// How long a lockout lasts.
-pub const LOCKOUT: Duration = Duration::from_secs(300);
+/// The most guesses ONE source address may spend against a single code.
+///
+/// The per-source part is what keeps pairing usable while under attack. A
+/// global counter alone could not: an automated attacker always wins the race
+/// against a human reading six digits off a screen, so whatever the budget, it
+/// was spent before the honest device connected. The honest device dials from
+/// its own address and therefore has its own untouched allowance.
+pub const MAX_PER_SOURCE: u32 = 3;
+/// The most guesses a single code will ever absorb, across all sources.
+///
+/// This is the crypto bound: it is what keeps a 10^6 keyspace meaningful. An
+/// attacker with many addresses can exhaust it, which retires that code — the
+/// user can always ask for another, and a fresh code is independently random,
+/// so nothing is learned. What they cannot do is make pairing impossible.
+pub const MAX_PER_CODE: u32 = 12;
+/// Delay imposed after the first wrong guess. Doubles with each failure.
+pub const BACKOFF_BASE: Duration = Duration::from_secs(1);
+/// The longest we ever make the next guess wait.
+pub const BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// How long to wait after `failures` wrong guesses.
+///
+/// Doubling from one second and capped at thirty fits about eight guesses into
+/// a code's two-minute life. Saturating throughout: a long-lived guard must not
+/// be able to overflow the shift or the instant.
+fn backoff_for(failures: u32) -> Duration {
+    if failures == 0 {
+        return Duration::ZERO;
+    }
+    let shift = (failures - 1).min(16);
+    let secs = BACKOFF_BASE.as_secs().saturating_mul(1u64 << shift);
+    Duration::from_secs(secs).min(BACKOFF_MAX)
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum GuardError {
@@ -27,8 +76,10 @@ pub enum GuardError {
     NotPairing,
     /// The code was shown too long ago.
     Expired,
-    /// Too many wrong codes; pairing is closed for a while.
+    /// Wrong codes are arriving too fast; the next guess has to wait.
     LockedOut { retry_in: Duration },
+    /// This code has absorbed all the guesses it ever will. Ask for a new one.
+    CodeExhausted,
 }
 
 impl std::fmt::Display for GuardError {
@@ -41,6 +92,9 @@ impl std::fmt::Display for GuardError {
                 "too many incorrect codes; try again in {} seconds",
                 retry_in.as_secs()
             ),
+            Self::CodeExhausted => {
+                write!(f, "too many incorrect codes for that one; show a new code")
+            }
         }
     }
 }
@@ -48,13 +102,20 @@ impl std::fmt::Display for GuardError {
 struct Active {
     code: String,
     started: Instant,
+    /// Guesses spent against this code, in total and per source address.
+    spent: u32,
+    per_source: HashMap<IpAddr, Source>,
+}
+
+#[derive(Default)]
+struct Source {
+    failures: u32,
+    next_allowed: Option<Instant>,
 }
 
 /// Guards the pairing window. One per app.
 pub struct PairingGuard {
     active: Option<Active>,
-    failures: u32,
-    locked_until: Option<Instant>,
 }
 
 impl Default for PairingGuard {
@@ -65,28 +126,22 @@ impl Default for PairingGuard {
 
 impl PairingGuard {
     pub fn new() -> Self {
-        Self { active: None, failures: 0, locked_until: None }
+        Self { active: None }
     }
 
     /// Begin showing `code`. Replaces any code already on screen, so a user who
     /// cancels and restarts cannot leave an older code quietly still valid.
     ///
-    /// A lockout does NOT block this, and that is deliberate. The budget exists
-    /// to stop online guessing against ONE code, and it does: five wrong
-    /// guesses burn that code and it can never be guessed again. Refusing to
-    /// issue a NEW one on top of that did not add any security — guesses
-    /// against a discarded code tell an attacker nothing about a freshly random
-    /// replacement, so the odds stay at five attempts in 10^6 per code — while
-    /// it did hand anyone on the LAN a permanent denial of service: 33 bytes of
-    /// well-formed junk, five times, and the user could not pair a device at
-    /// all for five minutes, repeatable forever.
-    ///
-    /// Issuing a new code therefore clears the failure count with it. The
-    /// lockout still governs guesses against whatever code is currently live.
+    /// Backoff does NOT block this, and the failure count resets with the new
+    /// code: a fresh code is independently random, so guesses against the old
+    /// one carry no information about it.
     pub fn begin(&mut self, code: String, now: Instant) -> Result<(), GuardError> {
-        self.failures = 0;
-        self.locked_until = None;
-        self.active = Some(Active { code, started: now });
+        self.active = Some(Active {
+            code,
+            started: now,
+            spent: 0,
+            per_source: HashMap::new(),
+        });
         Ok(())
     }
 
@@ -121,25 +176,34 @@ impl PairingGuard {
     /// The cost is that an exchange interrupted by a dropped network still
     /// spends a guess. That is the right trade at five attempts per five
     /// minutes, and `succeed` refunds the whole budget on the happy path.
-    pub fn reserve(&mut self, now: Instant) -> Result<String, GuardError> {
-        self.check_lockout(now)?;
-        let Some(active) = self.active.as_ref() else {
+    pub fn reserve(&mut self, now: Instant, from: IpAddr) -> Result<String, GuardError> {
+        let Some(active) = self.active.as_mut() else {
             return Err(GuardError::NotPairing);
         };
         if now.saturating_duration_since(active.started) >= CODE_TTL {
             self.active = None;
             return Err(GuardError::Expired);
         }
-        let code = active.code.clone();
-        self.failures += 1;
-        if self.failures >= MAX_FAILURES {
-            self.locked_until = Some(now + LOCKOUT);
-            // Burn the code so waiting out the lockout does not hand the
-            // attacker back the same target.
-            self.active = None;
-            return Err(GuardError::LockedOut { retry_in: LOCKOUT });
+        if active.spent >= MAX_PER_CODE {
+            return Err(GuardError::CodeExhausted);
         }
-        Ok(code)
+
+        let src = active.per_source.entry(from).or_default();
+        if let Some(until) = src.next_allowed {
+            if now < until {
+                return Err(GuardError::LockedOut { retry_in: until - now });
+            }
+        }
+        if src.failures >= MAX_PER_SOURCE {
+            return Err(GuardError::CodeExhausted);
+        }
+
+        src.failures += 1;
+        src.next_allowed = now.checked_add(backoff_for(src.failures));
+        active.spent += 1;
+        // The code stays live. Burning it was what let an attacker kill every
+        // fresh code before a human could type one.
+        Ok(active.code.clone())
     }
 
     /// The reserved guess was correct: clear the window and refund the budget.
@@ -149,19 +213,6 @@ impl PairingGuard {
 
     fn reset(&mut self) {
         self.active = None;
-        self.failures = 0;
-        self.locked_until = None;
-    }
-
-    fn check_lockout(&mut self, now: Instant) -> Result<(), GuardError> {
-        if let Some(until) = self.locked_until {
-            if now < until {
-                return Err(GuardError::LockedOut { retry_in: until - now });
-            }
-            self.locked_until = None;
-            self.failures = 0;
-        }
-        Ok(())
     }
 }
 
@@ -170,6 +221,17 @@ impl PairingGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
+
+    /// The attacker's address in these tests.
+    fn evil() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(192, 168, 1, 66))
+    }
+
+    /// The user's own second device.
+    fn honest() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(192, 168, 1, 7))
+    }
 
     fn t0() -> Instant {
         Instant::now()
@@ -186,13 +248,12 @@ mod tests {
 
         let mut granted = 0;
         for _ in 0..1000 {
-            if g.reserve(now).is_ok() {
+            if g.reserve(now, evil()).is_ok() {
                 granted += 1;
             }
         }
         assert_eq!(
-            granted,
-            (MAX_FAILURES - 1) as usize,
+            granted, 1,
             "a thousand simultaneous attempts must not buy a thousand guesses"
         );
     }
@@ -202,24 +263,22 @@ mod tests {
         let mut g = PairingGuard::new();
         let now = t0();
         g.begin("123456".into(), now).unwrap();
-        let code = g.reserve(now).unwrap();
+        let code = g.reserve(now, evil()).unwrap();
         assert_eq!(code, "123456");
         g.succeed();
         // Budget restored and the window closed.
         g.begin("654321".into(), now).unwrap();
-        for _ in 0..MAX_FAILURES - 1 {
-            assert!(g.reserve(now).is_ok());
-        }
+        assert!(g.reserve(now, evil()).is_ok(), "a fresh code starts with no backoff owing");
     }
 
     #[test]
     fn reserve_refuses_when_no_code_is_live_or_it_expired() {
         let mut g = PairingGuard::new();
         let now = t0();
-        assert_eq!(g.reserve(now), Err(GuardError::NotPairing));
+        assert_eq!(g.reserve(now, evil()), Err(GuardError::NotPairing));
         g.begin("123456".into(), now).unwrap();
         let late = now + CODE_TTL + Duration::from_secs(1);
-        assert_eq!(g.reserve(late), Err(GuardError::Expired));
+        assert_eq!(g.reserve(late, evil()), Err(GuardError::Expired));
     }
 
     #[test]
@@ -228,61 +287,89 @@ mod tests {
         let now = t0();
         g.begin("123456".into(), now).unwrap();
         let late = now + CODE_TTL + Duration::from_secs(1);
-        assert_eq!(g.reserve(late), Err(GuardError::Expired));
+        assert_eq!(g.reserve(late, evil()), Err(GuardError::Expired));
         assert!(g.code(late).is_none());
     }
 
     #[test]
-    fn grinding_locks_pairing_out_and_burns_the_code() {
+    fn grinding_slows_down_but_never_kills_the_live_code() {
+        // Backoff, not a lockout, and the code is NOT burnt.
+        //
+        // Burning it after five failures handed anyone on the LAN a permanent
+        // denial of service: a well-formed junk message costs an attacker
+        // nothing, five arrive in milliseconds, and a human needs seconds to
+        // read six digits off one screen and type them into another. Every
+        // fresh code died before it could be used.
         let mut g = PairingGuard::new();
         let now = t0();
         g.begin("123456".into(), now).unwrap();
-        for _ in 0..MAX_FAILURES - 1 {
-            assert!(g.reserve(now).is_ok(), "within budget");
+
+        assert!(g.reserve(now, evil()).is_ok(), "the first guess is free");
+        match g.reserve(now, evil()) {
+            Err(GuardError::LockedOut { retry_in }) => {
+                assert!(retry_in <= BACKOFF_BASE, "first backoff is one step: {retry_in:?}");
+            }
+            other => panic!("expected backoff, got {other:?}"),
         }
-        match g.reserve(now) {
-            Err(GuardError::LockedOut { .. }) => {}
-            other => panic!("expected lockout, got {other:?}"),
-        }
-        // The code is burned, so waiting out the lockout does not hand the
-        // attacker back the same target.
-        let after = now + LOCKOUT + Duration::from_secs(1);
-        assert_eq!(g.reserve(after), Err(GuardError::NotPairing));
+
+        // Waiting it out returns the SAME code: the honest user is delayed,
+        // never locked out of their own pairing.
+        let later = now + BACKOFF_BASE + Duration::from_millis(1);
+        assert_eq!(g.reserve(later, evil()).as_deref(), Ok("123456"));
     }
 
     #[test]
-    fn a_lockout_governs_the_live_code_but_never_blocks_a_fresh_one() {
-        // The lockout used to refuse a NEW code too, which added nothing and
-        // handed anyone on the LAN a permanent denial of service: junk of the
-        // right shape, five times, and the user could not pair at all.
-        //
-        // It is safe to hand out a new one because guesses against a discarded
-        // code say nothing about a freshly random replacement — the odds stay
-        // at MAX_FAILURES attempts in 10^6 per code.
+    fn backoff_bounds_an_attacker_to_single_digits_of_guesses_per_code() {
+        // The security property that replaced the lockout. Grinding as fast as
+        // the backoff allows, for the whole life of one code.
+        let mut g = PairingGuard::new();
+        let start = t0();
+        g.begin("123456".into(), start).unwrap();
+
+        let mut now = start;
+        let mut guesses = 0;
+        // Step in 100ms slices so the attacker takes every opening the instant
+        // it appears.
+        while now.saturating_duration_since(start) < CODE_TTL {
+            if g.reserve(now, evil()).is_ok() {
+                guesses += 1;
+            }
+            now += Duration::from_millis(100);
+        }
+        assert!(
+            (1..=10).contains(&guesses),
+            "an attacker got {guesses} guesses against one code in its lifetime"
+        );
+    }
+
+    #[test]
+    fn backoff_grows_and_is_capped() {
+        assert_eq!(backoff_for(0), Duration::ZERO);
+        assert_eq!(backoff_for(1), BACKOFF_BASE);
+        assert_eq!(backoff_for(2), BACKOFF_BASE * 2);
+        assert_eq!(backoff_for(3), BACKOFF_BASE * 4);
+        assert_eq!(backoff_for(60), BACKOFF_MAX, "capped, not overflowed");
+        assert_eq!(backoff_for(u32::MAX), BACKOFF_MAX, "and cannot shift-overflow");
+    }
+
+
+    #[test]
+    fn backoff_governs_the_live_code_but_never_blocks_a_fresh_one() {
+        // Asking for a new code always works, even mid-backoff. It is safe
+        // because guesses against a discarded code say nothing about a freshly
+        // random replacement.
         let mut g = PairingGuard::new();
         let now = t0();
         g.begin("123456".into(), now).unwrap();
-        for _ in 0..MAX_FAILURES {
-            let _ = g.reserve(now);
-        }
-        // Locked out for the code that was on screen.
-        assert!(matches!(g.reserve(now), Err(GuardError::LockedOut { .. })));
+        let _ = g.reserve(now, evil());
+        assert!(matches!(g.reserve(now, evil()), Err(GuardError::LockedOut { .. })));
 
-        // But the user can still ask for another one, immediately.
+        // The user can still ask for another one, immediately.
         g.begin("654321".into(), now).expect("a fresh code must always be available");
 
-        // And that new code gets its own full budget, not a poisoned one.
-        let mut granted = 0;
-        for _ in 0..MAX_FAILURES + 3 {
-            if g.reserve(now).is_ok() {
-                granted += 1;
-            }
-        }
-        assert_eq!(
-            granted,
-            (MAX_FAILURES - 1) as usize,
-            "the new code is rate-limited exactly like the first"
-        );
+        // And it starts clean rather than inheriting the old backoff.
+        assert_eq!(g.reserve(now, evil()).as_deref(), Ok("654321"));
+        assert!(matches!(g.reserve(now, evil()), Err(GuardError::LockedOut { .. })));
     }
 
 
@@ -291,12 +378,12 @@ mod tests {
         let mut g = PairingGuard::new();
         let mut now = t0();
         // A user who walks away is not an attacker and must not be locked out.
-        for _ in 0..MAX_FAILURES + 2 {
+        for _ in 0..MAX_PER_SOURCE + 2 {
             g.begin("123456".into(), now).unwrap();
             now += CODE_TTL + Duration::from_secs(1);
-            assert_eq!(g.reserve(now), Err(GuardError::Expired));
+            assert_eq!(g.reserve(now, evil()), Err(GuardError::Expired));
         }
         g.begin("123456".into(), now).unwrap();
-        assert!(g.reserve(now).is_ok());
+        assert!(g.reserve(now, evil()).is_ok());
     }
 }
