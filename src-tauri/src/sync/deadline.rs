@@ -17,30 +17,47 @@
 //! peer has proved it holds the key.
 
 use std::io::{self, Read, Write};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(i64::MAX)
+/// Process start, so a deadline can be stored as a plain integer of
+/// milliseconds since then and still be monotonic.
+fn origin() -> Instant {
+    use std::sync::OnceLock;
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    *ORIGIN.get_or_init(Instant::now)
 }
 
-/// Shared deadline, in epoch ms.
+fn now_ms() -> u64 {
+    origin().elapsed().as_millis() as u64
+}
+
+/// Shared deadline, in milliseconds since process start.
+///
+/// Monotonic, deliberately. It used to be an epoch value read from
+/// `SystemTime`, which meant an NTP correction, a VM resume or a user changing
+/// the clock pushed every in-flight deadline out by the size of the step. The
+/// socket timeouts underneath are no backstop — they renew per syscall, which
+/// is the entire reason this type exists — so a backwards step handed a
+/// dribbling peer exactly the slow-loris this file is here to prevent.
 #[derive(Clone)]
-pub struct Deadline(Arc<AtomicI64>);
+pub struct Deadline(Arc<AtomicU64>);
 
 impl Deadline {
     pub fn after(d: Duration) -> Self {
-        Self(Arc::new(AtomicI64::new(now_ms() + d.as_millis() as i64)))
+        Self(Arc::new(AtomicU64::new(
+            now_ms().saturating_add(d.as_millis() as u64),
+        )))
     }
 
     /// Push the deadline out. Used when an unauthenticated handshake completes
     /// and the peer has earned a longer budget.
     pub fn extend(&self, d: Duration) {
-        self.0.store(now_ms() + d.as_millis() as i64, Ordering::SeqCst);
+        self.0.store(
+            now_ms().saturating_add(d.as_millis() as u64),
+            Ordering::SeqCst,
+        );
     }
 
     pub fn expired(&self) -> bool {

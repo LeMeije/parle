@@ -62,6 +62,8 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
 /// Concurrent outbound dials. A flapping (or spoofed) mDNS record would
 /// otherwise spawn a thread per sighting, without bound.
 const MAX_DIALS: usize = 4;
+/// How long before a peer we have already tried is dialled again.
+const DIAL_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// Distinct peers we will track. mDNS is unsigned, so anyone on the LAN can
 /// advertise unlimited records; without a cap both the map and the JSON we push
 /// to the webview grow without bound.
@@ -118,6 +120,9 @@ impl PreauthGuard {
         map: &Arc<Mutex<std::collections::HashMap<std::net::IpAddr, usize>>>,
         ip: std::net::IpAddr,
     ) -> Option<Self> {
+        // Keyed by exact address, deliberately — see `guard::network_of`. On a
+        // home LAN the user's own devices share a prefix with any attacker on
+        // it, so folding to the network would give them one shared share.
         let mut m = map.lock();
         let n = m.entry(ip).or_insert(0);
         if *n >= MAX_PREAUTH_PER_SOURCE {
@@ -234,6 +239,9 @@ struct Inner {
     /// Peers with a dial in flight, so a flapping record cannot spawn a thread
     /// per sighting.
     dialing: std::collections::HashSet<String>,
+    /// When we last tried to dial each peer, so a failed dial is retried rather
+    /// than abandoned until the peer's mDNS record disappears and returns.
+    last_dial: std::collections::HashMap<String, Instant>,
     /// Peers we owe one full re-offer of our history, because the user widened
     /// what this machine shares. See `set_kinds`.
     resend_owed: std::collections::HashMap<String, i64>,
@@ -299,6 +307,7 @@ impl SyncManager {
                 port: 0,
                 listen_stop: None,
                 dialing: std::collections::HashSet::new(),
+                last_dial: std::collections::HashMap::new(),
                 // Restored, so a debt taken on before a quit is still owed.
                 resend_owed: s
                     .resend_owed
@@ -394,6 +403,16 @@ impl SyncManager {
     pub fn start(self: Arc<Self>) -> Result<(), String> {
         {
             let mut i = self.inner.lock();
+            // `enabled` is checked here, not only by the caller. set_enabled
+            // flips the flag under the lock and then calls start()/stop()
+            // outside it, and the commands are spawn_blocking, so two toggles
+            // race: a disable could land between an enable's flag write and its
+            // start(), and start() would then bind a port and advertise on the
+            // LAN with the toggle reading off, for the life of the process.
+            if !i.enabled {
+                tracing::debug!("sync: not starting; it was switched off first");
+                return Ok(());
+            }
             if i.listen_stop.is_some() || i.starting {
                 return Ok(()); // already running, or another thread is bringing it up
             }
@@ -447,16 +466,33 @@ impl SyncManager {
                                     }
                                     let known = i.paired.iter().any(|d| d.id == id);
                                     let fresh = i.peers.insert(id.clone(), p).is_none();
-                                    // Only dial on first sight, so a record
-                                    // refresh does not start a new exchange
-                                    // every few seconds.
-                                    // First sight only, paired only, one dial
-                                    // in flight per peer, and a hard cap. mDNS
-                                    // is unsigned: a spoofed record flapping
-                                    // between goodbye and announce would
-                                    // otherwise spawn threads without bound.
+                                    // Dial on first sight, and again once
+                                    // DIAL_RETRY_AFTER has passed since the
+                                    // last attempt.
+                                    //
+                                    // First sight ALONE was a trap: if the
+                                    // dial failed for any reason — the peer's
+                                    // inbound slots were full, it was briefly
+                                    // down, an unsigned mDNS record from
+                                    // someone else got there first and took the
+                                    // entry — we never tried that device again
+                                    // until its record disappeared and came
+                                    // back. A transient refusal became a
+                                    // permanent one.
+                                    //
+                                    // The retry interval is what keeps a record
+                                    // refresh from starting an exchange every
+                                    // few seconds, and keeps a spoofed record
+                                    // flapping between goodbye and announce
+                                    // from spawning threads without bound.
+                                    let due = i
+                                        .last_dial
+                                        .get(&id)
+                                        .map(|t: &Instant| t.elapsed() >= DIAL_RETRY_AFTER)
+                                        .unwrap_or(true);
                                     let room = i.dialing.len() < MAX_DIALS;
-                                    if known && fresh && room && i.dialing.insert(id.clone()) {
+                                    if known && (fresh || due) && room && i.dialing.insert(id.clone()) {
+                                        i.last_dial.insert(id.clone(), Instant::now());
                                         let me3 = me.clone();
                                         std::thread::spawn(move || {
                                             // RAII, for the same reason the
@@ -559,6 +595,19 @@ impl SyncManager {
                 tracing::info!("sync: listener stopped");
             });
         if let Err(e) = spawned {
+            // Roll the generation back. `listen_stop` was installed before the
+            // spawn, so leaving it set meant every later start() returned
+            // "already running" for a listener that does not exist: sync then
+            // read as on, persisted as on, and was silently dead for the life
+            // of the process, with the mDNS record still advertising a port
+            // nobody was accepting on.
+            let stale = {
+                let mut i = self.inner.lock();
+                i.listen_stop = None;
+                i.port = 0;
+                i.discovery.take()
+            };
+            drop(stale); // Discovery::drop talks to the network; not under the lock.
             let msg = format!("Could not start the sync listener: {e}");
             self.fail(&msg);
             return Err(msg);
@@ -938,6 +987,10 @@ impl SyncManager {
             // and would otherwise run to completion, writing that device's rows
             // into a history the user just told us to stop syncing with it.
             i.unpaired_mid_session.insert(device_id.to_string());
+            // A debt owed to a device that no longer exists can never be
+            // discharged, and persist() would write one into settings.json for
+            // every device the user ever unpaired.
+            i.resend_owed.remove(device_id);
         }
         self.persist();
         self.publish();
@@ -1139,20 +1192,33 @@ impl SyncManager {
                 // leaves rows below the peer's cursor, which nothing else will
                 // ever offer again.
                 if resend_all {
-                    let mut i = self.inner.lock();
-                    if stats.truncated {
-                        // Resume where it stopped. Restarting from zero meant a
-                        // history larger than the cap could never finish: every
-                        // pass re-sent the same batch and stopped in the same
-                        // place.
-                        let from = stats.resend_progress.unwrap_or(0);
-                        i.resend_owed.insert(peer_id.clone(), from);
-                        drop(i);
-                        tracing::info!(
+                    let resumed = {
+                        let mut i = self.inner.lock();
+                        if stats.truncated {
+                            // Resume where it stopped. Restarting from zero
+                            // meant a history larger than the cap could never
+                            // finish: every pass re-sent the same batch and
+                            // stopped in the same place.
+                            let from = stats.resend_progress.unwrap_or(0);
+                            i.resend_owed.insert(peer_id.clone(), from);
+                            Some(from)
+                        } else {
+                            i.resend_owed.remove(&peer_id);
+                            None
+                        }
+                    };
+                    // Persisted on DISCHARGE as well as on capture. It was
+                    // written only when taken, so a completed re-offer left the
+                    // debt in settings.json and every restart re-offered the
+                    // whole history again — and a truncated one lost its resume
+                    // point in memory, so a history larger than one exchange
+                    // could never finish across a restart.
+                    self.persist();
+                    match resumed {
+                        Some(from) => tracing::info!(
                             "sync: re-offer to {peer_id} hit the batch cap; resuming from {from}"
-                        );
-                    } else {
-                        i.resend_owed.remove(&peer_id);
+                        ),
+                        None => tracing::info!("sync: re-offer to {peer_id} complete"),
                     }
                 }
                 tracing::info!(
@@ -1187,10 +1253,34 @@ impl SyncManager {
     fn prune_after_exchange(&self) {
         let days = self.retention_days.load(Ordering::SeqCst) as u32;
         let max = self.max_items.load(Ordering::SeqCst) as u32;
-        match self.store.lock().prune(days, max) {
-            Ok(0) => {}
-            Ok(n) => tracing::debug!("sync: pruned {n} rows after an exchange"),
-            Err(e) => tracing::warn!("sync: prune after exchange failed: {e}"),
+        // Chunked, releasing the store mutex between batches.
+        //
+        // That mutex is shared with the synchronous history commands, which run
+        // on the UI thread, so pruning a large history in one statement froze
+        // the history window for as long as the delete took — hundreds of
+        // milliseconds on a big store, after EVERY exchange, and scaling with a
+        // history size the user controls.
+        let mut total = 0usize;
+        for _ in 0..10_000 {
+            let step = self.store.lock().prune_step(days, max, 500);
+            match step {
+                Ok((n, more)) => {
+                    total += n;
+                    if !more {
+                        break;
+                    }
+                    // Yield, so a UI command waiting on the store gets in
+                    // between batches rather than behind all of them.
+                    std::thread::yield_now();
+                }
+                Err(e) => {
+                    tracing::warn!("sync: prune after exchange failed: {e}");
+                    return;
+                }
+            }
+        }
+        if total > 0 {
+            tracing::debug!("sync: pruned {total} rows after an exchange");
         }
     }
 
@@ -1455,5 +1545,86 @@ mod adversarial_round2 {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW (round 3) — demonstration of a live finding. NOT a fix.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round3_slots {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    /// What the per-address share does and does not buy.
+    ///
+    /// It bounds any ONE address to `MAX_PREAUTH_PER_SOURCE` concurrent
+    /// pre-auth connections. It cannot stop an attacker with several addresses
+    /// filling `MAX_INBOUND`, and no per-address accounting can: on IPv6 a host
+    /// owns its whole /64, and folding to the prefix would put the user's own
+    /// devices in the same bucket as the attacker (see `guard::network_of`).
+    ///
+    /// Inbound saturation is survivable for a different reason, recorded here
+    /// because it is what makes this a nuisance rather than a denial: we DIAL
+    /// paired peers ourselves, on `DIAL_RETRY_AFTER`, and an attacker holding
+    /// our inbound slots cannot touch our outbound dials. Sync still completes.
+    /// That is also why `fresh || due` replaced first-sight-only dialling — a
+    /// peer refused entry once has to be tried again.
+    #[test]
+    fn one_address_cannot_take_more_than_its_share_of_inbound_slots() {
+        let preauth: Arc<Mutex<std::collections::HashMap<IpAddr, usize>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 66));
+
+        let mut held = Vec::new();
+        for _ in 0..MAX_INBOUND * 2 {
+            if let Some(g) = PreauthGuard::claim(&preauth, ip) {
+                held.push(g);
+            }
+        }
+        assert_eq!(
+            held.len(),
+            MAX_PREAUTH_PER_SOURCE,
+            "one address claimed {} pre-auth slots",
+            held.len()
+        );
+
+        // Released on drop, so the share is a rate, not a one-time budget.
+        held.clear();
+        assert!(
+            PreauthGuard::claim(&preauth, ip).is_some(),
+            "the share must come back once the connections close"
+        );
+    }
+
+    /// An IPv6 host can mint addresses, so it can reach `MAX_INBOUND`. The
+    /// property that has to hold is that the accounting is still exact — no
+    /// leaks, no double-counting — and that the map does not grow without
+    /// bound as those addresses churn.
+    #[test]
+    fn many_addresses_reach_the_global_cap_without_leaking_accounting() {
+        let preauth: Arc<Mutex<std::collections::HashMap<IpAddr, usize>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+
+        let mut held = Vec::new();
+        for i in 0..1_000u16 {
+            let ip = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, i));
+            if let Some(g) = PreauthGuard::claim(&preauth, ip) {
+                held.push(g);
+            }
+            if held.len() >= MAX_INBOUND * 4 {
+                break;
+            }
+        }
+        assert!(!held.is_empty());
+
+        // Every claim is released, and the map empties rather than retaining a
+        // zero entry per address the attacker ever used.
+        held.clear();
+        assert!(
+            preauth.lock().is_empty(),
+            "the pre-auth map retained {} entries after every guard dropped",
+            preauth.lock().len()
+        );
     }
 }

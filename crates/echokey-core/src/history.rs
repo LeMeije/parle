@@ -13,6 +13,8 @@ const SCHEMA_VERSION: i64 = 5;
 /// Generous enough for a real timezone or NTP wobble, small enough that a
 /// nonsense timestamp cannot win every conflict forever.
 const MAX_CLOCK_SKEW_MS: i64 = 24 * 60 * 60 * 1000;
+/// Tombstones kept per source device. See `cap_tombstones`.
+pub const MAX_TOMBSTONES_PER_SOURCE: i64 = 10_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -180,8 +182,17 @@ impl Store {
                 );
                 "#,
             )?;
-            // The create above already includes source_machine, so v2 is done.
-            version = 2;
+            // A fresh CREATE already includes source_machine. But this arm is
+            // also reached by a database that HAS tables and a user_version of
+            // 0 — an install from the original build interrupted between its
+            // CREATE and its version stamp — where the batch above is a no-op
+            // and source_machine does not exist. Claiming v2 there skipped the
+            // guarded ALTER below, and v3 then died on "no such column:
+            // source_machine" on every launch, forever, with no repair path.
+            //
+            // Stopping at 1 and letting the guarded v2 step run is correct for
+            // both: it is a no-op when the column is already there.
+            version = 1;
         }
         if version < 2 {
             // v2: cross-machine sync groundwork — every row knows its origin.
@@ -641,22 +652,57 @@ impl Store {
 
     /// Retention: delete unpinned items older than `days` (0 = keep forever)
     /// and enforce `max_items` (oldest unpinned evicted first).
-    pub fn prune(&self, retention_days: u32, max_items: u32) -> Result<usize, StoreError> {
+    /// Delete at most `limit` rows, and report whether more remain.
+    ///
+    /// Exists so a caller can prune a large history WITHOUT holding the store
+    /// mutex for the whole job. That mutex is shared with the synchronous
+    /// history commands, which run on the UI thread, so a single unbounded
+    /// `DELETE` froze the history window for as long as it took — measured at
+    /// several hundred milliseconds on 30,000 rows, and it scales with the
+    /// history, which the user controls.
+    pub fn prune_step(
+        &self,
+        retention_days: u32,
+        max_items: u32,
+        limit: usize,
+    ) -> Result<(usize, bool), StoreError> {
         let mut removed = 0;
         if retention_days > 0 {
             let cutoff = now_ms() - (retention_days as i64) * 86_400_000;
             removed += self.conn.execute(
-                "DELETE FROM items WHERE pinned=0 AND created_at < ?1",
-                params![cutoff],
+                "DELETE FROM items WHERE id IN (
+                     SELECT id FROM items
+                      WHERE pinned=0 AND created_at < ?1
+                      LIMIT ?2
+                 )",
+                params![cutoff, limit as i64],
             )?;
         }
-        if max_items > 0 {
+        if removed < limit && max_items > 0 {
             removed += self.conn.execute(
-                "DELETE FROM items WHERE pinned=0 AND id IN (
-                    SELECT id FROM items WHERE pinned=0 ORDER BY created_at DESC LIMIT -1 OFFSET ?1
-                )",
-                params![max_items],
+                "DELETE FROM items WHERE id IN (
+                     SELECT id FROM items WHERE pinned=0
+                      ORDER BY created_at DESC
+                      LIMIT ?2 OFFSET ?1
+                 )",
+                params![max_items, (limit - removed) as i64],
             )?;
+        }
+        Ok((removed, removed >= limit))
+    }
+
+    /// Prune to completion in one call. Convenient for startup and for tests;
+    /// `prune_step` is what the post-exchange path uses, so that a long prune
+    /// cannot hold the store mutex against the UI.
+    pub fn prune(&self, retention_days: u32, max_items: u32) -> Result<usize, StoreError> {
+        let mut removed = 0;
+        // Bounded: each pass must delete something or we stop.
+        for _ in 0..10_000 {
+            let (n, more) = self.prune_step(retention_days, max_items, 2_000)?;
+            removed += n;
+            if !more {
+                break;
+            }
         }
         // Tombstones are pruned here rather than by a caller, because a caller
         // that forgets means a table that only ever grows.
@@ -755,6 +801,17 @@ impl Store {
             return Ok(());
         }
         let _ = me;
+        // The range check lives HERE, not only in the callers.
+        //
+        // It was a caller's responsibility and a caller forgot: a second,
+        // unguarded call in the drain loop let one row stamped i64::MAX park a
+        // peer's cursor at the ceiling, after which everything that peer
+        // legitimately wrote fell below the mark and was never requested again.
+        // A cursor is only ever meant to record a clock we could really have
+        // received, so nothing outside that range belongs in the table at all.
+        if clock <= 0 || clock > now_ms() + MAX_CLOCK_SKEW_MS {
+            return Ok(());
+        }
         // Deliberately NOT clamped here. Clamping looked like a defence and
         // was the attack: the receipt used to be taken before the future-clock
         // check, so one row dated far ahead parked the cursor at `now + 24h`,
@@ -772,6 +829,70 @@ impl Store {
              DO UPDATE SET received_clock = MAX(received_clock, excluded.received_clock)",
             params![peer, source, clock],
         )?;
+        Ok(())
+    }
+
+    /// The kind of a row we hold under this identity, if we hold one live.
+    ///
+    /// Used to judge a remote change against the kind we ACTUALLY have rather
+    /// than the kind the peer claims: an update may change `kind`, so trusting
+    /// the wire let a peer relabel a clipboard row as a transcription and edit
+    /// or delete it while clipboard sync was switched off.
+    pub fn kind_of(&self, source: &str, origin_id: &str) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT kind FROM items WHERE source_machine=?1 AND origin_id=?2",
+                params![source, origin_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// How many tombstones we hold for one source. For tests and diagnostics.
+    pub fn tombstone_count(&self, source: &str) -> Result<i64, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM tombstones WHERE source_machine = ?1",
+            params![source],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Keep the tombstone table from growing without bound.
+    ///
+    /// Tombstones are never pruned by age — dropping one can resurrect a
+    /// deleted row, which is the one failure this feature must not have. But a
+    /// peer may legitimately create tombstones for its own rows with any
+    /// origin id, so "never pruned" alone hands a paired device unbounded
+    /// control over our disk.
+    ///
+    /// A per-source ceiling bounds it without ever guessing that a delete has
+    /// stopped mattering: past the cap the OLDEST tombstones for that source
+    /// go first, and they are the ones whose rows are least likely to still
+    /// exist anywhere.
+    fn cap_tombstones(tx: &Connection, source: &str) -> Result<(), StoreError> {
+        let n: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM tombstones WHERE source_machine = ?1",
+            params![source],
+            |r| r.get(0),
+        )?;
+        if n <= MAX_TOMBSTONES_PER_SOURCE {
+            return Ok(());
+        }
+        let dropped = tx.execute(
+            "DELETE FROM tombstones
+              WHERE source_machine = ?1
+                AND rowid IN (
+                    SELECT rowid FROM tombstones
+                     WHERE source_machine = ?1
+                     ORDER BY deleted_at ASC
+                     LIMIT ?2
+                )",
+            params![source, n - MAX_TOMBSTONES_PER_SOURCE],
+        )?;
+        tracing::warn!(
+            "sync: {source} is past {MAX_TOMBSTONES_PER_SOURCE} tombstones; dropped the {dropped} oldest"
+        );
         Ok(())
     }
 
@@ -1085,6 +1206,7 @@ impl Store {
             }
             Some(_) => ApplyOutcome::Ignored,
         };
+        Self::cap_tombstones(&tx, &t.source_machine)?;
         // The delete is unconditional: a tombstone is absorbing.
         let removed = tx.execute(
             "DELETE FROM items WHERE source_machine=?1 AND origin_id=?2",
@@ -1335,7 +1457,7 @@ mod tests {
 
     /// The exact v1 schema as shipped, so the migration is exercised against
     /// the real historical shape rather than a convenient approximation.
-    const V1_SCHEMA: &str = r#"
+    pub(crate) const V1_SCHEMA: &str = r#"
         CREATE TABLE items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             kind TEXT NOT NULL CHECK (kind IN ('transcription','clipboard')),
@@ -2541,5 +2663,45 @@ mod tests {
             ApplyOutcome::Ignored,
             "a row the user deleted must not come back"
         );
+    }
+}
+
+// ===========================================================================
+// ROUND 3 ADVERSARIAL REVIEW — an interrupted first launch bricks the store.
+// ===========================================================================
+#[cfg(test)]
+mod adversarial_round3_migrations {
+    use super::tests::V1_SCHEMA;
+    use super::*;
+    use rusqlite::Connection;
+
+    /// An interrupted FIRST launch of a pre-`source_machine` build: the tables
+    /// exist but `user_version` was never stamped, so it is still 0. That is
+    /// precisely the shape `init`'s own comment says the old, non-transactional
+    /// migration left behind.
+    ///
+    /// `init` treats "version < 1" as "fresh database": it runs
+    /// `CREATE TABLE IF NOT EXISTS` (a no-op here) and then sets `version = 2`
+    /// unconditionally, skipping the v2 step that adds `source_machine`. The v3
+    /// step then references that column, the whole transaction rolls back, and
+    /// the database cannot be opened again — on this launch or any later one.
+    #[test]
+    fn r3_a_zero_stamped_pre_v2_database_still_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("v0.db");
+        {
+            let c = Connection::open(&p).unwrap();
+            let v1_only =
+                V1_SCHEMA.replace("ALTER TABLE items ADD COLUMN source_machine TEXT;", "");
+            c.execute_batch(&v1_only).unwrap();
+            c.execute(
+                "INSERT INTO items (kind, text, created_at) VALUES ('clipboard','ancient',10)",
+                [],
+            )
+            .unwrap();
+            // user_version deliberately left at its default 0.
+        }
+        let s = Store::open(&p).expect("a database that only lacks its version stamp must open");
+        assert_eq!(s.count().unwrap(), 1, "the row must survive");
     }
 }

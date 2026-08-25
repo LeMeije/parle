@@ -27,7 +27,7 @@ use std::marker::PhantomData;
 use crate::identity::{validate_device_name, DeviceId};
 
 /// Version of the message format below. Bump on any breaking change.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Hard cap on the text of a single item: 1 MiB.
 ///
@@ -171,7 +171,18 @@ where
 
 /// Every message that can cross a paired session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+// Externally tagged, and that is a memory-safety decision rather than a style
+// one. An internally tagged enum forces serde to buffer the WHOLE message into
+// its own `Content` tree before it can read the tag and pick a variant, so
+// `bounded_batch` never saw an oversized batch until after it had been
+// materialised — a refused 60,000-entry message peaked around 17 MB, and a
+// message whose payload was one ignored unknown field peaked near 16x its own
+// size. Externally tagged, the variant is known before the payload is read and
+// the batch limit really is a bound on allocation.
+//
+// `deny_unknown_fields` closes the other half: an unknown field is refused
+// rather than parsed and dropped.
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum SyncMessage {
     /// First message from each side once the Noise handshake completes.
     ///
@@ -394,10 +405,11 @@ mod tests {
     #[test]
     fn protocol_version_mismatch_is_explicit() {
         let wrong = serde_json::json!({
-            "type": "hello",
-            "protocol_version": PROTOCOL_VERSION + 1,
-            "device_id": device().as_str(),
-            "device_name": "G14",
+            "hello": {
+                "protocol_version": PROTOCOL_VERSION + 1,
+                "device_id": device().as_str(),
+                "device_name": "G14",
+            }
         });
         let bytes = serde_json::to_vec(&wrong).unwrap();
         assert!(matches!(
@@ -408,7 +420,7 @@ mod tests {
 
     #[test]
     fn unknown_message_kind_is_a_hard_error() {
-        let bytes = br#"{"type":"attachment","blob":"AAAA"}"#;
+        let bytes = br#"{"attachment":{"blob":"AAAA"}}"#;
         assert!(matches!(
             SyncMessage::decode(bytes),
             Err(WireError::Malformed(_))
@@ -438,7 +450,7 @@ mod tests {
     #[test]
     fn malformed_device_id_fails_to_decode() {
         let bytes =
-            br#"{"type":"hello","protocol_version":1,"device_id":"nope","device_name":"G14"}"#;
+            br#"{"hello":{"protocol_version":1,"device_id":"nope","device_name":"G14"}}"#;
         assert!(matches!(
             SyncMessage::decode(bytes),
             Err(WireError::Malformed(_))
@@ -473,7 +485,7 @@ mod adversarial_round2 {
         // at the count. The bound now applies inside the deserializer, so the
         // vector never grows past the limit in the first place.
         const ENTRIES: usize = 60_000;
-        let mut json = String::from(r#"{"type":"watermarks","more":false,"entries":["#);
+        let mut json = String::from(r#"{"watermarks":{"more":false,"entries":["#);
         for i in 0..ENTRIES {
             if i > 0 {
                 json.push(',');
@@ -482,7 +494,7 @@ mod adversarial_round2 {
                 r#"{"source_device":"3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d","clock":1}"#,
             );
         }
-        json.push_str("]}");
+        json.push_str("]}}");
         assert!(
             json.len() < MAX_MESSAGE_BYTES,
             "the attack has to fit inside the byte cap to be interesting"
@@ -497,7 +509,7 @@ mod adversarial_round2 {
         }
 
         // A batch at the limit still decodes, so the bound is not off by one.
-        let mut ok = String::from(r#"{"type":"watermarks","more":false,"entries":["#);
+        let mut ok = String::from(r#"{"watermarks":{"more":false,"entries":["#);
         for i in 0..MAX_BATCH_LEN {
             if i > 0 {
                 ok.push(',');
@@ -506,7 +518,7 @@ mod adversarial_round2 {
                 r#"{"source_device":"3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d","clock":1}"#,
             );
         }
-        ok.push_str("]}");
+        ok.push_str("]}}");
         assert!(SyncMessage::decode(ok.as_bytes()).is_ok(), "exactly at the limit is fine");
     }
 }

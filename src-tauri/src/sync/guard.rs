@@ -34,9 +34,37 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+/// Fold an address to its routing prefix: /24 for IPv4, /64 for IPv6.
+///
+/// NOT used for the pairing or pre-auth budgets, and the reason is worth
+/// recording. Folding looks like the obvious hardening — an IPv6 host owns a
+/// whole /64 and can mint addresses at will — but on a home LAN the user's own
+/// second device sits in the SAME prefix as the attacker, so folding hands
+/// them one shared budget and destroys the carve-out that keeps pairing
+/// possible while under attack. Exact addresses are what give the honest
+/// device an allowance of its own.
+pub fn network_of(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            IpAddr::V4(std::net::Ipv4Addr::new(o[0], o[1], o[2], 0))
+        }
+        IpAddr::V6(v6) => {
+            // Normalise a v4-mapped address to its v4 network first, or the
+            // same host counts twice depending on how it connected.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return network_of(IpAddr::V4(v4));
+            }
+            let mut o = v6.octets();
+            o[8..].fill(0);
+            IpAddr::V6(std::net::Ipv6Addr::from(o))
+        }
+    }
+}
+
 /// How long a displayed code stays valid.
 pub const CODE_TTL: Duration = Duration::from_secs(120);
-/// The most guesses ONE source address may spend against a single code.
+/// The most guesses ONE source NETWORK may spend against a single code.
 ///
 /// The per-source part is what keeps pairing usable while under attack. A
 /// global counter alone could not: an automated attacker always wins the race
@@ -51,6 +79,24 @@ pub const MAX_PER_SOURCE: u32 = 3;
 /// user can always ask for another, and a fresh code is independently random,
 /// so nothing is learned. What they cannot do is make pairing impossible.
 pub const MAX_PER_CODE: u32 = 12;
+/// The absolute ceiling on guesses against one code, counting the free first
+/// guess every previously-unseen source is given.
+///
+/// The two limits exist because one cannot do both jobs. `MAX_PER_CODE` is the
+/// budget for sources that have already guessed, and it is what an attacker
+/// grinding from a handful of addresses runs into. But an attacker can mint
+/// addresses, so a single shared total — however large — is always spent before
+/// a human has read six digits off one screen and typed them into another, and
+/// pairing simply never works while they are present.
+///
+/// So a source that has NOT yet guessed against this code always gets one, up
+/// to this hard ceiling. The user's second device is exactly that source, so it
+/// gets in. The cost is that the crypto bound is this number rather than
+/// `MAX_PER_CODE`: 40 guesses against a 10^6 keyspace, on a code that lives two
+/// minutes. An attacker with more than 40 addresses can still retire one code —
+/// they cannot stop the user showing another, and a fresh code is independently
+/// random.
+pub const HARD_MAX_PER_CODE: u32 = 40;
 /// Delay imposed after the first wrong guess. Doubles with each failure.
 pub const BACKOFF_BASE: Duration = Duration::from_secs(1);
 /// The longest we ever make the next guess wait.
@@ -184,7 +230,12 @@ impl PairingGuard {
             self.active = None;
             return Err(GuardError::Expired);
         }
-        if active.spent >= MAX_PER_CODE {
+        let first_from_here = !active.per_source.contains_key(&from);
+        // A source we have never heard from is given one guess even once the
+        // ordinary budget is spent, because that is the only way the user's own
+        // device can still pair while someone is grinding.
+        let ceiling = if first_from_here { HARD_MAX_PER_CODE } else { MAX_PER_CODE };
+        if active.spent >= ceiling {
             return Err(GuardError::CodeExhausted);
         }
 
@@ -386,4 +437,108 @@ mod tests {
         g.begin("123456".into(), now).unwrap();
         assert!(g.reserve(now, evil()).is_ok());
     }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW (round 3) — demonstrations of live findings. NOT fixes.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round3_denial {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn t0() -> Instant {
+        Instant::now()
+    }
+
+    /// FINDING (round 3): the per-source budget is keyed on `IpAddr`, and an
+    /// attacker on the LAN chooses how many of those it has. `MAX_PER_CODE`
+    /// (12) is a hard ceiling shared with the honest device, so
+    /// `MAX_PER_CODE / MAX_PER_SOURCE` = 4 addresses retire ANY code before a
+    /// human can type it — and the attacker simply repeats that for every fresh
+    /// code the user displays.
+    ///
+    /// Four addresses on one NIC is `ip addr add` / `netsh ... add address`.
+    /// On IPv6 it is free: a host owns its whole /64, so the second half of
+    /// this test uses a different address for every single guess and never
+    /// touches the per-source limiter at all.
+    ///
+    /// `guard.rs` calls this residual "the cost is a retry, not a lockout".
+    /// The retry does not help: the attacker is still there for the next code.
+    #[test]
+    fn a_grinder_on_a_few_addresses_cannot_stop_the_user_pairing() {
+        // The realistic shape: one machine on the LAN, grinding from the
+        // handful of addresses it can actually claim. It spends its own
+        // allowance and the user's second device — a source the code has not
+        // heard from — still gets its guess.
+        const ROUNDS: usize = 8;
+        let honest = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 7));
+        let mut got = 0;
+
+        for round in 0..ROUNDS {
+            let mut g = PairingGuard::new();
+            let mut now = t0();
+            g.begin(format!("{:06}", round), now).unwrap();
+
+            // The addresses grind in PARALLEL, which is what a real attacker
+            // does — stepping them in series would run past the code's own
+            // two-minute life and prove nothing.
+            for _ in 0..MAX_PER_SOURCE {
+                for a in 0..4u8 {
+                    let evil = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100 + a));
+                    let _ = g.reserve(now, evil);
+                }
+                now += BACKOFF_MAX;
+            }
+            assert!(
+                now.saturating_duration_since(t0()) < CODE_TTL,
+                "precondition: the grind has to fit inside the code's lifetime"
+            );
+            if g.reserve(now, honest).is_ok() {
+                got += 1;
+            }
+        }
+        assert_eq!(got, ROUNDS, "the honest device was shut out of {} codes", ROUNDS - got);
+    }
+
+
+    /// The IPv6 form, where the per-source key buys nothing at all: a fresh
+    /// source address per guess never trips `MAX_PER_SOURCE`, so the attacker
+    /// spends the code's whole budget with no backoff whatsoever.
+    #[test]
+    fn a_code_never_absorbs_more_than_the_hard_ceiling_and_a_new_one_starts_clean() {
+        // The limit of what per-source accounting can do, stated honestly.
+        //
+        // An attacker that can mint addresses without limit — trivial on IPv6,
+        // where a host is handed a whole /64 — will exhaust any single code,
+        // because a budget that always admits an unseen source is not a budget
+        // at all. Two properties have to hold anyway, and they are what make
+        // that an inconvenience rather than a lockout:
+        //
+        //   1. No code ever absorbs more than HARD_MAX_PER_CODE guesses, so the
+        //      10^6 keyspace still means something.
+        //   2. A fresh code starts with its full capacity. The user presses
+        //      "show code" again and is not handed a pre-spent one.
+        let mut g = PairingGuard::new();
+        let now = t0();
+        g.begin("123456".into(), now).unwrap();
+
+        let mut spent = 0u32;
+        for i in 0..1_000u16 {
+            let evil = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, i));
+            if g.reserve(now, evil).is_ok() {
+                spent += 1;
+            }
+        }
+        assert_eq!(
+            spent, HARD_MAX_PER_CODE,
+            "a code absorbed {spent} guesses; the crypto bound is HARD_MAX_PER_CODE"
+        );
+
+        // And the recovery path works: a new code is not pre-exhausted.
+        g.begin("654321".into(), now).expect("a fresh code is always available");
+        let honest = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 7));
+        assert_eq!(g.reserve(now, honest).as_deref(), Ok("654321"));
+    }
+
 }
