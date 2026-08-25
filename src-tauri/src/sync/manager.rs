@@ -181,7 +181,7 @@ struct Inner {
     dialing: std::collections::HashSet<String>,
     /// Peers we owe one full re-offer of our history, because the user widened
     /// what this machine shares. See `set_kinds`.
-    resend_owed: std::collections::HashSet<String>,
+    resend_owed: std::collections::HashMap<String, i64>,
     /// Set for the whole of start(), which binds a port and brings up mDNS and
     /// is far too slow to leave the "already running" test unguarded.
     starting: bool,
@@ -243,7 +243,7 @@ impl SyncManager {
                 port: 0,
                 listen_stop: None,
                 dialing: std::collections::HashSet::new(),
-                resend_owed: std::collections::HashSet::new(),
+                resend_owed: std::collections::HashMap::new(),
                 starting: false,
                 unpaired_mid_session: std::collections::HashSet::new(),
                 error: None,
@@ -744,7 +744,7 @@ impl SyncManager {
                 // and lock the real one out while attributing the newcomer's
                 // rows to it. Unpair first, deliberately.
                 let msg = format!(
-                    "A device with that identity is already paired. Unpair \"{}\" first if you                      really mean to replace it.",
+                    "A device with that identity is already paired. Unpair \"{}\" first if you really mean to replace it.",
                     i.paired.iter().find(|d| d.id == p.device_id).map(|d| d.name.clone()).unwrap_or_default()
                 );
                 drop(i);
@@ -855,7 +855,8 @@ impl SyncManager {
         i.dictations = dictations;
         i.clipboard = clipboard;
         if widened {
-            let owed: Vec<String> = i.paired.iter().map(|d| d.id.clone()).collect();
+            let owed: Vec<(String, i64)> =
+                i.paired.iter().map(|d| (d.id.clone(), 0)).collect();
             i.resend_owed.extend(owed);
         }
         drop(i);
@@ -943,9 +944,14 @@ impl SyncManager {
         let retention = Retention { oldest_allowed: self.retention_floor() };
         // Cleared only after the exchange actually succeeds, so a session that
         // dies halfway does not consume the debt and leave the hole open.
-        let resend_all = self.inner.lock().resend_owed.contains(&peer_id);
+        // `Some(clock)` means we owe this peer a re-offer, resuming from that
+        // clock. A truncated re-offer keeps the debt and records how far it got.
+        let resend_from = self.inner.lock().resend_owed.get(&peer_id).copied();
+        let resend_all = resend_from.is_some();
         // Only the handshake-proven peer may author rows, and only for itself.
-        let attribution = Attribution { peer_id: &peer_id, local_id: &me_id };
+        let known: Vec<String> = self.inner.lock().paired.iter().map(|d| d.id.clone()).collect();
+        let attribution =
+            Attribution { peer_id: &peer_id, local_id: &me_id, known: &known };
         // The store lock is taken inside the exchange, per statement, never
         // held across a socket read.
         match replicate::exchange(
@@ -957,10 +963,28 @@ impl SyncManager {
             &attribution,
             turn,
             resend_all,
+            resend_from.unwrap_or(0),
         ) {
             Ok(stats) => {
+                // Only once the re-offer actually finished. A truncated one
+                // leaves rows below the peer's cursor, which nothing else will
+                // ever offer again.
                 if resend_all {
-                    self.inner.lock().resend_owed.remove(&peer_id);
+                    let mut i = self.inner.lock();
+                    if stats.truncated {
+                        // Resume where it stopped. Restarting from zero meant a
+                        // history larger than the cap could never finish: every
+                        // pass re-sent the same batch and stopped in the same
+                        // place.
+                        let from = stats.resend_progress.unwrap_or(0);
+                        i.resend_owed.insert(peer_id.clone(), from);
+                        drop(i);
+                        tracing::info!(
+                            "sync: re-offer to {peer_id} hit the batch cap; resuming from {from}"
+                        );
+                    } else {
+                        i.resend_owed.remove(&peer_id);
+                    }
                 }
                 tracing::info!(
                     "sync: {peer_id} sent {} items / {} tombstones, applied {} / {}, ignored {}",
@@ -1152,5 +1176,104 @@ mod adversarial {
         });
         assert!(h.join().is_err());
         assert_eq!(inbound.load(Ordering::SeqCst), 0, "the inbound slot came back");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW (round 2) — demonstration of a live finding. Not a fix.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round2 {
+    use super::*;
+    use crate::sync::wire_tcp::read_byte;
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    /// FINDING: `MAX_INBOUND` is a global, per-process, first-come budget with
+    /// no per-peer share and no cost to claim, so any unauthenticated machine
+    /// on the LAN closes the listener to every real peer.
+    ///
+    /// `start`'s accept loop (manager.rs:447-470) refuses a connection outright
+    /// once `MAX_INBOUND` (8) handlers are in flight, and `serve`
+    /// (manager.rs:557-575) then blocks in `read_byte` for the whole
+    /// `HANDSHAKE_TIMEOUT` (20s) budget on a peer that says NOTHING. Eight open
+    /// sockets and zero bytes therefore hold every slot for 20 seconds, and
+    /// re-opening them sustains it for as long as the attacker likes — the
+    /// deadline bounds one connection, not the attacker.
+    ///
+    /// It is worse than a 20-second outage because a dial is only ever started
+    /// on FIRST SIGHT of an mDNS record (manager.rs:397 requires `fresh`): a
+    /// paired peer whose inbound connection is refused does not retry, and we
+    /// will not dial it again until its record disappears and comes back.
+    ///
+    /// This drives the real constants and the real first read of `serve`.
+    #[test]
+    fn adv2_eight_silent_sockets_close_the_listener_to_every_real_peer() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let inbound = Arc::new(AtomicUsize::new(0));
+        let refused = Arc::new(AtomicUsize::new(0));
+
+        let (inb, refu) = (inbound.clone(), refused.clone());
+        // Verbatim shape of the accept loop, with the production constants.
+        std::thread::spawn(move || {
+            for conn in l.incoming().take(MAX_INBOUND + 1) {
+                let Ok(s) = conn else { break };
+                if inb.load(Ordering::SeqCst) >= MAX_INBOUND {
+                    refu.fetch_add(1, Ordering::SeqCst);
+                    drop(s); // exactly what the listener does: closes it
+                    continue;
+                }
+                inb.fetch_add(1, Ordering::SeqCst);
+                let slot = SlotGuard(inb.clone());
+                std::thread::spawn(move || {
+                    let _slot = slot;
+                    // The prologue of serve(), unchanged.
+                    let _ = s.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
+                    let _ = s.set_write_timeout(Some(HANDSHAKE_TIMEOUT));
+                    let deadline = Deadline::after(HANDSHAKE_TIMEOUT);
+                    let mut s = Timed::new(s, deadline);
+                    let _ = read_byte(&mut s);
+                });
+            }
+        });
+
+        // The attacker: MAX_INBOUND connections, not one byte sent on any.
+        let mut held = Vec::new();
+        for _ in 0..MAX_INBOUND {
+            held.push(TcpStream::connect(addr).unwrap());
+        }
+        let t0 = Instant::now();
+        while inbound.load(Ordering::SeqCst) < MAX_INBOUND {
+            assert!(t0.elapsed() < Duration::from_secs(5), "listener never filled up");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Still held a full second later, having received nothing at all.
+        std::thread::sleep(Duration::from_secs(1));
+        assert_eq!(
+            inbound.load(Ordering::SeqCst),
+            MAX_INBOUND,
+            "every slot is still occupied by a socket that has sent zero bytes"
+        );
+
+        // A real paired peer now dials in.
+        let mut honest = TcpStream::connect(addr).unwrap();
+        honest.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut b = [0u8; 1];
+        let served = match honest.read(&mut b) {
+            Ok(0) => false,                    // closed on us: refused
+            Ok(_) => true,
+            Err(_) => true,                    // still open, waiting on us
+        };
+        drop(held); // release the attacker's sockets so nothing outlives the test
+
+        assert!(
+            served,
+            "a paired peer was refused ({} refusals) because {MAX_INBOUND} silent sockets from an \
+             unauthenticated machine hold every handler slot for the full {HANDSHAKE_TIMEOUT:?} \
+             budget, and re-opening them sustains it indefinitely",
+            refused.load(Ordering::SeqCst)
+        );
     }
 }

@@ -391,3 +391,62 @@ mod tests {
         ));
     }
 }
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW (round 2) — demonstration of a live finding. Not a fix.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round2 {
+    use super::*;
+
+    /// FINDING: on DECODE, only `MAX_MESSAGE_BYTES` is enforced before
+    /// allocation. `MAX_BATCH_LEN` is enforced by `validate()`, which runs
+    /// AFTER `serde_json::from_slice` has materialised the whole `Vec`
+    /// (wire.rs:214-220), so a peer picks the allocation it makes us do.
+    ///
+    /// The error itself proves it: `BatchTooLong { len }` can only report the
+    /// length of a vector that was built. Here one 3.5 MiB message — well
+    /// inside the byte cap the session layer checks — makes us allocate ~60,000
+    /// heap `String`s (roughly 6 MB of live objects) before the 256-entry limit
+    /// is consulted, on a connection that has proved nothing beyond the Noise
+    /// handshake. With `MAX_INBOUND` sessions that is a per-round multiple of
+    /// what the byte cap suggests.
+    #[test]
+    fn adv2_batch_limits_are_enforced_after_the_whole_vector_is_allocated() {
+        const ENTRIES: usize = 60_000;
+        let mut json = String::from(r#"{"type":"watermarks","more":false,"entries":["#);
+        for i in 0..ENTRIES {
+            if i > 0 {
+                json.push(',');
+            }
+            json.push_str(
+                r#"{"source_device":"3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d","clock":1}"#,
+            );
+        }
+        json.push_str("]}");
+        assert!(
+            json.len() < MAX_MESSAGE_BYTES,
+            "the attack fits inside the only limit checked before allocation ({} bytes)",
+            json.len()
+        );
+
+        match SyncMessage::decode(json.as_bytes()) {
+            Err(WireError::BatchTooLong { len, max }) => {
+                assert_eq!(max, MAX_BATCH_LEN);
+                assert_eq!(
+                    len, ENTRIES,
+                    "the refusal reports {len} entries, which means all {ENTRIES} were \
+                     deserialised and allocated before the limit was looked at"
+                );
+                panic!(
+                    "decode allocated {ENTRIES} entries ({}x the {MAX_BATCH_LEN} limit) from a \
+                     {} byte message before enforcing it; the batch cap is not a pre-allocation \
+                     bound on the decode path",
+                    ENTRIES / MAX_BATCH_LEN,
+                    json.len()
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+}

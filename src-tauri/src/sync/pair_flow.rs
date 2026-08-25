@@ -429,3 +429,265 @@ mod adversarial_mitm {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW (round 2) — demonstration of a live finding. Not a fix.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round2 {
+    use super::*;
+    use crate::sync::deadline::{Deadline, Timed};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
+
+    /// The socket timeout both paths use, scaled down 100x from the real
+    /// HANDSHAKE_TIMEOUT (20s) so the test is quick. The RATIO is what the
+    /// finding is about, not the absolute numbers.
+    const SOCK_TIMEOUT: Duration = Duration::from_millis(200);
+    /// How long the hostile peer dribbles for. 15x the socket timeout.
+    const DRIBBLE_FOR: Duration = Duration::from_millis(3_000);
+
+    /// A peer that accepts, swallows the mode byte, declares a frame it never
+    /// finishes, and then sends one byte every (timeout - epsilon) so that
+    /// `read_exact` renews its budget on every byte that arrives.
+    fn hostile_peer(l: TcpListener, dribble_for: Duration) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            s.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut mode = [0u8; 1];
+            let _ = s.read_exact(&mut mode);
+            // A length the frame limit happily accepts, and then nothing more
+            // than a trickle.
+            // 4096 == wire_tcp::MAX_FRAME, the largest frame the limit accepts.
+            if s.write_all(&4096u16.to_be_bytes()).is_err() {
+                return;
+            }
+            let _ = s.flush();
+            let t0 = Instant::now();
+            while t0.elapsed() < dribble_for {
+                std::thread::sleep(SOCK_TIMEOUT - Duration::from_millis(50));
+                if s.write_all(b" ").is_err() {
+                    return;
+                }
+                let _ = s.flush();
+            }
+            // Bounded: close so the victim can never hang this test.
+        })
+    }
+
+    /// FINDING: `SyncManager::pair_with` (manager.rs:706-721) is the one
+    /// pre-session read path left with NO wall-clock deadline.
+    ///
+    /// `serve` wraps the socket in `deadline::Timed` before the first byte and
+    /// `dial` wraps it before `Session::initiate`. `pair_with` does neither: it
+    /// sets `set_read_timeout(HANDSHAKE_TIMEOUT)` and hands the BARE
+    /// `TcpStream` to `pair_flow::run`. A socket timeout bounds one syscall and
+    /// `read_exact` renews it on every byte, so a device the user taps "pair"
+    /// on holds that thread for as long as it likes — the exact slow-loris the
+    /// inbound path was fixed for. mDNS is unsigned, so the attacker chooses
+    /// the name in the device list the user taps.
+    ///
+    /// This drives the real `pair_flow::run` over a real socket, set up exactly
+    /// as `pair_with` sets it up.
+    #[test]
+    fn adv2_pair_with_has_no_wall_clock_deadline_so_a_hostile_peer_pins_the_thread() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let peer = hostile_peer(l, DRIBBLE_FOR);
+
+        // Verbatim from pair_with: connect, socket timeouts, mode byte, run().
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(SOCK_TIMEOUT)).unwrap();
+        s.set_write_timeout(Some(SOCK_TIMEOUT)).unwrap();
+        s.write_all(&[crate::sync::wire_tcp::MODE_PAIR]).unwrap();
+        s.flush().unwrap();
+
+        let code = PairingCode::parse("123456").unwrap();
+        let t0 = Instant::now();
+        let r = run(
+            &mut s,
+            PairingRole::Responder,
+            &code,
+            ("11111111-1111-4111-8111-111111111111", "Victim"),
+        );
+        let held = t0.elapsed();
+        let _ = peer.join();
+
+        assert!(r.is_err(), "the hostile peer never completes a pairing");
+        assert!(
+            held < SOCK_TIMEOUT * 3,
+            "pair_with held its thread for {held:?} against a {SOCK_TIMEOUT:?} socket timeout: \
+             read_exact renews the budget on every dribbled byte and there is no wall clock \
+             (at the real HANDSHAKE_TIMEOUT of 20s this is one byte every 19s, forever)"
+        );
+    }
+
+    /// The control: the SAME hostile peer against the SAME code path, with the
+    /// stream wrapped in `Timed` the way `serve` and `dial` wrap it. This is
+    /// what `pair_with` is missing, and it is one line.
+    #[test]
+    fn adv2_the_same_peer_is_cut_off_when_the_stream_is_wrapped_in_timed() {
+        const BUDGET: Duration = Duration::from_millis(600);
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let peer = hostile_peer(l, DRIBBLE_FOR);
+
+        let s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(SOCK_TIMEOUT)).unwrap();
+        s.set_write_timeout(Some(SOCK_TIMEOUT)).unwrap();
+        let mut s = Timed::new(s, Deadline::after(BUDGET));
+        s.write_all(&[crate::sync::wire_tcp::MODE_PAIR]).unwrap();
+
+        let code = PairingCode::parse("123456").unwrap();
+        let t0 = Instant::now();
+        let r = run(
+            &mut s,
+            PairingRole::Responder,
+            &code,
+            ("11111111-1111-4111-8111-111111111111", "Victim"),
+        );
+        let held = t0.elapsed();
+        let _ = peer.join();
+
+        assert!(r.is_err());
+        assert!(
+            held < BUDGET + SOCK_TIMEOUT * 2,
+            "the wrapped path must be cut off promptly; held {held:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW (round 2) — demonstration of a live finding. Not a fix.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round2_pairing_dos {
+    use super::*;
+    use crate::sync::guard::{GuardError, PairingGuard};
+    use crate::sync::wire_tcp::{read_byte, read_frame, write_frame, MODE_PAIR};
+    use parking_lot::Mutex;
+    use std::io::Write;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    const IO_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Exactly the decision sequence of `manager::serve_pairing`
+    /// (manager.rs:589-620): read the mode byte, read the opening frame,
+    /// shape-check it, then charge a guess against the live code.
+    ///
+    /// Returns whether this connection was granted a guess against the code.
+    fn serve_pairing_decision(mut s: TcpStream, guard: &Arc<Mutex<PairingGuard>>) -> bool {
+        s.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
+        s.set_write_timeout(Some(IO_TIMEOUT)).unwrap();
+        if !matches!(read_byte(&mut s), Ok(MODE_PAIR)) {
+            return false;
+        }
+        let Ok(first) = read_frame(&mut s) else { return false };
+        if !looks_like_pairing_message(&first) {
+            return false;
+        }
+        matches!(guard.lock().reserve(Instant::now()), Ok(_))
+    }
+
+    /// One connection carrying `body` as its opening frame.
+    fn knock(addr: std::net::SocketAddr, body: &[u8]) {
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_write_timeout(Some(IO_TIMEOUT)).unwrap();
+        s.write_all(&[MODE_PAIR]).unwrap();
+        write_frame(&mut s, body).unwrap();
+    }
+
+    /// Bounded wait for the listener to have finished `n` connections.
+    fn wait_for(done: &AtomicUsize, n: usize) {
+        let t0 = Instant::now();
+        while done.load(Ordering::SeqCst) < n {
+            assert!(t0.elapsed() < Duration::from_secs(10), "listener stalled");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// FINDING: an unpaired machine on the LAN can deny pairing permanently.
+    ///
+    /// Round 1 removed the sticky lockout so that `PairingGuard::begin` always
+    /// issues a fresh code (guard.rs:86-90), on the reasoning that the user can
+    /// simply ask for another one. That reasoning assumes the attacker is not
+    /// still there. It is: `looks_like_pairing_message` is a LENGTH check
+    /// (pair_flow.rs:58-60), so `spake2_msg_len()` bytes of zeroes charge a
+    /// real guess, and the attacker can spend the whole budget within
+    /// milliseconds of a code appearing — the code is only reachable at all
+    /// once it is on screen, and a human needs seconds to read six digits off
+    /// one machine and type them into another.
+    ///
+    /// So every code the user displays is burnt before they can use it, for as
+    /// long as the attacker stays on the LAN. Five rounds here; nothing bounds
+    /// it in production.
+    #[test]
+    fn adv2_an_unpaired_lan_machine_burns_every_fresh_code_before_the_human_can_type_it() {
+        const ROUNDS: usize = 5;
+        // The attacker's whole budget per round: MAX_FAILURES connections.
+        let per_round = crate::sync::guard::MAX_FAILURES as usize;
+        let guard = Arc::new(Mutex::new(PairingGuard::new()));
+        let done = Arc::new(AtomicUsize::new(0));
+        let charged = Arc::new(AtomicUsize::new(0));
+
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let (g, d, c) = (guard.clone(), done.clone(), charged.clone());
+        // Bounded: exactly the connections the test makes, then the thread ends.
+        let total = ROUNDS * per_round;
+        let server = std::thread::spawn(move || {
+            for _ in 0..total {
+                let Ok((s, _)) = l.accept() else { break };
+                if serve_pairing_decision(s, &g) {
+                    c.fetch_add(1, Ordering::SeqCst);
+                }
+                d.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        let junk = vec![0u8; spake2_msg_len()];
+        let mut honest_got_a_guess = 0;
+        for round in 0..ROUNDS {
+            // The user presses "Show code". A fresh random code, and begin()
+            // clears the previous lockout — as designed.
+            let code = PairingCode::generate().unwrap();
+            guard
+                .lock()
+                .begin(code.as_str().to_string(), Instant::now())
+                .expect("a fresh code is always available");
+
+            // The attacker, already connected to the LAN, spends the budget
+            // before the human has finished reading the first digit.
+            for _ in 0..per_round {
+                knock(addr, &junk);
+            }
+            wait_for(&done, (round + 1) * per_round);
+
+            // Now the user's real second device tries, with the RIGHT code.
+            // This is `serve_pairing`'s charge step for an honest connection.
+            let outcome = guard.lock().reserve(Instant::now());
+            if outcome.is_ok() {
+                honest_got_a_guess += 1;
+            } else {
+                assert!(
+                    matches!(outcome, Err(GuardError::LockedOut { .. }) | Err(GuardError::NotPairing)),
+                    "round {round}: unexpected {outcome:?}"
+                );
+            }
+        }
+        server.join().unwrap();
+
+        assert!(
+            charged.load(Ordering::SeqCst) > 0,
+            "sanity: the attacker's zero-filled frames really are charged as guesses"
+        );
+        assert!(
+            honest_got_a_guess > 0,
+            "over {ROUNDS} rounds the user's own device never once got to attempt the code it              was shown: an unpaired machine on the LAN denies pairing for as long as it is there"
+        );
+    }
+}

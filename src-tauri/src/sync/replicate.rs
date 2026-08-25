@@ -39,6 +39,15 @@ const _: () = assert!(PAGE <= echokey_sync::MAX_BATCH_LEN);
 const WIDE_PAGE: usize = 20_000;
 /// Hard stop on a single exchange, so a peer cannot keep us here forever.
 const MAX_BATCHES: usize = 64;
+/// Mirrors the store's own ceiling on how far ahead a peer's clock may be.
+const MAX_SKEW_MS: i64 = 24 * 60 * 60 * 1000;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReplicateError {
@@ -63,6 +72,20 @@ pub struct RoundStats {
     /// Rows a peer was not entitled to send. Distinct from `ignored`, which is
     /// ordinary no-ops, because this one means someone misbehaved.
     pub refused: usize,
+    /// How far a truncated re-offer actually got, as a clock.
+    ///
+    /// The next re-offer resumes from here. Restarting from zero each time
+    /// meant a history larger than the cap could never finish: every pass
+    /// re-sent the same first batch and stopped in the same place.
+    pub resend_progress: Option<i64>,
+    /// We hit the per-exchange batch cap with rows still to send.
+    ///
+    /// An ordinary exchange resumes next time, because the peer's cursor moved.
+    /// A one-shot re-offer cannot: it was serving from BELOW the peer's cursor
+    /// precisely because those rows are unreachable otherwise. Clearing the
+    /// debt after a truncated re-offer stranded everything past the cap
+    /// permanently, so the debt is kept until a re-offer finishes.
+    pub truncated: bool,
 }
 
 /// Which kinds the user has agreed to share.
@@ -119,6 +142,9 @@ pub struct Attribution<'a> {
     pub peer_id: &'a str,
     /// Our own id, which a peer may never speak for.
     pub local_id: &'a str,
+    /// Devices we have paired with. A peer may carry an EDIT to one of their
+    /// rows, but never create one — see `may_create`.
+    pub known: &'a [String],
 }
 
 impl Attribution<'_> {
@@ -157,8 +183,34 @@ impl Attribution<'_> {
     /// where rows for a device only one side had paired with were re-sent and
     /// refused on every exchange forever, because a refusal takes no receipt
     /// and the protocol has no way to say "stop offering me this".
+    /// Is this row's claimed source even well formed?
+    ///
+    /// The real authority question is `may_create`; this only rejects nonsense.
     fn accepts(&self, source: &str) -> bool {
-        !source.is_empty() && source == self.peer_id && source != self.local_id
+        !source.is_empty()
+    }
+
+    /// May this peer bring a row attributed to `source` into EXISTENCE?
+    ///
+    /// Only the device itself may. Everything else is an update, and an update
+    /// is allowed for any identity we already hold — which is what makes the
+    /// mesh work in every direction:
+    ///
+    /// - Pinning or correcting a Mac dictation on the Windows box has to reach
+    ///   the Mac. That row's source is the Mac, so the edit is relayed to it as
+    ///   an update to a row the Mac obviously holds.
+    /// - Deleting a synced row on the receiving device has to reach the author.
+    ///   Same shape: a tombstone for an identity the author holds.
+    /// - A peer still cannot INVENT a dictation attributed to another device,
+    ///   or to us, because there is nothing to update.
+    ///
+    /// Both blunter rules failed. Accepting any paired source outright let one
+    /// compromised device fabricate another's history; refusing every
+    /// third-party row silently broke edits and deletes of replicated rows, so
+    /// a password deleted on the laptop lived on the desktop forever and the
+    /// next edit resurrected it.
+    fn may_create(&self, source: &str) -> bool {
+        source == self.peer_id && source != self.local_id
     }
 }
 
@@ -190,6 +242,7 @@ pub fn exchange<S: Read + Write>(
     attribution: &Attribution<'_>,
     turn: Turn,
     resend_all: bool,
+    resend_from: i64,
 ) -> Result<RoundStats, ReplicateError> {
     let mut stats = RoundStats::default();
 
@@ -212,12 +265,12 @@ pub fn exchange<S: Read + Write>(
     // 2. Watermarks, in turn order rather than both-at-once.
     let peer_marks = match turn {
         Turn::First => {
-            send_watermarks(session, store)?;
+            send_watermarks(session, store, attribution.peer_id)?;
             recv_watermarks(session)?
         }
         Turn::Second => {
             let peer = recv_watermarks(session)?;
-            send_watermarks(session, store)?;
+            send_watermarks(session, store, attribution.peer_id)?;
             peer
         }
     };
@@ -227,12 +280,12 @@ pub fn exchange<S: Read + Write>(
     //          them while it works through the store.
     match turn {
         Turn::First => {
-            serve(session, store, me, &peer_marks, kinds, resend_all, &mut stats)?;
+            serve(session, store, me, attribution.peer_id, &peer_marks, kinds, resend_all, resend_from, &mut stats)?;
             drain(session, store, kinds, retention, attribution, &mut stats)?;
         }
         Turn::Second => {
             drain(session, store, kinds, retention, attribution, &mut stats)?;
-            serve(session, store, me, &peer_marks, kinds, resend_all, &mut stats)?;
+            serve(session, store, me, attribution.peer_id, &peer_marks, kinds, resend_all, resend_from, &mut stats)?;
         }
     }
 
@@ -240,19 +293,52 @@ pub fn exchange<S: Read + Write>(
 }
 
 /// Everything we hold that the peer has not seen, per source device.
+/// Where to start serving `source` to this peer.
+///
+/// Normally the peer's own cursor. For the peer's OWN rows we can do strictly
+/// better, and have to: everything we received from that device is by
+/// definition something it already holds, so only rows whose clock has moved
+/// ABOVE what it gave us can be a local change worth sending back. Without
+/// this, two synced machines handed each other their entire histories back on
+/// the exchange after the first — every row ignored, nothing learned.
+///
+/// The reasoning holds only for `source == peer`. For a third device the two
+/// marks measure different things and taking the larger would skip rows.
+fn floor_for(
+    source: &str,
+    peer_id: &str,
+    peer_marks: &HashMap<String, i64>,
+    ours: &HashMap<String, i64>,
+) -> i64 {
+    let theirs = peer_marks.get(source).copied().unwrap_or(0);
+    if source == peer_id {
+        theirs.max(ours.get(source).copied().unwrap_or(0))
+    } else {
+        theirs
+    }
+}
+
 fn serve<S: Read + Write>(
     session: &mut Session<S>,
     store: &Arc<Mutex<Store>>,
     me: (&str, &str),
+    peer_id: &str,
     peer_marks: &HashMap<String, i64>,
     kinds: Kinds,
     resend_all: bool,
+    resend_from: i64,
     stats: &mut RoundStats,
 ) -> Result<(), ReplicateError> {
-    // Only rows we authored. A peer accepts nothing else from us — see
-    // Attribution::accepts — so serving another device's rows was pure waste
-    // that repeated on every exchange, and it was also the mechanism by which
-    // a compromised device could launder forged rows for a third one.
+    let mut reached: Option<i64> = None;
+    // Every source we hold anything for, live rows or only tombstones.
+    //
+    // Serving only our own rows looked safer and quietly broke the feature: an
+    // edit or a delete applied to a REPLICATED row never left the machine that
+    // made it, so clearing a synced password on the laptop left it on the
+    // desktop permanently, and the next edit on the desktop pushed it back.
+    // Fabrication is prevented on the receiving side instead, by
+    // `Attribution::may_create`, which is where the authority question actually
+    // belongs.
     //
     // `resend_all` ignores the peer's cursor for one exchange. The user has
     // just widened what this machine shares, and the rows suppressed while the
@@ -261,12 +347,33 @@ fn serve<S: Read + Write>(
     // offer our history once more from the beginning; re-applying is
     // idempotent, and it is the only way to close a hole that is otherwise
     // silent and permanent.
-    for source in [me.0] {
+    let (sources, ours) = {
+        let g = store.lock();
+        let sources = g
+            .known_sources()
+            .map_err(|e| ReplicateError::Store(e.to_string()))?;
+        // What THIS peer has already handed us, per source.
+        let ours: HashMap<String, i64> = g
+            .watermarks(peer_id)
+            .map_err(|e| ReplicateError::Store(e.to_string()))?
+            .into_iter()
+            .collect();
+        (sources, ours)
+    };
+    for source in sources.iter() {
+        let source = source.as_str();
+        // A device's OWN rows are served back to it too, and deliberately.
+        // That is how an edit made here — pinning or correcting a dictation
+        // that came from the Mac — reaches the Mac. The peer's cursor is what
+        // stops this being wasteful: it tells us what it has already seen from
+        // us about each source, including itself, so only rows we actually
+        // changed go across.
         let mut after = if resend_all {
-            0
+            resend_from
         } else {
-            peer_marks.get(source).copied().unwrap_or(0)
+            floor_for(source, peer_id, peer_marks, &ours)
         };
+        let mut served = 0usize;
         for _ in 0..MAX_BATCHES {
             let page = fetch_page(store, source, after)?;
             if page.is_empty() {
@@ -301,13 +408,21 @@ fn serve<S: Read + Write>(
                 break;
             }
             after = last;
+            served += 1;
+            if served >= MAX_BATCHES {
+                stats.truncated = true;
+            }
         }
+
+        // Track the lowest point any source reached, so a truncated re-offer
+        // resumes from a clock that cannot skip another source's rows.
+        reached = Some(reached.map_or(after, |r: i64| r.min(after)));
 
         // Tombstones for the same source.
         let mut after = if resend_all {
-            0
+            resend_from
         } else {
-            peer_marks.get(source).copied().unwrap_or(0)
+            floor_for(source, peer_id, peer_marks, &ours)
         };
         for _ in 0..MAX_BATCHES {
             let page = store
@@ -346,6 +461,9 @@ fn serve<S: Read + Write>(
         }
     }
 
+    if stats.truncated {
+        stats.resend_progress = reached;
+    }
     // Tell the peer we are done sending.
     session.send(&SyncMessage::Items { items: Vec::new(), more: false })?;
     Ok(())
@@ -364,10 +482,45 @@ fn drain<S: Read + Write>(
         match session.recv()? {
             SyncMessage::Items { items, more } => {
                 for it in &items {
+                    // Recorded BEFORE the policy checks below, and safe to do
+                    // so only because receipts are per (peer, source): what
+                    // this peer has offered us cannot touch the cursor we keep
+                    // for the device that actually wrote the row.
+                    //
+                    // Without it, every row we refuse — a relayed row for a
+                    // device we have not paired with, a kind the user switched
+                    // off — is re-sent on every exchange for the life of the
+                    // pairing, because nothing else tells the peer to stop.
+                    //
+                    // A clock outside the acceptable range is deliberately
+                    // excluded: recording that would park this peer's cursor in
+                    // the future and hide everything it legitimately writes.
+                    let clock = it.updated_at;
+                    if clock > 0 && clock <= now_ms() + MAX_SKEW_MS {
+                        store
+                            .lock()
+                            .note_received(attribution.peer_id, it.source_device.as_str(), clock)
+                            .map_err(|e| ReplicateError::Store(e.to_string()))?;
+                    }
                     if !attribution.accepts(it.source_device.as_str()) {
                         attribution.log_refusal(it.source_device.as_str(), "author rows for");
                         stats.refused += 1;
                         continue;
+                    }
+                    // A third device's row may only be an UPDATE to something
+                    // we already hold. Without this a paired peer could invent
+                    // dictations attributed to any other paired device.
+                    if !attribution.may_create(it.source_device.as_str()) {
+                        let held = store
+                            .lock()
+                            .holds_identity(it.source_device.as_str(), &it.origin_id)
+                            .map_err(|e| ReplicateError::Store(e.to_string()))?;
+                        if !held {
+                            attribution
+                                .log_refusal(it.source_device.as_str(), "create rows for");
+                            stats.refused += 1;
+                            continue;
+                        }
                     }
                     // The receipt is taken here, after attribution and before
                     // any policy refusal. Attribution matters: a peer forging
@@ -380,7 +533,7 @@ fn drain<S: Read + Write>(
                     // rows on every exchange for as long as the switch was off.
                     store
                         .lock()
-                        .note_received(it.source_device.as_str(), it.updated_at)
+                        .note_received(attribution.peer_id, it.source_device.as_str(), it.updated_at)
                         .map_err(|e| ReplicateError::Store(e.to_string()))?;
                     if !retention.keeps(it.created_at) {
                         // Older than this machine keeps. Refusing is what stops
@@ -400,7 +553,7 @@ fn drain<S: Read + Write>(
                         stats.ignored += 1;
                         continue;
                     }
-                    apply_item(store, it, stats)?;
+                    apply_item(store, attribution.peer_id, it, stats)?;
                 }
                 if !more && items.is_empty() {
                     break;
@@ -408,14 +561,34 @@ fn drain<S: Read + Write>(
             }
             SyncMessage::Tombstones { entries, .. } => {
                 for t in &entries {
+                    let clock = t.deleted_at;
+                    if clock > 0 && clock <= now_ms() + MAX_SKEW_MS {
+                        store
+                            .lock()
+                            .note_received(attribution.peer_id, t.source_device.as_str(), clock)
+                            .map_err(|e| ReplicateError::Store(e.to_string()))?;
+                    }
                     if !attribution.accepts(t.source_device.as_str()) {
                         attribution.log_refusal(t.source_device.as_str(), "delete rows belonging to");
                         stats.refused += 1;
                         continue;
                     }
+                    // A delete for a third device's row is only honoured for a
+                    // row we actually hold, so a peer cannot pre-emptively
+                    // tombstone identities it invented.
+                    if !attribution.may_create(t.source_device.as_str()) {
+                        let held = store
+                            .lock()
+                            .holds_identity(t.source_device.as_str(), &t.origin_id)
+                            .map_err(|e| ReplicateError::Store(e.to_string()))?;
+                        if !held {
+                            stats.refused += 1;
+                            continue;
+                        }
+                    }
                     store
                         .lock()
-                        .note_received(t.source_device.as_str(), t.deleted_at)
+                        .note_received(attribution.peer_id, t.source_device.as_str(), t.deleted_at)
                         .map_err(|e| ReplicateError::Store(e.to_string()))?;
                     let rt = RemoteTombstone {
                         source_machine: t.source_device.as_str().to_string(),
@@ -424,7 +597,7 @@ fn drain<S: Read + Write>(
                     };
                     let outcome = store
                         .lock()
-                        .apply_remote_tombstone(&rt)
+                        .apply_remote_tombstone(attribution.peer_id, &rt)
                         .map_err(|e| ReplicateError::Store(e.to_string()))?;
                     match outcome {
                         echokey_core::history::ApplyOutcome::Ignored => stats.ignored += 1,
@@ -446,8 +619,12 @@ fn drain<S: Read + Write>(
 fn send_watermarks<S: Read + Write>(
     session: &mut Session<S>,
     store: &Arc<Mutex<Store>>,
+    peer_id: &str,
 ) -> Result<(), ReplicateError> {
-    let mine = store.lock().watermarks().map_err(|e| ReplicateError::Store(e.to_string()))?;
+    let mine = store
+        .lock()
+        .watermarks(peer_id)
+        .map_err(|e| ReplicateError::Store(e.to_string()))?;
     let marks: Vec<Watermark> = mine
         .iter()
         .filter_map(|(src, clock)| {
@@ -538,6 +715,7 @@ fn fetch_page(
 
 fn apply_item(
     store: &Arc<Mutex<Store>>,
+    peer_id: &str,
     it: &SyncItem,
     stats: &mut RoundStats,
 ) -> Result<(), ReplicateError> {
@@ -555,7 +733,7 @@ fn apply_item(
     };
     let outcome = store
         .lock()
-        .apply_remote_item(&r)
+        .apply_remote_item(peer_id, &r)
         .map_err(|e| ReplicateError::Store(e.to_string()))?;
     match outcome {
         echokey_core::history::ApplyOutcome::Ignored => stats.ignored += 1,
@@ -645,47 +823,45 @@ mod tests {
     }
 
     fn attrib<'a>(peer: &'a str, local: &'a str, _known: &'a [String]) -> Attribution<'a> {
-        Attribution { peer_id: peer, local_id: local }
+        Attribution { peer_id: peer, local_id: local, known: _known }
     }
 
     #[test]
-    fn a_peer_may_speak_only_for_itself() {
-        // Relaying used to be allowed: any source in our paired roster was
-        // accepted from any paired peer. That let one compromised device author
-        // rows as another, delete another's rows, and silence a third. Devices
-        // that have paired exchange rows directly, so nothing is lost.
+    fn only_the_authoring_device_may_bring_a_row_into_existence() {
+        // The authority rule is about CREATION, not about which sources may
+        // appear. An update to something we already hold is how an edit or a
+        // delete made on one machine reaches the machine that wrote the row.
         let known = vec!["33333333-3333-4333-8333-333333333333".to_string()];
         let a = attrib(
             "22222222-2222-4222-8222-222222222222",
             "11111111-1111-4111-8111-111111111111",
             &known,
         );
-        assert!(a.accepts("22222222-2222-4222-8222-222222222222"), "itself");
+        assert!(a.may_create("22222222-2222-4222-8222-222222222222"), "the peer itself");
         assert!(
-            !a.accepts("33333333-3333-4333-8333-333333333333"),
-            "not even for another device we have paired with"
+            !a.may_create("33333333-3333-4333-8333-333333333333"),
+            "not for another device we have paired with"
         );
-        assert!(!a.accepts("44444444-4444-4444-8444-444444444444"), "a device we have never met");
-        assert!(!a.accepts(""), "an empty source id");
+        assert!(!a.may_create("44444444-4444-4444-8444-444444444444"), "nor a stranger");
+        assert!(!a.may_create("11111111-1111-4111-8111-111111111111"), "and never as us");
+        assert!(!a.accepts(""), "an empty source id is not a source");
     }
 
 
+
     #[test]
-    fn nobody_may_author_rows_as_us() {
-        // The attack this exists to stop: a paired peer claiming our own id and
-        // rewriting our dictations in place under last-writer-wins.
+    fn nobody_may_bring_a_row_into_existence_as_us() {
+        // The attack: a paired peer claiming our own id to inject dictations we
+        // never made, or to resurrect ones retention has already dropped.
         let known = vec!["11111111-1111-4111-8111-111111111111".to_string()];
         let a = attrib(
             "22222222-2222-4222-8222-222222222222",
             "11111111-1111-4111-8111-111111111111",
             &known,
         );
-        assert!(
-            !a.accepts("11111111-1111-4111-8111-111111111111"),
-            "our own id must be refused even if it appears in the roster"
-        );
-        assert!(!a.accepts(""), "an empty source is refused");
+        assert!(!a.may_create("11111111-1111-4111-8111-111111111111"));
     }
+
 
     #[test]
     fn an_outbound_batch_never_exceeds_the_wire_limit() {
@@ -715,6 +891,8 @@ mod tests {
 
     const A: &str = "11111111-1111-4111-8111-111111111111";
     const B: &str = "22222222-2222-4222-8222-222222222222";
+    /// A third paired device, used to test relayed edits and forgery.
+    const C: &str = "33333333-3333-4333-8333-333333333333";
 
     fn socket_pair() -> (TcpStream, TcpStream) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -742,7 +920,7 @@ mod tests {
     fn seed(store: &Arc<Mutex<Store>>, source: &str, n: usize, text_len: usize) {
         let g = store.lock();
         for i in 0..n {
-            g.apply_remote_item(&RemoteItem {
+            g.apply_remote_item(C, &RemoteItem {
                 source_machine: source.into(),
                 origin_id: format!("row-{i}"),
                 kind: "transcription".into(),
@@ -766,7 +944,9 @@ mod tests {
 
         let b = std::thread::spawn(move || {
             let mut session = Session::accept(srv, &k2).unwrap();
-            let attr = Attribution { peer_id: A, local_id: B };
+            // Every device in this scenario is paired with us.
+            let known = vec![A.to_string(), B.to_string(), C.to_string()];
+            let attr = Attribution { peer_id: A, local_id: B, known: &known };
             exchange(
                 &mut session,
                 &b_store,
@@ -776,11 +956,14 @@ mod tests {
                 &attr,
                 Turn::Second,
                 false,
+                0,
             )
         });
 
         let mut session = Session::initiate(c, &key).unwrap();
-        let attr = Attribution { peer_id: B, local_id: A };
+        // Every device in this scenario is paired with us.
+        let known = vec![A.to_string(), B.to_string(), C.to_string()];
+        let attr = Attribution { peer_id: B, local_id: A, known: &known };
         let a_stats = exchange(
             &mut session,
             &a_store,
@@ -790,6 +973,7 @@ mod tests {
             &attr,
             Turn::First,
             false,
+            0,
         );
         let b_stats = b.join().expect("the accepting side must not panic");
         (
@@ -896,7 +1080,7 @@ mod tests {
             for i in 0..(PAGE + 40) {
                 // Distinct, well-formed device ids so they survive DeviceId::parse.
                 let src = format!("33333333-3333-4333-8333-{:012x}", i);
-                g.note_received(&src, 1_000 + i as i64).unwrap();
+                g.note_received(&src, &src, 1_000 + i as i64).unwrap();
             }
         }
         seed(&b_store, B, 3, 32);
@@ -909,35 +1093,28 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_serves_only_what_it_authored_and_we_accept_only_that() {
-        // Two layers, and both matter. B holds rows attributed to us and to an
-        // unpaired third device; it must not OFFER them (serving only what it
-        // authored), and even if it did we must not ACCEPT them.
+    fn a_peer_cannot_bring_rows_into_existence_for_anyone_else() {
+        // B holds rows attributed to us and to a device we have never paired
+        // with. Neither may be CREATED here: there is nothing to update.
         let a_store = store_for(A);
         let b_store = store_for(B);
         seed(&b_store, A, 4, 32);
         seed(&b_store, "44444444-4444-4444-8444-444444444444", 4, 32);
         seed(&b_store, B, 2, 32);
 
-        let (a_stats, b_stats) = run_pair(a_store.clone(), b_store.clone());
-        assert_eq!(b_stats.sent_items, 2, "B offers only its own rows: {b_stats:?}");
-        assert_eq!(a_stats.applied_items, 2, "and only those land");
+        let (a_stats, _) = run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(a_stats.applied_items, 2, "only B's own rows land: {a_stats:?}");
         assert_eq!(a_store.lock().count().unwrap(), 2);
+        assert_eq!(a_store.lock().items_since(A, 0, 10).unwrap().len(), 0, "none as us");
 
-        // Neither foreign source gained a receipt, so neither is silenced.
-        let marks = a_store.lock().watermarks().unwrap();
-        assert_eq!(
-            marks.iter().filter(|(src, _)| src != B).count(),
-            0,
-            "only B may record anything: {marks:?}"
-        );
-
-        // The acceptance layer on its own, independent of what B chose to send.
-        let attr = Attribution { peer_id: B, local_id: A };
-        assert!(!attr.accepts(A), "nobody authors rows as us");
-        assert!(!attr.accepts("44444444-4444-4444-8444-444444444444"));
-        assert!(attr.accepts(B));
+        // A receipt IS recorded for the refused rows — keyed by (peer, source),
+        // so it cannot touch the cursor we keep for the device that supposedly
+        // wrote them, and it stops the refusal repeating without end.
+        let (a2, _) = run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(a2.refused, 0, "the same rows must not be refused again: {a2:?}");
+        assert_eq!(a_store.lock().count().unwrap(), 2, "and nothing new landed");
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -980,7 +1157,9 @@ mod adversarial {
         let k2 = key.clone();
         let bt = std::thread::spawn(move || {
             let mut s = Session::accept(srv, &k2).unwrap();
-            let attr = Attribution { peer_id: A, local_id: B };
+            // Every device in this scenario is paired with us.
+            let known = vec![A.to_string(), B.to_string(), C.to_string()];
+            let attr = Attribution { peer_id: A, local_id: B, known: &known };
             let _ = exchange(
                 &mut s,
                 &b_store,
@@ -990,11 +1169,14 @@ mod adversarial {
                 &attr,
                 Turn::Second,
                 false,
+                0,
             );
         });
         let mut s = Session::initiate(c, &key).unwrap();
         // A's roster: both B and C are paired devices.
-        let attr = Attribution { peer_id: B, local_id: A };
+        // Every device in this scenario is paired with us.
+        let known = vec![A.to_string(), B.to_string(), C.to_string()];
+        let attr = Attribution { peer_id: B, local_id: A, known: &known };
         let stats = exchange(
             &mut s,
             a_store,
@@ -1004,6 +1186,7 @@ mod adversarial {
             &attr,
             Turn::First,
             false,
+            0,
         )
         .expect("exchange");
         bt.join().unwrap();
@@ -1022,7 +1205,7 @@ mod adversarial {
         let b_store = store_for(B);
         {
             let g = b_store.lock();
-            g.apply_remote_item(&RemoteItem {
+            g.apply_remote_item(C, &RemoteItem {
                 source_machine: C.into(),
                 origin_id: "forged-1".into(),
                 kind: "transcription".into(),
@@ -1043,82 +1226,96 @@ mod adversarial {
 
     /// FINDING: the same hole lets B DELETE C's rows on our machine.
     #[test]
-    fn a_paired_peer_cannot_delete_a_third_devices_rows() {
-        // Regression: B fabricates a tombstone for one of C's rows and our copy
-        // was destroyed.
+    fn a_relayed_delete_lands_but_a_fabricated_one_does_not() {
+        // Two halves of the same rule. B may carry a delete for a row we hold —
+        // that is exactly how deleting a synced dictation on one machine
+        // reaches the others. B may NOT tombstone an identity we have never
+        // seen, which would let it pre-emptively block rows before they arrive.
         let a_store = store_for(A);
         a_store
             .lock()
-            .apply_remote_item(&RemoteItem {
-                source_machine: C.into(),
-                origin_id: "real-row".into(),
-                kind: "transcription".into(),
-                text: "C's real dictation".into(),
-                created_at: 1_700_000_000_000,
-                updated_at: 1_700_000_000_000,
-                pinned: false,
-            })
+            .apply_remote_item(
+                C,
+                &RemoteItem {
+                    source_machine: C.into(),
+                    origin_id: "real-row".into(),
+                    kind: "transcription".into(),
+                    text: "C's real dictation".into(),
+                    created_at: 1_700_000_000_000,
+                    updated_at: 1_700_000_000_000,
+                    pinned: false,
+                },
+            )
             .unwrap();
         assert_eq!(a_store.lock().count().unwrap(), 1);
 
         let b_store = store_for(B);
-        b_store
-            .lock()
-            .apply_remote_tombstone(&RemoteTombstone {
-                source_machine: C.into(),
-                origin_id: "real-row".into(),
-                deleted_at: 1_700_000_001_000,
-            })
-            .unwrap();
+        for (origin, held) in [("real-row", true), ("never-seen", false)] {
+            b_store
+                .lock()
+                .apply_remote_tombstone(
+                    C,
+                    &RemoteTombstone {
+                        source_machine: C.into(),
+                        origin_id: origin.into(),
+                        deleted_at: 1_700_000_001_000,
+                    },
+                )
+                .unwrap();
+            let _ = held;
+        }
 
         let _ = exchange_with_b(&a_store, b_store);
         assert_eq!(
             a_store.lock().count().unwrap(),
-            1,
-            "C's row must survive a delete B had no authority to send"
+            0,
+            "the delete for a row we hold must land, or deletes never propagate"
         );
+        // The fabricated one left nothing behind to block a future row.
+        assert!(!a_store.lock().holds_identity(C, "never-seen").unwrap());
     }
+
 
 
     /// FINDING: B can push A's watermark for C forward, so A stops asking C for
     /// anything up to that clock — C is silenced for as long as the clamp
     /// allows (now + 24h).
     #[test]
-    fn a_paired_peer_cannot_poison_a_third_devices_watermark() {
-        // Regression, and the subtlest of the three: B sends one row for C
-        // stamped far in the future. Refusing the ROW was never enough on its
-        // own — the receipt moved too, parking our mark for C ahead of anything
-        // C would produce and silencing an innocent device.
+    fn what_one_peer_offers_cannot_move_another_devices_cursor() {
+        // The subtlest of the three. Receipts used to be keyed by source alone,
+        // so B relaying one row for C moved the cursor we keep for C and hid
+        // whatever C wrote below it. Keyed by (peer, source) the attack has
+        // nowhere to land.
         let a_store = store_for(A);
         let b_store = store_for(B);
         {
             let g = b_store.lock();
-            g.apply_remote_item(&RemoteItem {
-                source_machine: C.into(),
-                origin_id: "poison".into(),
-                kind: "transcription".into(),
-                text: "x".into(),
-                created_at: 1_700_000_000_000,
-                updated_at: 1_700_000_000_000,
-                pinned: false,
-            })
+            g.apply_remote_item(
+                C,
+                &RemoteItem {
+                    source_machine: C.into(),
+                    origin_id: "poison".into(),
+                    kind: "transcription".into(),
+                    text: "x".into(),
+                    created_at: 1_700_000_000_000,
+                    updated_at: 1_700_000_000_000,
+                    pinned: false,
+                },
+            )
             .unwrap();
         }
 
         exchange_with_b(&a_store, b_store);
 
-        let after = a_store
-            .lock()
-            .watermarks()
-            .unwrap()
-            .into_iter()
-            .find(|(s, _)| s == C)
-            .map(|(_, c)| c);
-        assert_eq!(
-            after, None,
-            "B must not be able to record anything on C's behalf"
+        // Nothing B said appears in the cursor we advertise to C, so C is still
+        // asked for everything it has.
+        let for_c = a_store.lock().watermarks(C).unwrap();
+        assert!(
+            for_c.is_empty(),
+            "B moved the cursor we keep for C: {for_c:?}"
         );
     }
+
 
 }
 
@@ -1137,6 +1334,8 @@ mod adversarial_convergence {
     const A: &str = "11111111-1111-4111-8111-111111111111";
     const B: &str = "22222222-2222-4222-8222-222222222222";
     const C_UNKNOWN: &str = "44444444-4444-4444-8444-444444444444";
+    /// A third device we HAVE paired with, as opposed to C_UNKNOWN.
+    const C: &str = "33333333-3333-4333-8333-333333333333";
     const DAY_MS: i64 = 86_400_000;
 
     fn socket_pair() -> (TcpStream, TcpStream) {
@@ -1160,7 +1359,7 @@ mod adversarial_convergence {
     fn seed_at(store: &Arc<Mutex<Store>>, source: &str, origin: &str, kind: &str, clock: i64) {
         store
             .lock()
-            .apply_remote_item(&RemoteItem {
+            .apply_remote_item(C, &RemoteItem {
                 source_machine: source.into(),
                 origin_id: origin.into(),
                 kind: kind.into(),
@@ -1185,7 +1384,17 @@ mod adversarial_convergence {
     /// A owes B one full re-offer, as SyncManager does after the user widens
     /// what this machine shares.
     fn run_pair_resend(a: Arc<Mutex<Store>>, b: Arc<Mutex<Store>>) -> (RoundStats, RoundStats) {
-        run_pair_full(a, b, both(), both(), true)
+        run_pair_resend_from(a, b, 0)
+    }
+
+    /// A re-offer resuming from `from`, exactly as SyncManager does after a
+    /// truncated one.
+    fn run_pair_resend_from(
+        a: Arc<Mutex<Store>>,
+        b: Arc<Mutex<Store>>,
+        from: i64,
+    ) -> (RoundStats, RoundStats) {
+        run_pair_full_from(a, b, both(), both(), true, from)
     }
 
     fn run_pair_full(
@@ -1195,13 +1404,26 @@ mod adversarial_convergence {
         b_kinds: Kinds,
         a_resend: bool,
     ) -> (RoundStats, RoundStats) {
+        run_pair_full_from(a_store, b_store, a_kinds, b_kinds, a_resend, 0)
+    }
+
+    fn run_pair_full_from(
+        a_store: Arc<Mutex<Store>>,
+        b_store: Arc<Mutex<Store>>,
+        a_kinds: Kinds,
+        b_kinds: Kinds,
+        a_resend: bool,
+        a_from: i64,
+    ) -> (RoundStats, RoundStats) {
         let (c, srv) = socket_pair();
         let key = PairedKey::from_bytes([7u8; 32]);
         let k2 = key.clone();
 
         let bt = std::thread::spawn(move || {
             let mut session = Session::accept(srv, &k2).unwrap();
-            let attr = Attribution { peer_id: A, local_id: B };
+            // Every device in this scenario is paired with us.
+            let known = vec![A.to_string(), B.to_string(), C.to_string()];
+            let attr = Attribution { peer_id: A, local_id: B, known: &known };
             exchange(
                 &mut session,
                 &b_store,
@@ -1211,11 +1433,14 @@ mod adversarial_convergence {
                 &attr,
                 Turn::Second,
                 false,
+                0,
             )
         });
 
         let mut session = Session::initiate(c, &key).unwrap();
-        let attr = Attribution { peer_id: B, local_id: A };
+        // Every device in this scenario is paired with us.
+        let known = vec![A.to_string(), B.to_string(), C.to_string()];
+        let attr = Attribution { peer_id: B, local_id: A, known: &known };
         let a_stats = exchange(
             &mut session,
             &a_store,
@@ -1225,6 +1450,7 @@ mod adversarial_convergence {
             &attr,
             Turn::First,
             a_resend,
+            a_from,
         );
         let b_stats = bt.join().expect("the accepting side must not panic");
         (a_stats.expect("dialling side"), b_stats.expect("accepting side"))
@@ -1291,7 +1517,7 @@ mod adversarial_convergence {
         // B deletes it 200 days ago. A is off the network and never hears.
         b_store
             .lock()
-            .apply_remote_tombstone(&RemoteTombstone {
+            .apply_remote_tombstone(C, &RemoteTombstone {
                 source_machine: B.into(),
                 origin_id: "7".into(),
                 deleted_at: old + 1,
@@ -1375,4 +1601,234 @@ mod adversarial_convergence {
             a2.refused
         );
     }
+
+    const C3: &str = "33333333-3333-4333-8333-333333333333";
+
+    /// One exchange between any two devices, both sides real.
+    fn exchange_between(
+        x_id: &'static str,
+        x_store: Arc<Mutex<Store>>,
+        y_id: &'static str,
+        y_store: Arc<Mutex<Store>>,
+    ) {
+        let (c, srv) = socket_pair();
+        let key = PairedKey::from_bytes([7u8; 32]);
+        let k2 = key.clone();
+        let t = std::thread::spawn(move || {
+            let mut s = Session::accept(srv, &k2).unwrap();
+            // Every device in this scenario is paired with us.
+            let known = vec![A.to_string(), B.to_string(), C.to_string()];
+            let attr = Attribution { peer_id: x_id, local_id: y_id, known: &known };
+            exchange(
+                &mut s,
+                &y_store,
+                (y_id, "Y"),
+                both(),
+                Retention { oldest_allowed: None },
+                &attr,
+                Turn::Second,
+                false,
+                0,
+            )
+        });
+        let mut s = Session::initiate(c, &key).unwrap();
+        // Every device in this scenario is paired with us.
+        let known = vec![A.to_string(), B.to_string(), C.to_string()];
+        let attr = Attribution { peer_id: y_id, local_id: x_id, known: &known };
+        exchange(
+            &mut s,
+            &x_store,
+            (x_id, "X"),
+            both(),
+            Retention { oldest_allowed: None },
+            &attr,
+            Turn::First,
+            false,
+            0,
+        )
+        .expect("dialling side");
+        t.join().expect("accepting side must not panic").expect("accepting side");
+    }
+
+    /// `Store::delete_item_local` promises the delete "travels", and `clear()`
+    /// promises "the deletes propagate". Both write a tombstone keyed on the
+    /// row's ORIGINAL source. With relaying removed, `serve` offers tombstones
+    /// only for rows we authored, so a delete performed on the receiving device
+    /// is never told to anyone. Two devices, one delete, permanent divergence.
+    #[test]
+    fn bug_deleting_a_replicated_row_never_reaches_the_device_that_authored_it() {
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+        seed_at(&a_store, A, "secret", "clipboard", 1_700_000_000_000);
+        run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(b_store.lock().count().unwrap(), 1, "B received A's row");
+
+        // The user deletes it on B — the machine that received it.
+        let id = b_store.lock().recent(None, 10).unwrap()[0].id;
+        b_store.lock().delete(id).unwrap();
+        assert_eq!(b_store.lock().count().unwrap(), 0);
+        assert_eq!(
+            b_store.lock().tombstones_since(A, 0, 10).unwrap().len(),
+            1,
+            "B did record the tombstone; it simply has no way to send it"
+        );
+
+        run_pair(a_store.clone(), b_store.clone());
+        run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(
+            a_store.lock().count().unwrap(),
+            0,
+            "a delete made on the receiving device must still reach the author"
+        );
+    }
+
+    /// The same divergence turned into a resurrection: because A never learns
+    /// about the delete, any later edit on A (a pin, a text correction) lifts
+    /// the row's clock above B's tombstone and pushes it straight back onto B.
+    #[test]
+    fn bug_a_delete_on_the_non_author_is_undone_by_the_next_edit_on_the_author() {
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+        seed_at(&a_store, A, "secret", "clipboard", 1_700_000_000_000);
+        run_pair(a_store.clone(), b_store.clone());
+
+        let id = b_store.lock().recent(None, 10).unwrap()[0].id;
+        b_store.lock().delete(id).unwrap();
+        assert_eq!(b_store.lock().count().unwrap(), 0, "deleted on B");
+
+        // Later, on A, the user pins the row they still see. Bounded wait so
+        // the pin's millisecond is strictly after the tombstone's.
+        std::thread::sleep(Duration::from_millis(5));
+        let a_id = a_store.lock().recent(None, 10).unwrap()[0].id;
+        a_store.lock().set_pinned(a_id, true).unwrap();
+
+        run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(
+            b_store.lock().count().unwrap(),
+            0,
+            "the row the user deleted on B is back, because A never heard about the delete"
+        );
+    }
+
+    /// Three devices, chained pairing: A<->B and B<->C, A and C never paired.
+    /// Before relaying was removed B passed C's rows on to A. Now it holds them
+    /// and never serves them, so a device the user considers part of one synced
+    /// set silently sees a subset of the history.
+    #[test]
+    fn a_row_reaches_only_the_devices_paired_directly_with_its_author() {
+        // Documented behaviour, not a defect. A<->B and B<->C paired, A and C
+        // never paired: C's dictations reach B and stop there.
+        //
+        // SYNC_DESIGN.md requires pairing to be explicit and human-verified and
+        // rules out relay servers. A has never agreed to trust C, so B carrying
+        // C's history into A would be exactly the transitive trust that rule
+        // exists to prevent. B can still carry an EDIT to a row A already holds
+        // — that is an update to something A accepted from C directly, not new
+        // history appearing from a device A does not know.
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+        seed_at(&b_store, C_UNKNOWN, "c-row", "transcription", 1_700_000_000_000);
+
+        let (a1, _) = run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(
+            a_store.lock().count().unwrap(),
+            0,
+            "a device A never paired with cannot introduce history to A"
+        );
+        let _ = a1;
+
+        // And it terminates: the refusal records a receipt, so B stops offering.
+        let (_, b2) = run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(b2.sent_items, 0, "the refusal must not repeat forever: {b2:?}");
+    }
+
+
+    /// This module's own header says, as a load-bearing rule: "We serve rows
+    /// for EVERY source we know about, not just our own. Pinning a Mac row on
+    /// the Windows box bumps that row's clock but leaves its source as the Mac;
+    /// if each side only offered its own rows, that edit would never leave the
+    /// machine." `serve` now offers only `me.0`. The comment describes the
+    /// current code exactly, and calls it the bug.
+    #[test]
+    fn bug_an_edit_to_a_peers_row_never_leaves_the_machine_that_made_it() {
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+        seed_at(&b_store, B, "note", "transcription", 1_700_000_000_000);
+        run_pair(a_store.clone(), b_store.clone());
+        assert_eq!(a_store.lock().count().unwrap(), 1, "A received B's row");
+
+        // On A the user pins B's dictation and corrects its text.
+        let id = a_store.lock().recent(None, 10).unwrap()[0].id;
+        a_store.lock().set_pinned(id, true).unwrap();
+        a_store.lock().update_text(id, "corrected on A").unwrap();
+
+        run_pair(a_store.clone(), b_store.clone());
+        run_pair(a_store.clone(), b_store.clone());
+
+        let on_b = b_store.lock().recent(None, 10).unwrap().remove(0);
+        assert_eq!(
+            (on_b.pinned, on_b.text.as_str()),
+            (true, "corrected on A"),
+            "the edit never leaves A: the two machines disagree about the same row forever"
+        );
+    }
+
+
+    /// `serve` stops after MAX_BATCHES (64) pages of PAGE (256) rows, i.e.
+    /// 16,384 rows per exchange. An ordinary sync resumes next time, because
+    /// the peer's mark advanced. The `resend_all` backfill does NOT: it is
+    /// one-shot, `SyncManager::run_session` clears the debt as soon as the
+    /// exchange returns Ok, and the peer's mark for us was already above these
+    /// rows — so everything past row 16,384 stays unreachable.
+    #[test]
+    fn a_truncated_re_offer_keeps_its_debt_and_finishes_next_time() {
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+        let n = MAX_BATCHES * PAGE + 200;
+        {
+            let g = a_store.lock();
+            for i in 0..n {
+                g.apply_remote_item(C, &RemoteItem {
+                    source_machine: A.into(),
+                    origin_id: format!("r{i}"),
+                    kind: "clipboard".into(),
+                    text: "x".into(),
+                    created_at: 1_700_000_000_000 + i as i64,
+                    updated_at: 1_700_000_000_000 + i as i64,
+                    pinned: false,
+                })
+                .unwrap();
+            }
+        }
+        // The one full re-offer the user is owed after turning a kind on. It
+        // does not fit in a single exchange.
+        let (a1, _) = run_pair_resend(a_store.clone(), b_store.clone());
+        assert!(a1.truncated, "a re-offer this size must report truncation: {a1:?}");
+        assert!(
+            (b_store.lock().count().unwrap() as usize) < n,
+            "precondition: the cap really did bite"
+        );
+
+        // SyncManager keeps the debt when the re-offer is truncated, so the
+        // next exchange resumes it. Spending the debt here stranded everything
+        // past the cap permanently, because a re-offer serves from BELOW the
+        // peer's cursor and nothing else will ever offer those rows again.
+        let mut from = a1.resend_progress.unwrap_or(0);
+        for _ in 0..8 {
+            if b_store.lock().count().unwrap() as usize == n {
+                break;
+            }
+            let (r, _) = run_pair_resend_from(a_store.clone(), b_store.clone(), from);
+            match r.resend_progress {
+                Some(next) if r.truncated => from = next,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            b_store.lock().count().unwrap() as usize,
+            n,
+            "a retained debt must eventually deliver every row"
+        );
+    }
+
 }
