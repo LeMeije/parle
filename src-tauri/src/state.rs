@@ -323,6 +323,10 @@ impl AppState {
         }
         // Replication refuses rows older than we keep, so it has to know.
         self.sync.set_retention_days(s.history.retention_days);
+        // Mirrored alongside retention, not just at launch. Missing it meant
+        // the post-exchange prune kept enforcing the cap the app started with,
+        // so changing it in the UI had no effect on sync until a restart.
+        self.sync.set_max_items(s.history.max_items);
         if let Some(m) = self.clipboard_monitor.lock().as_ref() {
             m.set_enabled(s.history.clipboard_capture);
         }

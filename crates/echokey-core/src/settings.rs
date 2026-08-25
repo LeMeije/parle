@@ -567,6 +567,22 @@ pub struct SyncSettings {
     /// never here — this is only the roster needed to show a list and to know
     /// whose key to look up.
     pub paired: Vec<PairedDevice>,
+    /// Devices we owe one full re-offer of our history, and where to resume it.
+    ///
+    /// Written when the user widens what this machine shares. The inbound half
+    /// of that change lives in SQLite and is durable; this is the outbound half
+    /// and has to survive a quit for the same reason.
+    #[serde(default)]
+    pub resend_owed: Vec<ResendDebt>,
+}
+
+/// One outstanding promise to re-offer our history to a device. Carries no
+/// secret.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResendDebt {
+    pub device_id: String,
+    /// Clock to resume from; 0 means from the beginning.
+    pub from: i64,
 }
 
 /// A device we have paired with. Carries no secret.
@@ -587,6 +603,7 @@ impl Default for SyncSettings {
             sync_dictations: true,
             sync_clipboard: true,
             paired: Vec::new(),
+            resend_owed: Vec::new(),
         }
     }
 }

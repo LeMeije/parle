@@ -13,8 +13,6 @@ const SCHEMA_VERSION: i64 = 5;
 /// Generous enough for a real timezone or NTP wobble, small enough that a
 /// nonsense timestamp cannot win every conflict forever.
 const MAX_CLOCK_SKEW_MS: i64 = 24 * 60 * 60 * 1000;
-/// Tombstones are never dropped sooner than this, whatever retention says.
-const TOMBSTONE_MIN_DAYS: u32 = 180;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {

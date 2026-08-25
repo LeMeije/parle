@@ -59,6 +59,9 @@ pub enum ReplicateError {
     Version { peer: u16, ours: u16 },
     #[error("peer did not say hello first")]
     NoHello,
+    /// The user unpaired this device, or switched sync off, mid-exchange.
+    #[error("stopped: this device was unpaired or sync was switched off")]
+    Aborted,
 }
 
 /// What one exchange did, for logging and for the tests.
@@ -243,6 +246,14 @@ pub fn exchange<S: Read + Write>(
     turn: Turn,
     resend_all: bool,
     resend_from: i64,
+    // Checked between batches. Returns true when this session must stop — the
+    // user unpaired the device, or switched sync off, while it was running.
+    //
+    // Checking once before the exchange was not enough: the exchange IS the
+    // long part, so a revoked device kept trading history for up to the whole
+    // session timeout. The only window that closed was the instant between the
+    // handshake and the first message.
+    abort: &dyn Fn() -> bool,
 ) -> Result<RoundStats, ReplicateError> {
     let mut stats = RoundStats::default();
 
@@ -280,12 +291,12 @@ pub fn exchange<S: Read + Write>(
     //          them while it works through the store.
     match turn {
         Turn::First => {
-            serve(session, store, me, attribution.peer_id, &peer_marks, kinds, resend_all, resend_from, &mut stats)?;
-            drain(session, store, kinds, retention, attribution, &mut stats)?;
+            serve(session, store, me, attribution.peer_id, &peer_marks, kinds, resend_all, resend_from, abort, &mut stats)?;
+            drain(session, store, kinds, retention, attribution, abort, &mut stats)?;
         }
         Turn::Second => {
-            drain(session, store, kinds, retention, attribution, &mut stats)?;
-            serve(session, store, me, attribution.peer_id, &peer_marks, kinds, resend_all, resend_from, &mut stats)?;
+            drain(session, store, kinds, retention, attribution, abort, &mut stats)?;
+            serve(session, store, me, attribution.peer_id, &peer_marks, kinds, resend_all, resend_from, abort, &mut stats)?;
         }
     }
 
@@ -327,6 +338,7 @@ fn serve<S: Read + Write>(
     kinds: Kinds,
     resend_all: bool,
     resend_from: i64,
+    abort: &dyn Fn() -> bool,
     stats: &mut RoundStats,
 ) -> Result<(), ReplicateError> {
     let mut reached: Option<i64> = None;
@@ -375,6 +387,9 @@ fn serve<S: Read + Write>(
         };
         let mut served = 0usize;
         for _ in 0..MAX_BATCHES {
+            if abort() {
+                return Err(ReplicateError::Aborted);
+            }
             let page = fetch_page(store, source, after)?;
             if page.is_empty() {
                 break;
@@ -476,9 +491,13 @@ fn drain<S: Read + Write>(
     kinds: Kinds,
     retention: Retention,
     attribution: &Attribution<'_>,
+    abort: &dyn Fn() -> bool,
     stats: &mut RoundStats,
 ) -> Result<(), ReplicateError> {
     for _ in 0..MAX_BATCHES * 4 {
+        if abort() {
+            return Err(ReplicateError::Aborted);
+        }
         match session.recv()? {
             SyncMessage::Items { items, more } => {
                 for it in &items {
@@ -957,6 +976,7 @@ mod tests {
                 Turn::Second,
                 false,
                 0,
+                &|| false,
             )
         });
 
@@ -974,6 +994,7 @@ mod tests {
             Turn::First,
             false,
             0,
+            &|| false,
         );
         let b_stats = b.join().expect("the accepting side must not panic");
         (
@@ -1170,6 +1191,7 @@ mod adversarial {
                 Turn::Second,
                 false,
                 0,
+                &|| false,
             );
         });
         let mut s = Session::initiate(c, &key).unwrap();
@@ -1187,6 +1209,7 @@ mod adversarial {
             Turn::First,
             false,
             0,
+            &|| false,
         )
         .expect("exchange");
         bt.join().unwrap();
@@ -1434,6 +1457,7 @@ mod adversarial_convergence {
                 Turn::Second,
                 false,
                 0,
+                &|| false,
             )
         });
 
@@ -1451,6 +1475,7 @@ mod adversarial_convergence {
             Turn::First,
             a_resend,
             a_from,
+            &|| false,
         );
         let b_stats = bt.join().expect("the accepting side must not panic");
         (a_stats.expect("dialling side"), b_stats.expect("accepting side"))
@@ -1629,6 +1654,7 @@ mod adversarial_convergence {
                 Turn::Second,
                 false,
                 0,
+                &|| false,
             )
         });
         let mut s = Session::initiate(c, &key).unwrap();
@@ -1645,6 +1671,7 @@ mod adversarial_convergence {
             Turn::First,
             false,
             0,
+            &|| false,
         )
         .expect("dialling side");
         t.join().expect("accepting side must not panic").expect("accepting side");

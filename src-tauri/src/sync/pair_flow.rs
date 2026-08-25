@@ -574,7 +574,7 @@ mod adversarial_round2 {
 #[cfg(test)]
 mod adversarial_round2_pairing_dos {
     use super::*;
-    use crate::sync::guard::{GuardError, PairingGuard};
+    use crate::sync::guard::PairingGuard;
     use crate::sync::wire_tcp::{read_byte, read_frame, write_frame, MODE_PAIR};
     use parking_lot::Mutex;
     use std::io::Write;

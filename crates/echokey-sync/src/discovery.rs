@@ -145,8 +145,20 @@ impl Discovery {
             }
         }
         if let Some(worker) = self.worker.take() {
-            // The worker exits as soon as the daemon drops its event sender.
-            let _ = worker.join();
+            // The worker exits as soon as the daemon drops its event sender —
+            // but only if it does. Joining unconditionally undid the bounded
+            // wait immediately above it: this runs on the main thread during
+            // RunEvent::Exit, so a daemon that never dropped its sender meant
+            // the app simply never quit.
+            //
+            // Detaching costs nothing here. The thread holds no lock we care
+            // about and the process is going away; the only thing that mattered
+            // was not blocking on it.
+            if worker.is_finished() {
+                let _ = worker.join();
+            } else {
+                tracing::debug!("mdns worker still running at shutdown; detaching rather than blocking");
+            }
         }
         Ok(())
     }

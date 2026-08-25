@@ -88,6 +88,9 @@ impl<S: Write> Write for Timed<S> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        // Checked here too. A peer that stops reading makes flush the call that
+        // blocks, so exempting it left one way to sit past the deadline.
+        self.deadline.check()?;
         self.inner.flush()
     }
 }

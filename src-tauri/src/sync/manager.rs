@@ -225,7 +225,6 @@ struct Inner {
     paired: Vec<UiPaired>,
     guard: PairingGuard,
     /// Set while a code is displayed, so the listener knows to accept a pairing.
-    pairing_started: Option<Instant>,
     discovery: Option<Discovery>,
     port: u16,
     /// Stop flag for the CURRENT listener generation. Each start() gets its own
@@ -296,12 +295,16 @@ impl SyncManager {
                     })
                     .collect(),
                 guard: PairingGuard::new(),
-                pairing_started: None,
                 discovery: None,
                 port: 0,
                 listen_stop: None,
                 dialing: std::collections::HashSet::new(),
-                resend_owed: std::collections::HashMap::new(),
+                // Restored, so a debt taken on before a quit is still owed.
+                resend_owed: s
+                    .resend_owed
+                    .iter()
+                    .map(|d| (d.device_id.clone(), d.from))
+                    .collect(),
                 starting: false,
                 unpaired_mid_session: std::collections::HashSet::new(),
                 error: None,
@@ -593,6 +596,22 @@ impl SyncManager {
         // it set would keep accepting connections and moving history after a
         // shutdown.
         self.inner.lock().enabled = false;
+        // Wait for an in-flight start() to finish installing itself.
+        //
+        // start() claims `starting` and then releases the lock for the slow
+        // work — bind, mDNS registration, thread spawns — so a stop() arriving
+        // in that window used to find `discovery` and `listen_stop` both None,
+        // do nothing, and return. start() then completed, leaving a bound
+        // listener advertising on the LAN with `enabled` false and the UI
+        // toggle off, for the life of the process.
+        //
+        // Bounded: if start() is wedged we proceed anyway rather than hanging
+        // the caller, and `enabled` is already false so nothing it installs
+        // will serve.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while self.inner.lock().starting && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         // Take the daemon OUT under the lock and drop it outside. Discovery's
         // Drop unregisters over the network and joins its worker with no bound;
         // running that while holding `inner` would wedge every publish() and
@@ -601,7 +620,12 @@ impl SyncManager {
             let mut i = self.inner.lock();
             i.peers.clear();
             i.guard.cancel();
-            i.dialing.clear();
+            // `dialing` is deliberately NOT cleared. Its entries are owned by
+            // live DialGuards; clearing it here let a new generation insert the
+            // same peer and then have the OLD guard's drop remove it, so two
+            // concurrent dials to one device were possible and the set
+            // under-counted against MAX_DIALS. The guards clean up by
+            // themselves as their threads unwind.
             (i.discovery.take(), i.listen_stop.take(), i.port)
         };
         drop(discovery);
@@ -615,6 +639,15 @@ impl SyncManager {
             if port != 0 {
                 let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
                 let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(500));
+            } else {
+                // We never learned the port, so the poke is impossible and the
+                // thread stays parked in accept() with the socket bound. Say so
+                // rather than leaving a silent leak, and refuse to hand the flag
+                // back: a later start() must not decide it is "already running"
+                // on the strength of a listener nobody can reach.
+                tracing::warn!(
+                    "sync: stopping a listener whose port was never recorded;                      it will exit on its next connection"
+                );
             }
         }
         self.publish();
@@ -780,7 +813,6 @@ impl SyncManager {
         i.guard
             .begin(code.as_str().to_string(), now)
             .map_err(|e: GuardError| e.to_string())?;
-        i.pairing_started = Some(now);
         let expires = now_ms() + i.guard.expires_in(now).map(|d| d.as_millis() as i64).unwrap_or(0);
         drop(i);
         self.publish();
@@ -858,13 +890,24 @@ impl SyncManager {
             }
         }
         if let Err(e) = keystore::store(&p.device_id, &p.key) {
+            // Not `fail()`. That switches sync off process-wide without
+            // persisting the change, so the manager said off while settings.json
+            // still said on and nothing recovered until a restart. One pairing
+            // failing says nothing about the sync subsystem.
             let msg = format!("Paired, but the key could not be saved to the keychain: {e}");
-            self.fail(&msg);
+            tracing::warn!("sync: {msg}");
+            self.publish();
             return Err(msg);
         }
         {
             let mut i = self.inner.lock();
             i.guard.cancel();
+            // Pairing again revives a device that was unpaired while a session
+            // was in flight. Device ids are stable per install, so without this
+            // the revoke flag outlived the revoke: every later session with that
+            // device was dropped for the rest of the process, silently, with
+            // only a log line to say why.
+            i.unpaired_mid_session.remove(&p.device_id);
             if let Some(existing) = i.paired.iter_mut().find(|d| d.id == p.device_id) {
                 existing.name = p.device_name;
                 existing.last_seen = Some(now_ms());
@@ -991,12 +1034,30 @@ impl SyncManager {
     /// Paired KEYS are never written here; they live in the keychain.
     pub fn persist(&self) {
         let (enabled, name, dictations, clipboard, paired) = self.persistable();
+        // Gathered BEFORE the settings lock is taken. Every other path locks
+        // `inner` first and `settings` second; reaching back into `inner` from
+        // under the settings lock here would be a genuine order inversion.
+        let owed: Vec<echokey_core::settings::ResendDebt> = self
+            .inner
+            .lock()
+            .resend_owed
+            .iter()
+            .map(|(id, from)| echokey_core::settings::ResendDebt {
+                device_id: id.clone(),
+                from: *from,
+            })
+            .collect();
         let mut s = self.settings.lock();
         s.sync.enabled = enabled;
         s.sync.device_name = name;
         s.sync.sync_dictations = dictations;
         s.sync.sync_clipboard = clipboard;
         s.sync.paired = paired;
+        // The outbound half of a kind widening: a promise to re-offer our
+        // history to each paired device. The inbound half (reset_source_marks)
+        // is already durable in SQLite, so losing this one left exactly the
+        // silent, permanent hole the mechanism exists to close.
+        s.sync.resend_owed = owed;
         if let Err(e) = s.save(&echokey_core::settings::settings_path()) {
             tracing::warn!("sync: could not persist sync settings: {e}");
         }
@@ -1068,6 +1129,10 @@ impl SyncManager {
             turn,
             resend_all,
             resend_from.unwrap_or(0),
+            &|| {
+                let i = self.inner.lock();
+                !i.enabled || i.unpaired_mid_session.contains(&peer_id)
+            },
         ) {
             Ok(stats) => {
                 // Only once the re-offer actually finished. A truncated one
