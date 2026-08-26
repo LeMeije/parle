@@ -310,6 +310,19 @@ struct Inner {
     /// Set for the whole of start(), which binds a port and brings up mDNS and
     /// is far too slow to leave the "already running" test unguarded.
     starting: bool,
+    /// Bumped by every `stop()`. `start()` compares it against the value it saw
+    /// on entry and tears down whatever it installed if a stop happened while
+    /// it was working — the window between claiming `starting` and installing
+    /// the listener is long (bind, mDNS registration, thread spawns) and a
+    /// stop that lands inside it would otherwise be silently undone.
+    stop_epoch: u64,
+    /// What the USER asked for, as opposed to whether sync is running right now.
+    ///
+    /// `enabled` is the runtime flag: `stop()` clears it so nothing in flight
+    /// keeps serving, including at app exit. Persisting THAT meant an exchange
+    /// finishing during shutdown wrote `enabled: false` into settings.json and
+    /// sync was silently off on the next launch. Only `set_enabled` moves this.
+    user_enabled: bool,
     /// Devices unpaired while a session with them was already running. Checked
     /// as that session finishes each batch so it stops writing their rows.
     unpaired_mid_session: std::collections::HashSet<String>,
@@ -377,6 +390,8 @@ impl SyncManager {
                     .map(|d| (d.device_id.clone(), d.from))
                     .collect(),
                 starting: false,
+                stop_epoch: 0,
+                user_enabled: s.enabled,
                 unpaired_mid_session: std::collections::HashSet::new(),
                 error: None,
             }),
@@ -463,6 +478,7 @@ impl SyncManager {
     /// found both fields still None and did nothing, leaving an orphaned
     /// listener advertising itself with the toggle reading OFF.
     pub fn start(self: Arc<Self>) -> Result<(), String> {
+        let epoch;
         {
             let mut i = self.inner.lock();
             // `enabled` is checked here, not only by the caller. set_enabled
@@ -479,6 +495,7 @@ impl SyncManager {
                 return Ok(()); // already running, or another thread is bringing it up
             }
             i.starting = true;
+            epoch = i.stop_epoch;
         }
         // From here on every exit path must clear `starting`, so it is RAII.
         let _starting = StartGuard(self.clone());
@@ -707,6 +724,25 @@ impl SyncManager {
             return Err(msg);
         }
 
+        // Did a stop() land while we were bringing this up?
+        //
+        // The window between claiming `starting` and installing the listener is
+        // long — bind, mDNS registration, two thread spawns — and a stop()
+        // arriving inside it found nothing installed, did nothing, and returned.
+        // We then finished, leaving a bound port advertising on the LAN with the
+        // toggle reading off for the life of the process. The epoch is what
+        // makes that detectable after the fact rather than only during.
+        let superseded = {
+            let i = self.inner.lock();
+            i.stop_epoch != epoch || !i.enabled
+        };
+        if superseded {
+            tracing::info!("sync: start was superseded by a stop; undoing it");
+            drop(_starting);
+            self.stop();
+            return Ok(());
+        }
+
         // Clear only a STALE error. This used to be unconditional, which wiped
         // the "no usable network" message recorded a few lines above by the
         // discovery failure path — the user got an empty peer list, enabled and
@@ -738,7 +774,11 @@ impl SyncManager {
         // it: `serve` and `run_session` both gate on it, so a stop() that left
         // it set would keep accepting connections and moving history after a
         // shutdown.
-        self.inner.lock().enabled = false;
+        {
+            let mut i = self.inner.lock();
+            i.enabled = false;
+            i.stop_epoch = i.stop_epoch.wrapping_add(1);
+        }
         // Wait for an in-flight start() to finish installing itself.
         //
         // start() claims `starting` and then releases the lock for the slow
@@ -1094,10 +1134,14 @@ impl SyncManager {
     pub fn set_enabled(self: &Arc<Self>, on: bool) -> Result<(), String> {
         {
             let mut i = self.inner.lock();
-            if i.enabled == on {
+            if i.enabled == on && i.user_enabled == on {
                 return Ok(());
             }
             i.enabled = on;
+            // The only place the user's preference moves. Everything else that
+            // clears `enabled` — stop(), fail(), app exit — is describing the
+            // runtime, not what the user asked for.
+            i.user_enabled = on;
             i.error = None;
         }
         if on {
@@ -1195,7 +1239,11 @@ impl SyncManager {
             })
             .collect();
         let mut s = self.settings.lock();
-        s.sync.enabled = enabled;
+        // The USER's preference, not the runtime flag. `stop()` clears
+        // `enabled` — including at app exit — so persisting that meant an
+        // exchange finishing during shutdown wrote `enabled: false` and sync
+        // was silently off next launch.
+        s.sync.enabled = self.inner.lock().user_enabled;
         s.sync.device_name = name;
         s.sync.sync_dictations = dictations;
         s.sync.sync_clipboard = clipboard;
