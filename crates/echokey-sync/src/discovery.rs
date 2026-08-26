@@ -171,6 +171,12 @@ impl Drop for Discovery {
 }
 
 /// Blocking translation loop: mDNS events in, [`DiscoveryEvent`] out.
+/// Fullname-to-device-id entries kept while translating mDNS events.
+///
+/// Every one comes from an unauthenticated announcement, so this is a bound on
+/// what the LAN can make us hold. Generous next to any real network.
+const MAX_TRACKED_RECORDS: usize = 512;
+
 fn translate(
     events: mdns_sd::Receiver<ServiceEvent>,
     tx: Sender<DiscoveryEvent>,
@@ -178,14 +184,33 @@ fn translate(
 ) {
     // mDNS removals identify a service by fullname, not by our device id, so we
     // remember which id each fullname resolved to.
+    //
+    // Bounded, and it has to be: every entry is created by an unauthenticated
+    // announcement from the network, keyed by a name the announcer chooses, and
+    // removed only by a goodbye that same announcer sends. Anyone on the LAN
+    // could otherwise make this grow until the process ran out of memory.
+    //
+    // Past the cap the OLDEST entry goes. Losing one costs a `PeerLost` event
+    // for a device that later disappears — the peer simply lingers in the UI
+    // list until the next restart — which is a far smaller problem than an
+    // unbounded map.
     let mut known: HashMap<String, DeviceId> = HashMap::new();
+    let mut order: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     // Blocks. Ends when the daemon shuts down and drops its sender.
     while let Ok(event) = events.recv() {
         let out = match event {
             ServiceEvent::ServiceResolved(service) => match peer_from(&service) {
                 Some(peer) if peer.id != own_id => {
-                    known.insert(service.get_fullname().to_string(), peer.id.clone());
+                    let name = service.get_fullname().to_string();
+                    if known.insert(name.clone(), peer.id.clone()).is_none() {
+                        order.push_back(name);
+                        while order.len() > MAX_TRACKED_RECORDS {
+                            if let Some(old) = order.pop_front() {
+                                known.remove(&old);
+                            }
+                        }
+                    }
                     DiscoveryEvent::PeerFound(peer)
                 }
                 // Our own advertisement, or a record that is not one of ours.
@@ -334,5 +359,128 @@ mod tests {
         let instance = instance_name(&config);
         assert!(instance.len() <= 63);
         assert!(instance.is_char_boundary(instance.len() - 9));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW (round 4) — demonstration of a live finding. NOT a fix.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round4 {
+    use super::*;
+    use mdns_sd::{ResolvedService, ServiceEvent};
+
+    /// The fullname an attacker chooses for its `n`th announcement. A DNS
+    /// instance label may be up to 63 bytes, so this is a fraction of what one
+    /// record can actually cost us.
+    fn fullname(n: usize) -> String {
+        format!("evil-{n:010}.{SERVICE_TYPE}")
+    }
+
+    fn resolved(n: usize) -> ResolvedService {
+        let id = format!("{n:08x}-0000-4000-8000-000000000000");
+        let mut props = HashMap::new();
+        props.insert(TXT_KEY_ID.to_string(), id);
+        props.insert(TXT_KEY_NAME.to_string(), "Peer".to_string());
+        props.insert(TXT_KEY_VERSION.to_string(), PROTOCOL_VERSION.to_string());
+        ServiceInfo::new(
+            SERVICE_TYPE,
+            &format!("evil-{n:010}"),
+            &format!("evil-{n}.local."),
+            "192.168.1.66",
+            5000,
+            props,
+        )
+        .expect("a well-formed advertisement")
+        .as_resolved_service()
+    }
+
+    /// FINDING (round 4, MEDIUM): `translate`'s `known` map is unbounded, and
+    /// every entry in it is chosen by whoever is on the LAN.
+    ///
+    /// mDNS records are unsigned. `translate` (discovery.rs:174-210) inserts one
+    /// `fullname -> DeviceId` entry per resolved service and removes it only on
+    /// a `ServiceRemoved` that the ADVERTISER sends. An attacker announcing
+    /// distinct instance names simply never sends one, so the map grows for as
+    /// long as it keeps talking, at a size it picks (a DNS instance label is up
+    /// to 63 bytes and the id is a 36-byte String).
+    ///
+    /// `manager.rs` caps its own peer map at `MAX_PEERS` for exactly this
+    /// reason — "anyone on the LAN can advertise unlimited records; without a
+    /// cap both the map and the JSON we push to the webview grow without bound"
+    /// (manager.rs:67-70). That cap is applied one layer ABOVE this map, so it
+    /// does not bound it. The channel between the two is bounded
+    /// (`EVENT_QUEUE`), which only means the events are dropped downstream while
+    /// the entry is retained here anyway.
+    ///
+    /// The test proves absence of any cap without measuring memory: it feeds
+    /// `RECORDS` announcements, then a goodbye for every one of them, and counts
+    /// the `PeerLost` events. An entry can only produce `PeerLost` if it was
+    /// still being held, so `RECORDS` of them means nothing was ever evicted.
+    /// Drives the real `translate` over real channels.
+    #[test]
+    fn r4_the_fullname_map_is_unbounded_and_lan_controlled() {
+        const RECORDS: usize = 100_000;
+        /// Conservative bytes retained per entry: fullname + id + map overhead.
+        const PER_ENTRY: usize = 64 + 36 + 48;
+
+        let (tx_ev, rx_ev) = flume::unbounded::<ServiceEvent>();
+        let (tx_out, rx_out) = crossbeam_channel::bounded(EVENT_QUEUE);
+        let own = DeviceId::parse("ffffffff-0000-4000-8000-000000000000").unwrap();
+
+        // Drain continuously so the bounded channel is never what stops this.
+        let counter = std::thread::spawn(move || {
+            let (mut found, mut lost) = (0usize, 0usize);
+            // Hard bound: at most one event per message we ever send.
+            for _ in 0..(RECORDS * 2 + 16) {
+                match rx_out.recv() {
+                    Ok(DiscoveryEvent::PeerLost(_)) => lost += 1,
+                    Ok(DiscoveryEvent::PeerFound(_)) => found += 1,
+                    Err(_) => break,
+                }
+            }
+            (found, lost)
+        });
+
+        for n in 0..RECORDS {
+            tx_ev
+                .send(ServiceEvent::ServiceResolved(Box::new(resolved(n))))
+                .unwrap();
+        }
+        for n in 0..RECORDS {
+            tx_ev
+                .send(ServiceEvent::ServiceRemoved(
+                    SERVICE_TYPE.to_string(),
+                    fullname(n),
+                ))
+                .unwrap();
+        }
+        drop(tx_ev);
+
+        translate(rx_ev, tx_out, own);
+        let (found, lost) = counter.join().expect("counter thread");
+
+        // Guard against a false pass: if the synthesised records were not
+        // recognised at all, nothing would ever be inserted and `lost` would be
+        // zero for the wrong reason.
+        assert_eq!(
+            found, RECORDS,
+            "precondition: every synthesised announcement must be a well-formed              EchoKey record that translate actually accepts"
+        );
+
+        // A cap of any sane size (MAX_PEERS, the equivalent one layer up, is 64)
+        // would have evicted almost everything, leaving almost nothing still
+        // held to lose. A tenth is a generous threshold; the observed figure is
+        // essentially all of them, the handful missing being `try_send` drops on
+        // the bounded channel.
+        assert!(
+            lost < RECORDS / 10,
+            "{lost} of {RECORDS} attacker-chosen mDNS instance names were still \
+             being held when their goodbyes arrived, so nothing is ever evicted: \
+             `known` in discovery.rs:181 has no cap. At roughly {PER_ENTRY} bytes \
+             an entry that is ~{} MiB of retained state bought with nothing but \
+             multicast announcements.",
+            lost * PER_ENTRY / (1024 * 1024)
+        );
     }
 }

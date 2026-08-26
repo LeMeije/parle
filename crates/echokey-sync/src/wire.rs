@@ -13,7 +13,9 @@
 //!   [`WireError::ProtocolVersionMismatch`] ("update the other device") instead
 //!   of an opaque crypto failure.
 //!
-//! Messages are serialised as JSON with an internally tagged `"type"` field. An
+//! Messages are serialised as JSON, externally tagged — `{"items": {...}}` —
+//! and every struct refuses unknown fields. Both are memory-safety choices, not
+//! style ones; see the note on the enum itself. An
 //! unknown tag is a hard decode error, so a v1 peer never silently ignores a
 //! message kind it does not understand.
 //!
@@ -78,6 +80,7 @@ pub enum ItemKind {
 /// increasing counter used for watermarks; `updated_at` is the last-writer-wins
 /// tiebreak for edits (pin toggles, text edits).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SyncItem {
     pub source_device: DeviceId,
     pub origin_id: String,
@@ -108,6 +111,7 @@ impl SyncItem {
 /// watermark machinery as items, and so a delete is not resurrected by a stale
 /// copy of the row arriving later.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tombstone {
     pub source_device: DeviceId,
     pub origin_id: String,
@@ -124,6 +128,7 @@ impl Tombstone {
 
 /// "I already hold everything from `source_device` up to and including `clock`."
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Watermark {
     pub source_device: DeviceId,
     pub clock: u64,
@@ -520,5 +525,34 @@ mod adversarial_round2 {
         }
         ok.push_str("]}}");
         assert!(SyncMessage::decode(ok.as_bytes()).is_ok(), "exactly at the limit is fine");
+    }
+}
+
+// ADVERSARIAL REVIEW — ROUND 4. Demonstration only; not a fix.
+#[cfg(test)]
+mod adversarial_round4_wire {
+    use super::*;
+
+    /// R4-W1. The module header says messages are "internally tagged"; the
+    /// enum is externally tagged. And `deny_unknown_fields` is documented as
+    /// closing the door on unknown fields — it does so for the variant's own
+    /// fields but NOT for the structs inside a batch.
+    #[test]
+    fn r4_unknown_fields_are_refused_everywhere_they_are_documented_to_be() {
+        // Externally tagged, as the enum attribute says. (Documents reality.)
+        let m = SyncMessage::Watermarks { entries: Vec::new(), more: false };
+        let json = String::from_utf8(m.encode().unwrap()).unwrap();
+        assert!(json.starts_with("{\"watermarks\""), "encoding is {json}");
+
+        // An unknown field at the variant level IS refused.
+        let bad = br#"{"watermarks":{"entries":[],"more":false,"junk":1}}"#;
+        assert!(SyncMessage::decode(bad).is_err(), "variant-level junk must be refused");
+
+        // An unknown field INSIDE a batch element is not.
+        let inner = br#"{"tombstones":{"entries":[{"source_device":"22222222-2222-4222-8222-222222222222","origin_id":"1","deleted_at":1,"clock":1,"junk":"padding"}],"more":false}}"#;
+        assert!(
+            SyncMessage::decode(inner).is_err(),
+            "an unknown field inside a batch entry must be refused too"
+        );
     }
 }

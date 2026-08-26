@@ -56,6 +56,12 @@ const PREAUTH_TIMEOUT: Duration = Duration::from_secs(3);
 /// Two is generous: a peer needs one, and one more covers a reconnect racing a
 /// half-closed socket.
 const MAX_PREAUTH_PER_SOURCE: usize = 2;
+/// The absolute ceiling on concurrent inbound handlers, counting the slot every
+/// previously-unseen address is allowed even when the ordinary pool is full.
+///
+/// `MAX_INBOUND` is the pool for addresses already being served; this is what
+/// keeps the reservation from becoming the exhaustion vector itself.
+const MAX_INBOUND_HARD: usize = 32;
 /// Read deadline once a session is authenticated. Longer than a handshake,
 /// because a real exchange can be large, but never unbounded.
 const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -103,6 +109,62 @@ struct DialGuard {
 impl Drop for DialGuard {
     fn drop(&mut self) {
         self.owner.release_dial(&self.id);
+    }
+}
+
+/// May we take on another inbound connection right now?
+///
+/// `already_here` is whether this source address is already being served.
+///
+/// The global pool is only consulted for an address we are already serving. It
+/// used to be consulted first, which made `MAX_INBOUND` a single first-come
+/// budget: `MAX_INBOUND / MAX_PREAUTH_PER_SOURCE` addresses — four — closed the
+/// listener to everyone. That denied pairing outright, because the machine
+/// SHOWING a code only ever receives, so no code the user displayed could be
+/// used and showing a fresh one changed nothing.
+///
+/// An address we have not heard from is admitted even when the pool is full,
+/// up to a hard ceiling that stops the reservation itself becoming the
+/// exhaustion vector. Same shape as the pairing guard's reserved first guess,
+/// and for the same reason: the user's own device is precisely the address we
+/// have not heard from.
+fn admit_inbound(in_flight: usize, already_here: bool) -> bool {
+    if in_flight >= MAX_INBOUND_HARD {
+        return false;
+    }
+    !already_here || in_flight < MAX_INBOUND
+}
+
+/// Make room in the peer map for `id`, evicting an unpaired entry if need be.
+///
+/// Returns false when the record should be dropped.
+///
+/// The cap used to be applied before we worked out whether the id was known, so
+/// `MAX_PEERS` unsigned mDNS records evicted the user's real device — and
+/// `dial` returns immediately for anything absent from this map, which is the
+/// very mitigation that makes inbound saturation survivable.
+fn make_room_for_peer(
+    peers: &mut HashMap<String, PeerInfo>,
+    paired: &[UiPaired],
+    id: &str,
+    known: bool,
+) -> bool {
+    if peers.len() < MAX_PEERS || peers.contains_key(id) {
+        return true;
+    }
+    if !known {
+        return false;
+    }
+    let victim = peers
+        .keys()
+        .find(|k| !paired.iter().any(|d| &d.id == *k))
+        .cloned();
+    match victim {
+        Some(v) => {
+            peers.remove(&v);
+            true
+        }
+        None => false,
     }
 }
 
@@ -461,10 +523,11 @@ impl SyncManager {
                             match ev {
                                 DiscoveryEvent::PeerFound(p) => {
                                     let id = p.id.as_str().to_string();
-                                    if i.peers.len() >= MAX_PEERS && !i.peers.contains_key(&id) {
+                                    let known = i.paired.iter().any(|d| d.id == id);
+                                    let paired = i.paired.clone();
+                                    if !make_room_for_peer(&mut i.peers, &paired, &id, known) {
                                         continue;
                                     }
-                                    let known = i.paired.iter().any(|d| d.id == id);
                                     let fresh = i.peers.insert(id.clone(), p).is_none();
                                     // Dial on first sight, and again once
                                     // DIAL_RETRY_AFTER has passed since the
@@ -490,8 +553,19 @@ impl SyncManager {
                                         .get(&id)
                                         .map(|t: &Instant| t.elapsed() >= DIAL_RETRY_AFTER)
                                         .unwrap_or(true);
+                                    // `fresh` deliberately does NOT gate this.
+                                    // mDNS is unsigned and a goodbye removes the
+                                    // peer entry, so an attacker flapping
+                                    // goodbye/announce made every cycle "first
+                                    // sight" and started a dial each time: ten
+                                    // threads, ten credential-store reads and
+                                    // ten 20s connects inside one retry window,
+                                    // filling MAX_DIALS so the real device never
+                                    // got a slot. `last_dial` outlives the peer
+                                    // entry, so it is the only honest clock.
+                                    let _ = fresh;
                                     let room = i.dialing.len() < MAX_DIALS;
-                                    if known && (fresh || due) && room && i.dialing.insert(id.clone()) {
+                                    if known && due && room && i.dialing.insert(id.clone()) {
                                         i.last_dial.insert(id.clone(), Instant::now());
                                         let me3 = me.clone();
                                         std::thread::spawn(move || {
@@ -548,11 +622,23 @@ impl SyncManager {
                     }
                     match conn {
                         Ok(s) => {
-                            if me.inbound.load(Ordering::SeqCst) >= MAX_INBOUND {
-                                tracing::debug!("sync: refusing connection, {MAX_INBOUND} already in flight");
-                                drop(s); // closes it; the peer can retry
-                                continue;
-                            }
+                            // The global budget is checked AFTER working out
+                            // whether this address is already being served, and
+                            // applies only if it is.
+                            //
+                            // Checking it first made MAX_INBOUND a single
+                            // first-come pool, so MAX_INBOUND divided by
+                            // MAX_PREAUTH_PER_SOURCE — four addresses — closed
+                            // the listener to everyone. That denied pairing
+                            // outright, because the machine SHOWING a code only
+                            // ever receives, and showing a fresh code changed
+                            // nothing.
+                            //
+                            // A previously-unseen address is admitted even when
+                            // the pool is full, up to a hard ceiling. Same
+                            // reasoning as the pairing guard's reserved first
+                            // guess: the user's own device is precisely the
+                            // address we have not heard from.
                             // A per-address share on top of the global budget.
                             // Without it the global budget is first-come, so
                             // eight sockets that connect and say nothing hold
@@ -560,6 +646,14 @@ impl SyncManager {
                             // reopened forever, closing the listener to every
                             // real peer for eight sockets and zero bytes.
                             let src = s.peer_addr().map(|a| a.ip()).ok();
+                            let in_flight = me.inbound.load(Ordering::SeqCst);
+                            let already_here =
+                                src.map(|ip| me.preauth.lock().contains_key(&ip)).unwrap_or(true);
+                            if !admit_inbound(in_flight, already_here) {
+                                tracing::debug!("sync: refusing connection, {in_flight} in flight");
+                                drop(s);
+                                continue;
+                            }
                             let slot = match src {
                                 Some(ip) => match PreauthGuard::claim(&me.preauth, ip) {
                                     Some(g) => g,
@@ -1626,5 +1720,104 @@ mod adversarial_round3_slots {
             "the pre-auth map retained {} entries after every guard dropped",
             preauth.lock().len()
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW (round 4) — demonstrations of live findings. NOT fixes.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round4 {
+    use super::*;
+
+    fn peer(id: &str) -> UiPaired {
+        UiPaired { id: id.into(), name: id.into(), last_seen: None, online: false }
+    }
+
+    fn info() -> PeerInfo {
+        PeerInfo {
+            id: echokey_sync::DeviceId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+            name: "x".into(),
+            addr: std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 2)),
+            port: 1,
+        }
+    }
+
+    /// The listener must keep room for an address it has not heard from.
+    ///
+    /// The global pool used to be checked first, which made `MAX_INBOUND` a
+    /// single first-come budget: `MAX_INBOUND / MAX_PREAUTH_PER_SOURCE` — four
+    /// addresses — closed the listener to everyone. That denied PAIRING
+    /// outright, because the machine showing a code only ever receives, so no
+    /// code the user displayed could be used and showing a fresh one changed
+    /// nothing.
+    #[test]
+    fn a_few_addresses_cannot_close_the_listener_to_an_unseen_device() {
+        // The pool is full, and every slot belongs to an address already being
+        // served. A device we have not heard from still gets in.
+        assert!(
+            admit_inbound(MAX_INBOUND, false),
+            "an unseen address must be admitted even with the pool full"
+        );
+        // An address already being served does not get another once it is full.
+        assert!(!admit_inbound(MAX_INBOUND, true));
+        // And the reservation itself is bounded, so it cannot become the
+        // exhaustion vector.
+        assert!(!admit_inbound(MAX_INBOUND_HARD, false));
+        assert!(admit_inbound(MAX_INBOUND_HARD - 1, false));
+    }
+
+    /// Unsigned mDNS records must never crowd out a device the user paired.
+    ///
+    /// `MAX_PEERS` was applied before we worked out whether the id was known,
+    /// so 64 bogus records evicted the real peer — and `dial` returns
+    /// immediately for anything absent from this map, which is the mitigation
+    /// that makes inbound saturation survivable in the first place.
+    #[test]
+    fn bogus_mdns_records_cannot_evict_the_real_paired_peer() {
+        let paired = vec![peer("real")];
+        let mut peers: HashMap<String, PeerInfo> = HashMap::new();
+        for i in 0..MAX_PEERS {
+            peers.insert(format!("bogus-{i}"), info());
+        }
+        assert_eq!(peers.len(), MAX_PEERS);
+
+        // The paired device arrives last and still gets a slot.
+        assert!(
+            make_room_for_peer(&mut peers, &paired, "real", true),
+            "a paired device was crowded out by records we have never paired with"
+        );
+        peers.insert("real".into(), info());
+        assert!(peers.contains_key("real"));
+
+        // An unknown record, by contrast, is simply dropped once we are full.
+        assert!(!make_room_for_peer(&mut peers, &paired, "another-bogus", false));
+    }
+
+    /// A flapping record must not buy extra dials.
+    ///
+    /// The dial gate was `fresh || due`, and a goodbye removes the peer entry,
+    /// so an attacker cycling goodbye/announce made every cycle "first sight"
+    /// and started a dial each time — filling MAX_DIALS so the real device
+    /// never got a slot. `last_dial` outlives the peer entry, so it is the only
+    /// honest clock.
+    #[test]
+    fn a_flapping_record_cannot_dial_more_often_than_the_retry_interval() {
+        let mut last_dial: HashMap<String, Instant> = HashMap::new();
+        let id = "peer".to_string();
+        let mut dials = 0;
+
+        for _ in 0..10 {
+            // Each cycle is a fresh sighting, as a goodbye/announce pair is.
+            let due = last_dial
+                .get(&id)
+                .map(|t: &Instant| t.elapsed() >= DIAL_RETRY_AFTER)
+                .unwrap_or(true);
+            if due {
+                last_dial.insert(id.clone(), Instant::now());
+                dials += 1;
+            }
+        }
+        assert_eq!(dials, 1, "{dials} dials started inside one retry window");
     }
 }

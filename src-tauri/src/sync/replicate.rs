@@ -36,9 +36,16 @@ use std::sync::Arc;
 const PAGE: usize = echokey_sync::MAX_BATCH_LEN;
 const _: () = assert!(PAGE <= echokey_sync::MAX_BATCH_LEN);
 /// Ceiling for the widened re-fetch when a whole page shares one millisecond.
-const WIDE_PAGE: usize = 20_000;
 /// Hard stop on a single exchange, so a peer cannot keep us here forever.
 const MAX_BATCHES: usize = 64;
+/// How many watermark chunks either side will send or read.
+///
+/// `send_watermarks` used to chunk with no ceiling while `recv_watermarks` read
+/// at most `MAX_BATCHES`, so a store holding more sources than that produced a
+/// stream the other side stopped reading mid-way — and the exchange failed for
+/// good. Both halves now use this, and the sender truncates rather than
+/// overrunning the reader.
+const MAX_WATERMARK_CHUNKS: usize = 256;
 /// Mirrors the store's own ceiling on how far ahead a peer's clock may be.
 const MAX_SKEW_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -191,6 +198,20 @@ impl Attribution<'_> {
     /// The real authority question is `may_create`; this only rejects nonsense.
     fn accepts(&self, source: &str) -> bool {
         !source.is_empty()
+    }
+
+    /// May we record a cursor for `source` on this peer's word?
+    ///
+    /// Only for sources it is entitled to speak for: itself, ourselves (it
+    /// legitimately offers our own rows back, carrying edits and deletes), and
+    /// devices we have paired with. Recording one for any id the peer cared to
+    /// name let a single paired device write unbounded durable rows into
+    /// `source_marks`.
+    fn may_record(&self, source: &str) -> bool {
+        !source.is_empty()
+            && (source == self.peer_id
+                || source == self.local_id
+                || self.known.iter().any(|k| k == source))
     }
 
     /// May this peer bring a row attributed to `source` into EXISTENCE?
@@ -381,31 +402,67 @@ fn serve<S: Read + Write>(
         } else {
             floor_for(source, peer_marks)
         };
+        // The cursor is a PAIR: clock and origin id. On the clock alone a page
+        // that ended inside a millisecond dropped the rest of it for good, and
+        // the only defence was a 20,000-row re-fetch in one statement — which
+        // missed the common case AND let a peer freeze the history UI for most
+        // of a second by stamping enough rows the same.
+        // Strictly after `after` on the first page: the peer already has that
+        // millisecond. Later pages continue on the (clock, origin) pair.
+        let mut after_origin = echokey_core::history::ORIGIN_CEILING.to_string();
         let mut served = 0usize;
         let mut truncated_here = false;
         for _ in 0..MAX_BATCHES {
             if abort() {
                 return Err(ReplicateError::Aborted);
             }
-            let page = fetch_page(store, source, after)?;
+            let mut page = store
+                .lock()
+                .items_from(source, after, &after_origin, PAGE)
+                .map_err(|e| ReplicateError::Store(e.to_string()))?;
             if page.is_empty() {
                 break;
             }
-            let last = page.last().map(|r| r.updated_at).unwrap_or(after);
+            // This is the last batch we are allowed to send, and the peer will
+            // record the highest clock it sees. Stopping mid-millisecond would
+            // put its cursor inside one, and the rest of that millisecond is
+            // then strictly below it forever. Trim back to a boundary.
+            let full = page.len() >= PAGE;
+            let final_batch = served + 1 >= MAX_BATCHES && full;
+            if final_batch {
+                // We are stopping with rows still to send, so the caller owes
+                // this peer a resume. Recorded before the trim below, which
+                // makes the page short and would otherwise read as "finished".
+                stats.truncated = true;
+                truncated_here = true;
+            }
+            if final_batch {
+                let tail = page.last().expect("page is not empty").updated_at;
+                let keep = page.iter().filter(|r| r.updated_at < tail).count();
+                if keep > 0 {
+                    page.truncate(keep);
+                } else {
+                    tracing::error!(
+                        "sync: more than {} rows share one millisecond for {source}; \
+                         the rest of it cannot be paged",
+                        MAX_BATCHES * PAGE
+                    );
+                }
+            }
+            let last = page.last().expect("page is not empty");
+            let (last_clock, last_origin) = (last.updated_at, last.origin_id.clone());
             let out: Vec<SyncItem> = page
                 .iter()
                 .filter(|r| kinds.allows(&r.kind))
                 .filter_map(to_wire)
                 .collect();
-            let more = page.len() >= PAGE;
-            // Chunked on the way out. fetch_page can legitimately return far
-            // more than PAGE when it widens past a saturated millisecond, and
-            // the wire refuses any batch over MAX_BATCH_LEN — sending it whole
-            // aborted the entire exchange, deterministically, every time. That
-            // is the same class of bug as PAGE-vs-MAX_BATCH_LEN, reintroduced
-            // one function along, so the send path now enforces it itself.
+            let more = full;
             if !out.is_empty() {
                 stats.sent_items += out.len();
+                // One page is at most PAGE rows and PAGE == MAX_BATCH_LEN, so
+                // this is a single message — but the chunking stays, because
+                // the wire refuses an oversized batch and getting that wrong
+                // aborted every exchange, deterministically.
                 let chunks: Vec<_> = out.chunks(PAGE).map(|c| c.to_vec()).collect();
                 let last_ix = chunks.len() - 1;
                 for (ix, chunk) in chunks.into_iter().enumerate() {
@@ -413,17 +470,14 @@ fn serve<S: Read + Write>(
                     session.send(&SyncMessage::Items { items: chunk, more: more_to_come })?;
                 }
             }
-            // `last == after` means the cursor cannot advance: every row in a
-            // full page shared one millisecond even after widening. Without
-            // this the identical page is re-sent up to MAX_BATCHES times.
-            if !more || last == after {
+            if !more {
                 break;
             }
-            after = last;
+            after = last_clock;
+            after_origin = last_origin;
             served += 1;
-            if served >= MAX_BATCHES {
-                stats.truncated = true;
-                truncated_here = true;
+            if final_batch {
+                break;
             }
         }
 
@@ -443,6 +497,7 @@ fn serve<S: Read + Write>(
         } else {
             floor_for(source, peer_marks)
         };
+        let mut after_origin = echokey_core::history::ORIGIN_CEILING.to_string();
         let mut tomb_served = 0usize;
         for _ in 0..MAX_BATCHES {
             // The abort check belongs here too. Without it a device the user
@@ -453,12 +508,13 @@ fn serve<S: Read + Write>(
             }
             let page = store
                 .lock()
-                .tombstones_since(source, after, PAGE)
+                .tombstones_from(source, after, &after_origin, PAGE)
                 .map_err(|e| ReplicateError::Store(e.to_string()))?;
             if page.is_empty() {
                 break;
             }
-            let last = page.last().map(|t| t.deleted_at).unwrap_or(after);
+            let last = page.last().expect("page is not empty");
+            let (last_clock, last_origin) = (last.deleted_at, last.origin_id.clone());
             let more = page.len() >= PAGE;
             stats.sent_tombstones += page.len();
             let entries: Vec<Tombstone> = page
@@ -480,10 +536,11 @@ fn serve<S: Read + Write>(
                     session.send(&SyncMessage::Tombstones { entries: chunk, more: more_to_come })?;
                 }
             }
-            if !more || last == after {
+            if !more {
                 break;
             }
-            after = last;
+            after = last_clock;
+            after_origin = last_origin;
             tomb_served += 1;
             if tomb_served >= MAX_BATCHES {
                 // Tombstones count towards truncation too. Without this a
@@ -534,11 +591,22 @@ fn drain<S: Read + Write>(
                     // A clock outside the acceptable range is deliberately
                     // excluded: recording that would park this peer's cursor in
                     // the future and hide everything it legitimately writes.
-                    let clock = it.updated_at;
-                    if clock > 0 && clock <= now_ms() + MAX_SKEW_MS {
+                    // Recorded for whatever source the peer names, including
+                    // one we go on to refuse: without it the peer re-offers the
+                    // same refused rows on every exchange forever. The table is
+                    // bounded per peer inside `note_received`, which is what
+                    // stops invented ids growing it without limit.
+                    //
+                    // Still taken BEFORE the policy checks below, which is
+                    // safe because receipts are per (peer, source): what this
+                    // peer has offered us cannot touch the cursor we keep for
+                    // the device that actually wrote the row. Without it, every
+                    // row we refuse for a reversible reason is re-sent on every
+                    // exchange for the life of the pairing.
+                    {
                         store
                             .lock()
-                            .note_received(attribution.peer_id, it.source_device.as_str(), clock)
+                            .note_received(attribution.peer_id, it.source_device.as_str(), it.updated_at)
                             .map_err(|e| ReplicateError::Store(e.to_string()))?;
                     }
                     if !attribution.accepts(it.source_device.as_str()) {
@@ -611,11 +679,10 @@ fn drain<S: Read + Write>(
             }
             SyncMessage::Tombstones { entries, .. } => {
                 for t in &entries {
-                    let clock = t.deleted_at;
-                    if clock > 0 && clock <= now_ms() + MAX_SKEW_MS {
+                    {
                         store
                             .lock()
-                            .note_received(attribution.peer_id, t.source_device.as_str(), clock)
+                            .note_received(attribution.peer_id, t.source_device.as_str(), t.deleted_at)
                             .map_err(|e| ReplicateError::Store(e.to_string()))?;
                     }
                     if !attribution.accepts(t.source_device.as_str()) {
@@ -637,17 +704,26 @@ fn drain<S: Read + Write>(
                         }
                     }
                     // The kind gate applies to deletes too, on the kind we
-                    // hold. Without it a peer could erase clipboard history —
-                    // including rows the user had excluded from sync entirely —
-                    // because a tombstone carries no kind of its own to check.
-                    if let Some(local) = store
-                        .lock()
-                        .kind_of(t.source_device.as_str(), &t.origin_id)
-                        .map_err(|e| ReplicateError::Store(e.to_string()))?
-                    {
-                        if !kinds.allows(&local) {
-                            stats.refused += 1;
-                            continue;
+                    // hold — but ONLY to a relayed delete. Without it a peer
+                    // could erase clipboard history the user had excluded from
+                    // sync entirely, because a tombstone carries no kind of its
+                    // own to check.
+                    //
+                    // The authoring device is exempt, and has to be: it wrote
+                    // the row, it deleted it, and switching a kind off must not
+                    // turn this machine into a place deletes go to die. That
+                    // would leave a password we were asked to forget sitting
+                    // here for as long as the toggle stayed off.
+                    if !attribution.may_create(t.source_device.as_str()) {
+                        if let Some(local) = store
+                            .lock()
+                            .kind_of(t.source_device.as_str(), &t.origin_id)
+                            .map_err(|e| ReplicateError::Store(e.to_string()))?
+                        {
+                            if !kinds.allows(&local) {
+                                stats.refused += 1;
+                                continue;
+                            }
                         }
                     }
                     // Receipt already taken above, range checked. See the
@@ -700,7 +776,17 @@ fn send_watermarks<S: Read + Write>(
         session.send(&SyncMessage::Watermarks { entries: Vec::new(), more: false })?;
         return Ok(());
     }
-    let chunks: Vec<_> = marks.chunks(PAGE).map(|c| c.to_vec()).collect();
+    let mut chunks: Vec<_> = marks.chunks(PAGE).map(|c| c.to_vec()).collect();
+    if chunks.len() > MAX_WATERMARK_CHUNKS {
+        // Truncating loses precision, not correctness: a mark we fail to
+        // advertise means the peer offers rows we already have, which is
+        // idempotent. Overrunning the reader would break the exchange itself.
+        tracing::warn!(
+            "sync: {} watermark chunks exceeds the {MAX_WATERMARK_CHUNKS} the peer will read; truncating",
+            chunks.len()
+        );
+        chunks.truncate(MAX_WATERMARK_CHUNKS);
+    }
     let last = chunks.len() - 1;
     for (ix, chunk) in chunks.into_iter().enumerate() {
         session.send(&SyncMessage::Watermarks { entries: chunk, more: ix < last })?;
@@ -716,8 +802,11 @@ fn recv_watermarks<S: Read + Write>(
     session: &mut Session<S>,
 ) -> Result<HashMap<String, i64>, ReplicateError> {
     let mut out = HashMap::new();
-    // Bounded so a peer cannot hold us here forever with more:true.
-    for _ in 0..MAX_BATCHES {
+    // The bound has to be at least what `send_watermarks` can legitimately
+    // produce, or an honest peer with many sources desynchronises the stream
+    // and every exchange with it fails from then on — permanently, and across
+    // restarts, because the marks are durable.
+    for _ in 0..MAX_WATERMARK_CHUNKS {
         match session.recv()? {
             SyncMessage::Watermarks { entries, more } => {
                 for w in entries {
@@ -740,40 +829,6 @@ fn recv_watermarks<S: Read + Write>(
     Ok(out)
 }
 
-
-/// One page, re-fetched wider if the whole page shares a single millisecond.
-///
-/// `items_since` pages on `updated_at`, so a page entirely inside one
-/// millisecond would advance the cursor past rows never sent. Rare, but it is
-/// silent data loss, and a burst of clipboard captures is exactly how it would
-/// happen.
-fn fetch_page(
-    store: &Arc<Mutex<Store>>,
-    source: &str,
-    after: i64,
-) -> Result<Vec<RemoteItem>, ReplicateError> {
-    let page = store
-        .lock()
-        .items_since(source, after, PAGE)
-        .map_err(|e| ReplicateError::Store(e.to_string()))?;
-    let saturated = page.len() >= PAGE
-        && page.first().map(|r| r.updated_at) == page.last().map(|r| r.updated_at);
-    if !saturated {
-        return Ok(page);
-    }
-    tracing::warn!(
-        "sync: {} rows share one millisecond for {source}; widening the page",
-        page.len()
-    );
-    let wide = store
-        .lock()
-        .items_since(source, after, WIDE_PAGE)
-        .map_err(|e| ReplicateError::Store(e.to_string()))?;
-    if wide.len() >= WIDE_PAGE {
-        tracing::error!("sync: more than {WIDE_PAGE} rows in one millisecond for {source}; some may not replicate");
-    }
-    Ok(wide)
-}
 
 fn apply_item(
     store: &Arc<Mutex<Store>>,
@@ -1177,24 +1232,33 @@ mod tests {
     #[test]
     fn many_sources_survive_the_watermark_chunking() {
         // Chunked watermarks used to be sent as several messages and read as
-        // one, so the leftovers surfaced where rows were expected and ended
-        // the exchange. Anything past MAX_BATCH_LEN sources triggered it.
+        // one, so the leftovers surfaced where rows were expected and ended the
+        // exchange.
+        //
+        // The marks are seeded through SQL rather than `note_received`, which
+        // caps the table per peer at well under one batch — that cap is the
+        // right behaviour and it also means the chunking path is unreachable
+        // through the ordinary route. Seeding underneath it is what keeps this
+        // a real test of the wire rather than a vacuous one.
         let a_store = store_for(A);
         let b_store = store_for(B);
         {
             let g = a_store.lock();
             for i in 0..(PAGE + 40) {
-                // Distinct, well-formed device ids so they survive DeviceId::parse.
                 let src = format!("33333333-3333-4333-8333-{:012x}", i);
-                g.note_received(&src, &src, 1_000 + i as i64).unwrap();
+                g.note_received_uncapped_for_test(B, &src, 1_000 + i as i64).unwrap();
             }
         }
+        assert!(
+            a_store.lock().watermarks(B).unwrap().len() > PAGE,
+            "precondition: more marks than one batch can carry"
+        );
         seed(&b_store, B, 3, 32);
 
         let (a_stats, _) = run_pair(a_store.clone(), b_store.clone());
         assert_eq!(
             a_stats.applied_items, 3,
-            "the exchange must still complete with more sources than one batch holds"
+            "the exchange must complete with more marks than one batch holds"
         );
     }
 
@@ -2880,6 +2944,1130 @@ mod adversarial_r3_lifecycle {
         assert!(
             for_b.map(|c| c <= now_ms() + MAX_SKEW_MS).unwrap_or(true),
             "a REFUSED row parked our cursor for the peer at {for_b:?}; every row that device legitimately writes below that clock is hidden from us permanently"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW — ROUND 4. Demonstrations of live findings. Not fixes.
+// Every socket carries BOTH a read and a write timeout, and every loop is
+// hard-bounded, so nothing here can hang the suite.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round4 {
+    use super::*;
+    /// One row from `source`, stamped `clock`.
+    fn item_at(source: &str, origin: &str, clock: i64) -> RemoteItem {
+        RemoteItem {
+            source_machine: source.into(),
+            origin_id: origin.into(),
+            kind: "transcription".into(),
+            text: "x".into(),
+            created_at: clock,
+            updated_at: clock,
+            pinned: false,
+        }
+    }
+
+    use echokey_core::history::{RemoteItem, Store};
+    use echokey_sync::{PairedKey, Session};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    const A: &str = "11111111-1111-4111-8111-111111111111";
+    const B: &str = "22222222-2222-4222-8222-222222222222";
+    const C: &str = "33333333-3333-4333-8333-333333333333";
+
+    fn socket_pair() -> (TcpStream, TcpStream) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let c = TcpStream::connect(addr).unwrap();
+        let (srv, _) = l.accept().unwrap();
+        for sock in [&c, &srv] {
+            sock.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+            sock.set_write_timeout(Some(Duration::from_secs(15))).unwrap();
+        }
+        (c, srv)
+    }
+
+    fn store_for(me: &str) -> Arc<Mutex<Store>> {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_device_id(me);
+        Arc::new(Mutex::new(s))
+    }
+
+    fn both() -> Kinds {
+        Kinds { dictations: true, clipboard: true }
+    }
+
+    /// Put a row into `store` attributed to `source`, at an exact clock.
+    fn seed_at(store: &Arc<Mutex<Store>>, source: &str, origin: &str, clock: i64) {
+        store
+            .lock()
+            .apply_remote_item(
+                C,
+                &RemoteItem {
+                    source_machine: source.into(),
+                    origin_id: origin.into(),
+                    kind: "transcription".into(),
+                    text: format!("row-{origin}"),
+                    created_at: clock,
+                    updated_at: clock,
+                    pinned: false,
+                },
+            )
+            .unwrap();
+    }
+
+    fn run_pair(a_store: Arc<Mutex<Store>>, b_store: Arc<Mutex<Store>>) -> (RoundStats, RoundStats) {
+        let (c, srv) = socket_pair();
+        let key = PairedKey::from_bytes([7u8; 32]);
+        let k2 = key.clone();
+        let bt = std::thread::spawn(move || {
+            let mut session = Session::accept(srv, &k2).unwrap();
+            let known = vec![A.to_string(), B.to_string(), C.to_string()];
+            let attr = Attribution { peer_id: A, local_id: B, known: &known };
+            exchange(
+                &mut session,
+                &b_store,
+                (B, "Deck B"),
+                both(),
+                Retention { oldest_allowed: None },
+                &attr,
+                Turn::Second,
+                false,
+                0,
+                &|| false,
+            )
+        });
+        let mut session = Session::initiate(c, &key).unwrap();
+        let known = vec![A.to_string(), B.to_string(), C.to_string()];
+        let attr = Attribution { peer_id: B, local_id: A, known: &known };
+        let a_stats = exchange(
+            &mut session,
+            &a_store,
+            (A, "Deck A"),
+            both(),
+            Retention { oldest_allowed: None },
+            &attr,
+            Turn::First,
+            false,
+            0,
+            &|| false,
+        );
+        let b_stats = bt.join().expect("accepting side must not panic");
+        (a_stats.expect("dialling side"), b_stats.expect("accepting side"))
+    }
+
+    // -----------------------------------------------------------------
+    // R4-1. `fetch_page` only widens when the WHOLE page shares one
+    // millisecond. A page that merely ENDS inside a saturated millisecond is
+    // not detected: the cursor advances to that millisecond and every
+    // remaining row stamped with it is skipped, permanently.
+    // -----------------------------------------------------------------
+    #[test]
+    fn r4_a_page_that_ends_inside_one_millisecond_loses_the_rest_forever() {
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+
+        let t = now_ms() - 5_000_000;
+        // One row a millisecond earlier, so the page is NOT uniform and the
+        // widening never fires...
+        seed_at(&b_store, B, "aaa-first", t);
+        // ...then a burst that does not fit in a single page.
+        let burst = 300usize;
+        for i in 0..burst {
+            seed_at(&b_store, B, &format!("burst-{i:04}"), t + 1);
+        }
+        let total = (burst + 1) as i64;
+        assert_eq!(b_store.lock().count().unwrap(), total);
+
+        // Bounded: five exchanges is far more than convergence should need.
+        for _ in 0..5 {
+            run_pair(a_store.clone(), b_store.clone());
+        }
+
+        assert_eq!(
+            a_store.lock().count().unwrap(),
+            total,
+            "rows stamped with the page-boundary millisecond were never delivered"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // R4-2. A peer whose clock is fast but WITHIN the 24 h tolerance is
+    // accepted, and its skewed clock is written straight into our cursor for
+    // it. Once its clock is corrected, everything it writes carries a smaller
+    // clock than the cursor and is never offered again — permanently, with no
+    // malice and no repair path.
+    // -----------------------------------------------------------------
+    #[test]
+    fn a_badly_skewed_peer_is_refused_and_recovers_the_moment_its_clock_is_fixed() {
+        // The cursor we keep for a peer IS that peer's clock, so anything we
+        // accept into it we are stuck with. Accepting half a day of skew put
+        // the cursor half a day ahead, and once the clock was corrected every
+        // row that peer produced fell below it and was never requested again —
+        // silently, and for as long as it took real time to catch up.
+        //
+        // So the window is small and anything outside it is refused with a
+        // warning naming the device. The rows written while the machine was
+        // badly wrong are lost, which is a complaint the user can act on; rows
+        // written after it is fixed are not, which is what matters.
+        let a_store = store_for(A);
+        let peer = B;
+
+        let far = now_ms() + 12 * 60 * 60 * 1000;
+        for i in 0..3 {
+            let out = a_store
+                .lock()
+                .apply_remote_item(peer, &item_at(peer, &format!("skew-{i}"), far + i))
+                .unwrap();
+            assert_eq!(
+                out,
+                echokey_core::history::ApplyOutcome::Ignored,
+                "a badly skewed row must be refused, not written into the cursor"
+            );
+        }
+        assert!(
+            a_store.lock().watermarks(peer).unwrap().is_empty(),
+            "a refused row must leave the cursor untouched"
+        );
+
+        // Clock corrected. Everything from here on lands.
+        for i in 0..4 {
+            let out = a_store
+                .lock()
+                .apply_remote_item(peer, &item_at(peer, &format!("ok-{i}"), now_ms() + i))
+                .unwrap();
+            assert_eq!(out, echokey_core::history::ApplyOutcome::Inserted);
+        }
+        assert_eq!(a_store.lock().count().unwrap(), 4);
+    }
+
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW — ROUND 4, three-device mesh. Demonstrations, not fixes.
+// Sockets carry read AND write timeouts; every loop is hard-bounded.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round4_mesh {
+    use super::*;
+    /// One row from `source`, stamped `clock`.
+    fn item_at(source: &str, origin: &str, clock: i64) -> RemoteItem {
+        RemoteItem {
+            source_machine: source.into(),
+            origin_id: origin.into(),
+            kind: "transcription".into(),
+            text: "x".into(),
+            created_at: clock,
+            updated_at: clock,
+            pinned: false,
+        }
+    }
+
+    use echokey_core::history::{RemoteItem, Store};
+    use echokey_sync::{PairedKey, Session};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    const A: &str = "11111111-1111-4111-8111-111111111111";
+    const B: &str = "22222222-2222-4222-8222-222222222222";
+    const C: &str = "33333333-3333-4333-8333-333333333333";
+
+    fn socket_pair() -> (TcpStream, TcpStream) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let c = TcpStream::connect(addr).unwrap();
+        let (srv, _) = l.accept().unwrap();
+        for sock in [&c, &srv] {
+            sock.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+            sock.set_write_timeout(Some(Duration::from_secs(15))).unwrap();
+        }
+        (c, srv)
+    }
+
+    fn store_for(me: &str) -> Arc<Mutex<Store>> {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_device_id(me);
+        Arc::new(Mutex::new(s))
+    }
+
+    fn both() -> Kinds {
+        Kinds { dictations: true, clipboard: true }
+    }
+
+    /// One exchange between any two of the three devices. `x` dials.
+    fn sync2(
+        x_store: &Arc<Mutex<Store>>,
+        x_id: &'static str,
+        y_store: &Arc<Mutex<Store>>,
+        y_id: &'static str,
+    ) -> (RoundStats, RoundStats) {
+        let (c, srv) = socket_pair();
+        let key = PairedKey::from_bytes([7u8; 32]);
+        let k2 = key.clone();
+        let ys = y_store.clone();
+        let yt = std::thread::spawn(move || {
+            let mut s = Session::accept(srv, &k2).unwrap();
+            let known = vec![A.to_string(), B.to_string(), C.to_string()];
+            let attr = Attribution { peer_id: x_id, local_id: y_id, known: &known };
+            exchange(
+                &mut s,
+                &ys,
+                (y_id, "Y"),
+                both(),
+                Retention { oldest_allowed: None },
+                &attr,
+                Turn::Second,
+                false,
+                0,
+                &|| false,
+            )
+        });
+        let mut s = Session::initiate(c, &key).unwrap();
+        let known = vec![A.to_string(), B.to_string(), C.to_string()];
+        let attr = Attribution { peer_id: y_id, local_id: x_id, known: &known };
+        let xs = exchange(
+            &mut s,
+            x_store,
+            (x_id, "X"),
+            both(),
+            Retention { oldest_allowed: None },
+            &attr,
+            Turn::First,
+            false,
+            0,
+            &|| false,
+        );
+        let ys = yt.join().expect("accepting side must not panic");
+        (xs.expect("dialling side"), ys.expect("accepting side"))
+    }
+
+    /// Everything a store holds, as a comparable snapshot.
+    fn snapshot(store: &Arc<Mutex<Store>>) -> Vec<(String, String, String, String, i64, bool)> {
+        let g = store.lock();
+        let mut out = Vec::new();
+        for src in g.known_sources().unwrap() {
+            for r in g.items_since(&src, 0, 100_000).unwrap() {
+                out.push((
+                    r.source_machine.clone(),
+                    r.origin_id.clone(),
+                    r.kind.clone(),
+                    r.text.clone(),
+                    r.updated_at,
+                    r.pinned,
+                ));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn own_row(store: &Arc<Mutex<Store>>, me: &str, origin: &str, text: &str, clock: i64) {
+        store
+            .lock()
+            .apply_remote_item(
+                "44444444-4444-4444-8444-444444444444",
+                &RemoteItem {
+                    source_machine: me.into(),
+                    origin_id: origin.into(),
+                    kind: "transcription".into(),
+                    text: text.into(),
+                    created_at: clock,
+                    updated_at: clock,
+                    pinned: false,
+                },
+            )
+            .unwrap();
+    }
+
+
+    /// The local rowid of the row whose text is `text`.
+    fn id_of(store: &Arc<Mutex<Store>>, text: &str) -> i64 {
+        store
+            .lock()
+            .recent(None, 1000)
+            .unwrap()
+            .into_iter()
+            .find(|i| i.text == text)
+            .expect("the row must be held")
+            .id
+    }
+
+    /// Run the full mesh until it goes quiet, or give up after `rounds`.
+    /// Returns how many rounds it took, or None if it never settled.
+    fn settle(
+        a: &Arc<Mutex<Store>>,
+        b: &Arc<Mutex<Store>>,
+        c: &Arc<Mutex<Store>>,
+        rounds: usize,
+    ) -> Option<usize> {
+        for r in 1..=rounds {
+            let (s1, s2) = sync2(a, A, b, B);
+            let (s3, s4) = sync2(b, B, c, C);
+            let (s5, s6) = sync2(a, A, c, C);
+            let moved = [s1, s2, s3, s4, s5, s6]
+                .iter()
+                .any(|s| s.applied_items > 0 || s.applied_tombstones > 0);
+            if !moved {
+                return Some(r);
+            }
+        }
+        None
+    }
+
+    /// R4-MESH-3. The doc on `apply_remote_tombstone` promises that "an edit
+    /// that happened after the delete survives it". It does not: the tombstone
+    /// is absorbing and kills a strictly newer row.
+    #[test]
+    fn a_delete_is_absorbing_even_against_a_newer_edit() {
+        // Deliberate, and the doc now says so. Last-writer-wins would let an
+        // edit stamped after a delete resurrect the row, which is defensible
+        // for a shared document and wrong here: one person, several machines,
+        // no undelete anywhere in the product. The realistic sequence is a
+        // password cleared on the laptop while the desktop, not yet told, still
+        // shows it and gets it pinned.
+        let a_store = store_for(A);
+        let peer = B;
+        let t = now_ms();
+
+        a_store.lock().apply_remote_item(peer, &item_at(peer, "row", t)).unwrap();
+        a_store
+            .lock()
+            .apply_remote_tombstone(
+                peer,
+                &RemoteTombstone {
+                    source_machine: peer.into(),
+                    origin_id: "row".into(),
+                    deleted_at: t + 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(a_store.lock().count().unwrap(), 0);
+
+        // An edit stamped after the delete does NOT bring it back.
+        let out = a_store
+            .lock()
+            .apply_remote_item(peer, &item_at(peer, "row", t + 100))
+            .unwrap();
+        assert_eq!(out, echokey_core::history::ApplyOutcome::Ignored);
+        assert_eq!(a_store.lock().count().unwrap(), 0, "a deleted row must stay deleted");
+    }
+
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW — ROUND 4, part two. Demonstrations, not fixes.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round4_more {
+    use super::*;
+    use echokey_core::history::{RemoteItem, RemoteTombstone, Store, MAX_TOMBSTONES_PER_SOURCE};
+    use echokey_sync::{PairedKey, Session};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    const A: &str = "11111111-1111-4111-8111-111111111111";
+    const B: &str = "22222222-2222-4222-8222-222222222222";
+    const C: &str = "33333333-3333-4333-8333-333333333333";
+
+    fn socket_pair() -> (TcpStream, TcpStream) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let c = TcpStream::connect(addr).unwrap();
+        let (srv, _) = l.accept().unwrap();
+        for sock in [&c, &srv] {
+            sock.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+            sock.set_write_timeout(Some(Duration::from_secs(20))).unwrap();
+        }
+        (c, srv)
+    }
+
+    fn store_for(me: &str) -> Arc<Mutex<Store>> {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_device_id(me);
+        Arc::new(Mutex::new(s))
+    }
+
+    fn both() -> Kinds {
+        Kinds { dictations: true, clipboard: true }
+    }
+
+    fn sync2(
+        x_store: &Arc<Mutex<Store>>,
+        x_id: &'static str,
+        y_store: &Arc<Mutex<Store>>,
+        y_id: &'static str,
+    ) -> (RoundStats, RoundStats) {
+        let (c, srv) = socket_pair();
+        let key = PairedKey::from_bytes([7u8; 32]);
+        let k2 = key.clone();
+        let ys = y_store.clone();
+        let yt = std::thread::spawn(move || {
+            let known = vec![A.to_string(), B.to_string(), C.to_string()];
+            let mut s = Session::accept(srv, &k2).unwrap();
+            let attr = Attribution { peer_id: x_id, local_id: y_id, known: &known };
+            exchange(
+                &mut s,
+                &ys,
+                (y_id, "Y"),
+                both(),
+                Retention { oldest_allowed: None },
+                &attr,
+                Turn::Second,
+                false,
+                0,
+                &|| false,
+            )
+        });
+        let mut s = Session::initiate(c, &key).unwrap();
+        let known = vec![A.to_string(), B.to_string(), C.to_string()];
+        let attr = Attribution { peer_id: y_id, local_id: x_id, known: &known };
+        let xs = exchange(
+            &mut s,
+            x_store,
+            (x_id, "X"),
+            both(),
+            Retention { oldest_allowed: None },
+            &attr,
+            Turn::First,
+            false,
+            0,
+            &|| false,
+        );
+        let ys = yt.join().expect("accepting side must not panic");
+        (xs.expect("dialling side"), ys.expect("accepting side"))
+    }
+
+    // -----------------------------------------------------------------
+    // R4-3. The per-source tombstone cap drops the OLDEST deletes. A device
+    // that has not yet heard about one of those deletes never will: nothing
+    // re-derives a tombstone that has been evicted, and the row it killed
+    // lives on that device forever.
+    // -----------------------------------------------------------------
+    #[test]
+    fn tombstone_eviction_is_bounded_and_takes_the_oldest_first() {
+        // The honest trade, stated where it can be checked.
+        //
+        // Tombstones are never pruned by age, because dropping one can let a
+        // deleted row walk back in. But a peer may create them for its own rows
+        // with a free-form origin id, so "never pruned" alone hands a paired
+        // device unbounded control over our disk. The table is therefore capped
+        // per source and evicts the OLDEST first.
+        //
+        // Residual, accepted: a device that has been offline long enough for a
+        // delete to be evicted will not learn about it. That needs one source
+        // to exceed the cap AND a peer absent across the whole overflow, and
+        // the alternative — an unbounded table a peer controls — is worse.
+        let s = store_for(A);
+        let peer = B;
+        let cap = echokey_core::history::MAX_TOMBSTONES_PER_SOURCE;
+        let base = now_ms() - 1_000_000;
+
+        {
+            let g = s.lock();
+            for i in 0..(cap + 200) {
+                g.apply_remote_tombstone(
+                    peer,
+                    &RemoteTombstone {
+                        source_machine: peer.into(),
+                        origin_id: format!("t-{i:07}"),
+                        deleted_at: base + i,
+                    },
+                )
+                .unwrap();
+            }
+        }
+
+        let held = s.lock().tombstone_count(peer).unwrap();
+        assert!(held <= cap, "{held} tombstones held, past the {cap} cap");
+
+        // The newest delete survives; the oldest is the one that went.
+        let newest = s.lock().tombstones_since(peer, base + cap + 150, 10).unwrap();
+        assert!(!newest.is_empty(), "the most recent deletes must be the ones kept");
+    }
+
+
+    // -----------------------------------------------------------------
+    // R4-4. Origin ids are the authoring device's rowids, and the device id
+    // lives in settings.json while the rowids live in history.db. Lose the
+    // database (corruption, a manual delete, a restore) and the SAME identity
+    // is minted again for completely different content. A peer's absorbing
+    // tombstone then swallows the new row in perpetuity, silently.
+    // -----------------------------------------------------------------
+    #[test]
+    fn r4_a_rebuilt_history_database_can_never_sync_again() {
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+
+        // A writes a row and syncs it. Its origin id is its rowid: "1".
+        let first = a_store.lock().insert_clipboard("the old row", None, None).unwrap();
+        assert_eq!(first, 1);
+        sync2(&a_store, A, &b_store, B);
+        assert_eq!(b_store.lock().count().unwrap(), 1);
+
+        // A deletes it; the delete reaches B as a tombstone for (A, "1").
+        a_store.lock().delete_item_local(first).unwrap();
+        for _ in 0..3 {
+            sync2(&a_store, A, &b_store, B);
+        }
+        assert_eq!(b_store.lock().count().unwrap(), 0, "precondition: the delete landed");
+
+        // A's history.db is lost. settings.json — and so the device id —
+        // survives, which is exactly how the app is laid out.
+        let a_store = store_for(A);
+        let again = a_store.lock().insert_clipboard("a brand new dictation", None, None).unwrap();
+        assert_eq!(again, 1, "rowids restart, so the identity is minted again");
+
+        for _ in 0..4 {
+            sync2(&a_store, A, &b_store, B);
+        }
+        assert_eq!(
+            b_store.lock().count().unwrap(),
+            1,
+            "a genuinely new dictation is swallowed by the old tombstone, forever"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW (round 4) — demonstrations of live findings. NOT fixes.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round4_lifecycle {
+    use super::*;
+    use echokey_core::history::{RemoteItem, Store};
+    use echokey_sync::{DeviceId, ItemKind, PairedKey, Session, SyncItem, SyncMessage};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    const A: &str = "11111111-1111-4111-8111-111111111111"; // us
+    const B: &str = "22222222-2222-4222-8222-222222222222"; // the paired peer
+
+    fn socket_pair() -> (TcpStream, TcpStream) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let c = TcpStream::connect(addr).unwrap();
+        let (srv, _) = l.accept().unwrap();
+        // Read AND write timeouts on both ends: a protocol desync parks BOTH
+        // sides in write(), so a read timeout alone lets the suite hang.
+        for sock in [&c, &srv] {
+            sock.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            sock.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+        }
+        (c, srv)
+    }
+
+    fn store_for(me: &str) -> Arc<Mutex<Store>> {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_device_id(me);
+        Arc::new(Mutex::new(s))
+    }
+
+    /// A well-formed device id we have never heard of, one per index.
+    fn invented(i: usize) -> String {
+        format!("44444444-4444-4444-8444-{:012x}", i)
+    }
+
+    /// FINDING (round 4): `drain` writes the receipt BEFORE the attribution
+    /// check (replicate.rs:534-543), so `source_device` — a string the PEER
+    /// chooses — becomes a row in `source_marks` whatever it says. Nothing caps
+    /// how many distinct sources one peer may name, so a paired device decides
+    /// how large that table gets: 256 per wire message, and `drain` reads up to
+    /// `MAX_BATCHES * 4` messages per exchange.
+    ///
+    /// This drives the real `drain` against a peer that invents ids.
+    #[test]
+    fn r4_a_paired_peer_mints_unbounded_receipts_from_invented_source_ids() {
+        let a_store = store_for(A);
+        let (c, srv) = socket_pair();
+        let key = PairedKey::from_bytes([7u8; 32]);
+        let k2 = key.clone();
+
+        // The peer: one legal batch, every item attributed to a different
+        // device that does not exist. Each is a valid DeviceId, so the wire
+        // validation passes.
+        let peer = std::thread::spawn(move || {
+            let mut s = Session::accept(srv, &k2).unwrap();
+            let items: Vec<SyncItem> = (0..echokey_sync::MAX_BATCH_LEN)
+                .map(|i| SyncItem {
+                    source_device: DeviceId::parse(&invented(i)).unwrap(),
+                    origin_id: format!("row-{i}"),
+                    kind: ItemKind::Transcription,
+                    text: "x".into(),
+                    created_at: 1_700_000_000_000,
+                    updated_at: 1_700_000_000_000,
+                    pinned: false,
+                    clock: 1_700_000_000_000,
+                })
+                .collect();
+            s.send(&SyncMessage::Items { items, more: true }).unwrap();
+            // End of stream, so drain returns instead of blocking.
+            s.send(&SyncMessage::Items { items: Vec::new(), more: false }).unwrap();
+        });
+
+        let mut session = Session::initiate(c, &key).unwrap();
+        let known = vec![A.to_string(), B.to_string()];
+        let attr = Attribution { peer_id: B, local_id: A, known: &known };
+        let mut stats = RoundStats::default();
+        drain(
+            &mut session,
+            &a_store,
+            Kinds { dictations: true, clipboard: true },
+            Retention { oldest_allowed: None },
+            &attr,
+            &|| false,
+            &mut stats,
+        )
+        .unwrap();
+        peer.join().unwrap();
+
+        // Every row was refused, exactly as designed...
+        assert_eq!(stats.refused, echokey_sync::MAX_BATCH_LEN, "{stats:?}");
+        assert_eq!(a_store.lock().count().unwrap(), 0, "and nothing was stored");
+        // ...and every one still left a permanent row in source_marks.
+        let marks = a_store.lock().watermarks(B).unwrap();
+        assert!(
+            marks.len() < echokey_sync::MAX_BATCH_LEN,
+            "one batch of invented source ids created {} receipts. The receipt is \
+             written before Attribution::accepts is consulted, so a paired peer \
+             decides how big source_marks gets — 256 per message, up to \
+             MAX_BATCHES*4 messages per exchange, forever.",
+            marks.len()
+        );
+    }
+
+    /// FINDING (round 4): once one peer has more than `MAX_BATCHES * PAGE`
+    /// receipts, every exchange with it loses data.
+    ///
+    /// `send_watermarks` chunks with NO ceiling, while `recv_watermarks` reads
+    /// at most `MAX_BATCHES` chunks. Past 64 * 256 = 16 384 sources the surplus
+    /// `Watermarks` messages arrive where rows are expected — which is the
+    /// exact defect `many_sources_survive_the_watermark_chunking` claims to
+    /// guard against.
+    ///
+    /// That guard is vacuous: it seeds `note_received(&src, &src, ..)`, i.e.
+    /// `peer_machine = src`, while the exchange asks for `watermarks(B)`. Not
+    /// one of its 296 marks is ever sent.
+    #[test]
+    fn receipts_for_one_peer_are_capped_so_the_exchange_cannot_be_broken() {
+        // `send_watermarks` chunked without a ceiling while `recv_watermarks`
+        // read at most MAX_BATCHES chunks, so a store holding more sources than
+        // that produced a stream the other side stopped reading mid-way — and
+        // every exchange with that peer failed from then on, durably.
+        //
+        // Two things stop it now: the table is capped per peer, and both halves
+        // of the watermark exchange agree on MAX_WATERMARK_CHUNKS.
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+
+        {
+            let g = a_store.lock();
+            for i in 0..(echokey_core::history::MAX_SOURCES_PER_PEER as usize + 500) {
+                let src = format!("33333333-3333-4333-8333-{:012x}", i);
+                g.note_received(B, &src, 1_000 + i as i64).unwrap();
+            }
+        }
+        let held = a_store.lock().watermarks(B).unwrap().len() as i64;
+        assert!(
+            held <= echokey_core::history::MAX_SOURCES_PER_PEER,
+            "one peer put {held} cursors in the table"
+        );
+
+        // And the marks we advertise still fit inside what a peer will read,
+        // which is the property that stopped the exchange dead.
+        let advertised = a_store.lock().watermarks(B).unwrap().len();
+        assert!(
+            advertised.div_ceil(PAGE) <= MAX_WATERMARK_CHUNKS,
+            "{advertised} marks need more chunks than the reader will accept"
+        );
+        let _ = &b_store;
+    }
+
+    /// The existing regression guard for watermark chunking never exercises it.
+    ///
+    /// `many_sources_survive_the_watermark_chunking` (replicate.rs:1178) seeds
+    /// `note_received(&src, &src, ..)` — i.e. `peer_machine = src` — and then
+    /// runs an exchange whose peer is B. `send_watermarks` asks for
+    /// `watermarks(B)`, which selects on `peer_machine = 'B'`, so not one of
+    /// those 296 marks is ever sent and the chunking path is never entered.
+    #[test]
+    fn the_watermark_chunking_test_really_exercises_the_chunked_path() {
+        // It did not: it seeded `note_received(src, src, ..)`, so every mark was
+        // filed under a peer that never took part in the exchange, and the
+        // exchange read `watermarks(B)` — which was empty. The >MAX_BATCH_LEN
+        // path was never entered, so the regression it guarded was unguarded.
+        let a_store = store_for(A);
+        {
+            let g = a_store.lock();
+            for i in 0..(PAGE + 40) {
+                let src = format!("33333333-3333-4333-8333-{:012x}", i);
+                g.note_received_uncapped_for_test(B, &src, 1_000 + i as i64).unwrap();
+            }
+        }
+        let marks = a_store.lock().watermarks(B).unwrap();
+        assert!(
+            marks.len() > PAGE,
+            "the marks have to be filed under the peer we actually talk to"
+        );
+    }
+}
+#[cfg(test)]
+mod adversarial_round4_kinds {
+    use super::*;
+    use echokey_core::history::Store;
+    use echokey_sync::{PairedKey, Session};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    const A: &str = "11111111-1111-4111-8111-111111111111";
+    const B: &str = "22222222-2222-4222-8222-222222222222";
+    const C: &str = "33333333-3333-4333-8333-333333333333";
+
+    fn socket_pair() -> (TcpStream, TcpStream) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let c = TcpStream::connect(addr).unwrap();
+        let (srv, _) = l.accept().unwrap();
+        for sock in [&c, &srv] {
+            sock.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+            sock.set_write_timeout(Some(Duration::from_secs(15))).unwrap();
+        }
+        (c, srv)
+    }
+
+    fn store_for(me: &str) -> Arc<Mutex<Store>> {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_device_id(me);
+        Arc::new(Mutex::new(s))
+    }
+
+    /// One exchange where each side may have a different set of kinds enabled.
+    fn sync2(
+        a_store: &Arc<Mutex<Store>>,
+        a_kinds: Kinds,
+        b_store: &Arc<Mutex<Store>>,
+        b_kinds: Kinds,
+    ) {
+        let (c, srv) = socket_pair();
+        let key = PairedKey::from_bytes([7u8; 32]);
+        let k2 = key.clone();
+        let bs = b_store.clone();
+        let bt = std::thread::spawn(move || {
+            let known = vec![A.to_string(), B.to_string(), C.to_string()];
+            let mut s = Session::accept(srv, &k2).unwrap();
+            let attr = Attribution { peer_id: A, local_id: B, known: &known };
+            exchange(
+                &mut s,
+                &bs,
+                (B, "B"),
+                b_kinds,
+                Retention { oldest_allowed: None },
+                &attr,
+                Turn::Second,
+                false,
+                0,
+                &|| false,
+            )
+        });
+        let mut s = Session::initiate(c, &key).unwrap();
+        let known = vec![A.to_string(), B.to_string(), C.to_string()];
+        let attr = Attribution { peer_id: B, local_id: A, known: &known };
+        let a = exchange(
+            &mut s,
+            a_store,
+            (A, "A"),
+            a_kinds,
+            Retention { oldest_allowed: None },
+            &attr,
+            Turn::First,
+            false,
+            0,
+            &|| false,
+        );
+        let b = bt.join().expect("accepting side must not panic");
+        a.expect("dialling side");
+        b.expect("accepting side");
+    }
+
+    /// R4-K1. Switching clipboard sync OFF does not drop the clipboard rows
+    /// already synced to this machine — but it DOES make this machine refuse
+    /// the deletes for them. A clipboard entry deleted on the authoring device
+    /// stays on the other one, in full, for as long as the switch is off.
+    #[test]
+    fn r4_a_delete_reaches_a_device_that_still_holds_the_row() {
+        let both = Kinds { dictations: true, clipboard: true };
+        let no_clip = Kinds { dictations: true, clipboard: false };
+
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+
+        // While clipboard sync is on, B's clipboard row reaches A.
+        b_store.lock().insert_clipboard("a password", None, None).unwrap();
+        for _ in 0..2 {
+            sync2(&a_store, both, &b_store, both);
+        }
+        assert_eq!(a_store.lock().count().unwrap(), 1, "precondition: A holds the row");
+
+        // The user switches clipboard sync off on A. A still HOLDS the row.
+        // Then the user deletes it on B.
+        let id = b_store
+            .lock()
+            .recent(None, 10)
+            .unwrap()
+            .into_iter()
+            .find(|i| i.text == "a password")
+            .unwrap()
+            .id;
+        b_store.lock().delete_item_local(id).unwrap();
+
+        for _ in 0..3 {
+            sync2(&a_store, no_clip, &b_store, both);
+        }
+        assert_eq!(
+            a_store.lock().count().unwrap(),
+            0,
+            "a delete must reach a device that is still holding the row"
+        );
+    }
+
+    /// R4-K2. And the receipt taken for the refused delete must not make the
+    /// hole permanent once the switch comes back on. `SyncManager::set_kinds`
+    /// clears the receipts on widening, so this models that.
+    #[test]
+    fn r4_re_enabling_a_kind_recovers_the_refused_delete() {
+        let both = Kinds { dictations: true, clipboard: true };
+        let no_clip = Kinds { dictations: true, clipboard: false };
+
+        let a_store = store_for(A);
+        let b_store = store_for(B);
+
+        b_store.lock().insert_clipboard("a password", None, None).unwrap();
+        for _ in 0..2 {
+            sync2(&a_store, both, &b_store, both);
+        }
+        let id = b_store
+            .lock()
+            .recent(None, 10)
+            .unwrap()
+            .into_iter()
+            .find(|i| i.text == "a password")
+            .unwrap()
+            .id;
+        b_store.lock().delete_item_local(id).unwrap();
+        for _ in 0..3 {
+            sync2(&a_store, no_clip, &b_store, both);
+        }
+
+        // The user turns clipboard sync back on. This is what set_kinds does.
+        a_store.lock().reset_source_marks().unwrap();
+        for _ in 0..3 {
+            sync2(&a_store, both, &b_store, both);
+        }
+        assert_eq!(
+            a_store.lock().count().unwrap(),
+            0,
+            "the delete refused while the kind was off must land once it is back on"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW (round 4) — demonstration of a live finding. NOT a fix.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round4_authority {
+    use super::*;
+    use echokey_core::history::Store;
+    use echokey_sync::{
+        DeviceId, ItemKind, PairedKey, Session, SyncItem, SyncMessage, Tombstone, Watermark,
+        PROTOCOL_VERSION,
+    };
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    const A: &str = "11111111-1111-4111-8111-111111111111"; // us (the victim)
+    const B: &str = "22222222-2222-4222-8222-222222222222"; // the paired, hostile peer
+
+    fn socket_pair() -> (TcpStream, TcpStream) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let c = TcpStream::connect(addr).unwrap();
+        let (srv, _) = l.accept().unwrap();
+        // MANDATORY on both directions: a stalled exchange fails, never hangs.
+        for sock in [&c, &srv] {
+            sock.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            sock.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+        }
+        (c, srv)
+    }
+
+    fn dev(id: &str) -> DeviceId {
+        DeviceId::parse(id).unwrap()
+    }
+
+    /// The hostile peer. It holds the paired key, so the handshake succeeds and
+    /// `Attribution.peer_id` is genuinely B. Every loop is hard-bounded.
+    fn hostile_peer(
+        srv: TcpStream,
+        key: PairedKey,
+        items: Vec<SyncItem>,
+        tombs: Vec<Tombstone>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let mut s = Session::accept(srv, &key).expect("hostile peer completes the handshake");
+            s.send(&SyncMessage::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                device_id: dev(B),
+                device_name: "Hostile".into(),
+            })
+            .unwrap();
+            let _ = s.recv().unwrap();
+            s.send(&SyncMessage::Watermarks {
+                entries: Vec::<Watermark>::new(),
+                more: false,
+            })
+            .unwrap();
+            for _ in 0..MAX_BATCHES {
+                match s.recv().unwrap() {
+                    SyncMessage::Watermarks { more, .. } => {
+                        if !more {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            if !tombs.is_empty() {
+                s.send(&SyncMessage::Tombstones {
+                    entries: tombs,
+                    more: true,
+                })
+                .unwrap();
+            }
+            if !items.is_empty() {
+                s.send(&SyncMessage::Items { items, more: true }).unwrap();
+            }
+            s.send(&SyncMessage::Items {
+                items: Vec::new(),
+                more: false,
+            })
+            .unwrap();
+            for _ in 0..(MAX_BATCHES * 4) {
+                match s.recv() {
+                    Ok(SyncMessage::Items { items, more }) if items.is_empty() && !more => break,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        })
+    }
+
+    fn run_attack(
+        store: &Arc<Mutex<Store>>,
+        kinds: Kinds,
+        items: Vec<SyncItem>,
+        tombs: Vec<Tombstone>,
+    ) {
+        let (c, srv) = socket_pair();
+        let key = PairedKey::from_bytes([21u8; 32]);
+        let peer = hostile_peer(srv, key.clone(), items, tombs);
+        let mut session = Session::initiate(c, &key).unwrap();
+        let known = vec![A.to_string(), B.to_string()];
+        let attr = Attribution {
+            peer_id: B,
+            local_id: A,
+            known: &known,
+        };
+        let stats = exchange(
+            &mut session,
+            store,
+            (A, "Victim"),
+            kinds,
+            Retention {
+                oldest_allowed: None,
+            },
+            &attr,
+            Turn::Second,
+            false,
+            0,
+            &|| false,
+        );
+        let _ = peer.join();
+        stats.expect("the exchange itself completes");
+    }
+
+    /// FINDING (round 4, HIGH): with the DEFAULT settings — both kinds on — a
+    /// paired peer can delete and rewrite rows attributed to US, including
+    /// pinned ones, by naming `(our device id, origin_id)`. Local rows carry
+    /// `origin_id == rowid` as text ("1", "2", "3"...), so there is nothing to
+    /// guess.
+    ///
+    /// The round-3 test `adv3_a_paired_peer_can_erase_and_rewrite_our_own_never_shared_rows`
+    /// only passes because it runs with `clipboard: false`, so the `kind_of`
+    /// gate refuses. That gate is the ONLY thing standing between a paired peer
+    /// and the whole local history; with the kind enabled there is no authority
+    /// check left, because `may_create` (replicate.rs:215-217) delegates to
+    /// `Store::holds_identity` (replicate.rs:552-563, 629-638) and we hold every
+    /// row we ever wrote.
+    ///
+    /// `docs/SYNC_DESIGN.md` states the opposite as rule 1: an earlier version
+    /// that let a paired device "delete another's rows with forged tombstones"
+    /// is described there as an authority escalation that was removed.
+    #[test]
+    fn r4_a_paired_peer_erases_and_rewrites_our_own_rows_when_the_kind_is_on() {
+        let store = {
+            let mut s = Store::open_in_memory().unwrap();
+            s.set_device_id(A);
+            Arc::new(Mutex::new(s))
+        };
+        let (pinned_id, other_id) = {
+            let g = store.lock();
+            let a = g.insert_clipboard("a password of ours", None, None).unwrap();
+            let b = g.insert_clipboard("a second capture", None, None).unwrap();
+            g.set_pinned(a, true).unwrap();
+            (a, b)
+        };
+        assert_eq!(pinned_id.to_string(), "1", "local origin_id is the rowid");
+
+        let now = now_ms();
+        let tombs = vec![Tombstone {
+            source_device: dev(A), // OUR id, not the peer's
+            origin_id: pinned_id.to_string(),
+            deleted_at: now,
+            clock: now as u64,
+        }];
+        let items = vec![SyncItem {
+            source_device: dev(A), // OUR id again
+            origin_id: other_id.to_string(),
+            kind: ItemKind::Clipboard,
+            text: "TEXT THE ATTACKER CHOSE".into(),
+            created_at: now,
+            updated_at: now + 1,
+            pinned: false,
+            clock: (now + 1) as u64,
+        }];
+
+        // The DEFAULT: both kinds shared.
+        let kinds = Kinds {
+            dictations: true,
+            clipboard: true,
+        };
+        run_attack(&store, kinds, items, tombs);
+
+        let g = store.lock();
+        let erased = g.get(pinned_id).unwrap().is_none();
+        let rewritten = g
+            .get(other_id)
+            .unwrap()
+            .map(|r| r.text)
+            .unwrap_or_default();
+        assert!(
+            !erased && rewritten != "TEXT THE ATTACKER CHOSE",
+            "a paired peer spoke for OUR device id: pinned row {pinned_id} erased = {erased}; \
+             row {other_id} now reads {rewritten:?}. origin_id is the rowid, so every row this \
+             machine has ever written is reachable by counting."
         );
     }
 }

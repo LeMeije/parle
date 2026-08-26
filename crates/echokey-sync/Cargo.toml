@@ -28,3 +28,9 @@ subtle = "2"
 # 6-digit pairing codes from the OS CSPRNG.
 getrandom = "0.4"
 
+
+[dev-dependencies]
+# ADVERSARIAL REVIEW (round 4), test-only: `mdns_sd::Receiver` is a re-export of
+# `flume::Receiver`, and driving the real `discovery::translate` needs the
+# sending half. Not linked into the app.
+flume = "0.12"

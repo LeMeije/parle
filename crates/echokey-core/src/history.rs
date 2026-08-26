@@ -10,11 +10,32 @@ use std::path::Path;
 
 const SCHEMA_VERSION: i64 = 5;
 /// How far ahead of us a peer's clock may be before we stop believing it.
-/// Generous enough for a real timezone or NTP wobble, small enough that a
-/// nonsense timestamp cannot win every conflict forever.
-const MAX_CLOCK_SKEW_MS: i64 = 24 * 60 * 60 * 1000;
+///
+/// Two minutes, not a day. The cursor we keep for a peer is that peer's own
+/// clock, so anything we accept into it we are stuck with: a machine half a day
+/// fast wrote a cursor half a day ahead, and once its clock was corrected every
+/// row it produced fell below that cursor and was never requested again. The
+/// damage is now bounded by this constant, and anything beyond it is refused
+/// with a warning naming the device, which is a fixable complaint rather than
+/// silent loss.
+///
+/// Still generous next to any real NTP wobble. Timezones do not enter into it:
+/// every clock here is epoch milliseconds.
+const MAX_CLOCK_SKEW_MS: i64 = 2 * 60 * 1000;
 /// Tombstones kept per source device. See `cap_tombstones`.
 pub const MAX_TOMBSTONES_PER_SOURCE: i64 = 10_000;
+/// Distinct source devices we will track a cursor for, per peer.
+///
+/// Generous next to any real mesh — pairing is explicit and human-verified —
+/// and small enough that a peer naming invented ids cannot grow the table
+/// without limit.
+pub const MAX_SOURCES_PER_PEER: i64 = 64;
+/// Sorts above every origin id we produce, so `(clock, ORIGIN_CEILING)`
+/// reads as "strictly after this whole millisecond".
+///
+/// Origin ids are UUIDs — ASCII — so a Basic Multilingual Plane private-use
+/// character is above all of them under SQLite's default BINARY collation.
+pub const ORIGIN_CEILING: &str = "\u{FFFF}";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -394,11 +415,26 @@ impl Store {
     /// exists after the insert, so it is stamped in a second statement. Rows
     /// written before this install had a device identity get no origin id:
     /// an unattributable row must not be replicated.
+    /// Give a freshly inserted local row its replication identity.
+    ///
+    /// A random UUID, not the rowid.
+    ///
+    /// The rowid is only unique within one database file, and the device id
+    /// that pairs with it lives in settings.json — a different file with a
+    /// different lifetime. Lose or rebuild history.db and rowids restart at 1,
+    /// so every new dictation is born wearing an identity a peer has already
+    /// seen: at best it silently overwrites unrelated content on that peer, and
+    /// where the peer holds a tombstone for it — tombstones are absorbing —
+    /// the row is swallowed and never appears again. Sync dies permanently,
+    /// with nothing to show the user why.
+    ///
+    /// A UUID costs a few bytes per row and makes the identity depend on
+    /// nothing but itself.
     fn stamp_origin(&self, id: i64) -> Result<(), StoreError> {
         self.conn.execute(
-            "UPDATE items SET origin_id = CAST(id AS TEXT)
+            "UPDATE items SET origin_id = ?2
              WHERE id = ?1 AND source_machine IS NOT NULL AND origin_id IS NULL",
-            params![id],
+            params![id, uuid::Uuid::new_v4().to_string()],
         )?;
         Ok(())
     }
@@ -486,7 +522,18 @@ impl Store {
         kind: Option<HistoryKind>,
         limit: u32,
     ) -> Result<Vec<HistoryItem>, StoreError> {
-        let query = query.trim();
+        // A NUL truncates the string SQLite sees, so it does not fail the way
+        // every other malformed query does — it raises "unterminated string"
+        // out of prepare(), past the guard below that exists to make a bad
+        // query degrade rather than break search. Strip it here, where it is a
+        // property of the text rather than of the FTS grammar.
+        let cleaned;
+        let query = if query.contains('\0') {
+            cleaned = query.replace('\0', " ");
+            cleaned.trim()
+        } else {
+            query.trim()
+        };
         if query.is_empty() {
             return self.recent(kind, limit);
         }
@@ -829,6 +876,35 @@ impl Store {
              DO UPDATE SET received_clock = MAX(received_clock, excluded.received_clock)",
             params![peer, source, clock],
         )?;
+        // Bounded per peer, oldest cursor evicted first.
+        //
+        // A receipt has to be recorded for whatever source the peer names, even
+        // one we refuse — without it the peer re-offers the same refused rows on
+        // every exchange for the life of the pairing, because nothing else tells
+        // it to stop. But taking the name on trust let one paired device mint
+        // durable rows here out of invented ids, 256 per message, without limit.
+        //
+        // Refusing to record past a cap would just restore the resend loop for
+        // whatever fell outside it, so the cap evicts instead: a real mesh has a
+        // handful of sources, and the cursor we drop is the one furthest behind.
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM source_marks WHERE peer_machine = ?1",
+            params![peer],
+            |r| r.get(0),
+        )?;
+        if n > MAX_SOURCES_PER_PEER {
+            conn.execute(
+                "DELETE FROM source_marks
+                  WHERE peer_machine = ?1
+                    AND source_machine IN (
+                        SELECT source_machine FROM source_marks
+                         WHERE peer_machine = ?1
+                         ORDER BY received_clock ASC
+                         LIMIT ?2
+                    )",
+                params![peer, n - MAX_SOURCES_PER_PEER],
+            )?;
+        }
         Ok(())
     }
 
@@ -847,6 +923,27 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?)
+    }
+
+    /// Record a receipt WITHOUT the per-peer cap. Test-only.
+    ///
+    /// The cap is well under one wire batch, which is correct for real use and
+    /// also makes the chunked-watermark path unreachable through the ordinary
+    /// route. Seeding underneath it is what lets a test exercise that path for
+    /// real rather than vacuously.
+    #[doc(hidden)]
+    pub fn note_received_uncapped_for_test(
+        &self,
+        peer: &str,
+        source: &str,
+        clock: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO source_marks (peer_machine, source_machine, received_clock)
+             VALUES (?1, ?2, ?3)",
+            params![peer, source, clock],
+        )?;
+        Ok(())
     }
 
     /// How many tombstones we hold for one source. For tests and diagnostics.
@@ -957,12 +1054,40 @@ impl Store {
         after: i64,
         limit: usize,
     ) -> Result<Vec<RemoteItem>, StoreError> {
+        // Strictly after `after`: the ceiling sentinel excludes every row
+        // that shares that clock.
+        self.items_from(source, after, ORIGIN_CEILING, limit)
+    }
+
+    /// One page of rows from `source`, ordered by `(updated_at, origin_id)` and
+    /// starting at the cursor `(at_or_after, after_origin)`.
+    ///
+    /// The cursor is a PAIR, and that is the whole point. Paging on the clock
+    /// alone cannot express "half of this millisecond", so a page that happened
+    /// to end inside one silently dropped the rest of it: the caller advanced
+    /// past that clock and `updated_at > cursor` excluded the remainder for
+    /// good. The old code only noticed when an ENTIRE page shared one clock,
+    /// and then re-fetched up to 20,000 rows in a single statement — which
+    /// both missed the common case and handed a peer a way to freeze the
+    /// history UI for most of a second.
+    ///
+    /// `at_or_after` is inclusive so a millisecond can never be split across
+    /// exchanges either. Re-offering the rows that share the highest clock we
+    /// have already seen is idempotent and costs one millisecond's worth.
+    pub fn items_from(
+        &self,
+        source: &str,
+        at_or_after: i64,
+        after_origin: &str,
+        limit: usize,
+    ) -> Result<Vec<RemoteItem>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT source_machine, origin_id, kind, text, created_at, updated_at, pinned FROM items
-             WHERE source_machine = ?1 AND origin_id IS NOT NULL AND updated_at > ?2
-             ORDER BY updated_at ASC, origin_id ASC LIMIT ?3",
+             WHERE source_machine = ?1 AND origin_id IS NOT NULL
+               AND (updated_at > ?2 OR (updated_at = ?2 AND origin_id > ?3))
+             ORDER BY updated_at ASC, origin_id ASC LIMIT ?4",
         )?;
-        let rows = stmt.query_map(params![source, after, limit as i64], |r| {
+        let rows = stmt.query_map(params![source, at_or_after, after_origin, limit as i64], |r| {
             Ok(RemoteItem {
                 source_machine: r.get(0)?,
                 origin_id: r.get(1)?,
@@ -984,12 +1109,25 @@ impl Store {
         after: i64,
         limit: usize,
     ) -> Result<Vec<RemoteTombstone>, StoreError> {
+        self.tombstones_from(source, after, ORIGIN_CEILING, limit)
+    }
+
+    /// One page of tombstones, on the same `(clock, origin_id)` cursor as
+    /// [`Store::items_from`] and for the same reason.
+    pub fn tombstones_from(
+        &self,
+        source: &str,
+        at_or_after: i64,
+        after_origin: &str,
+        limit: usize,
+    ) -> Result<Vec<RemoteTombstone>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT source_machine, origin_id, deleted_at FROM tombstones
-             WHERE source_machine = ?1 AND deleted_at > ?2
-             ORDER BY deleted_at ASC, origin_id ASC LIMIT ?3",
+             WHERE source_machine = ?1
+               AND (deleted_at > ?2 OR (deleted_at = ?2 AND origin_id > ?3))
+             ORDER BY deleted_at ASC, origin_id ASC LIMIT ?4",
         )?;
-        let rows = stmt.query_map(params![source, after, limit as i64], |r| {
+        let rows = stmt.query_map(params![source, at_or_after, after_origin, limit as i64], |r| {
             Ok(RemoteTombstone {
                 source_machine: r.get(0)?,
                 origin_id: r.get(1)?,
@@ -1096,12 +1234,12 @@ impl Store {
             }
         }
 
-        let existing: Option<(i64, i64, String, i64)> = tx
+        let existing: Option<(i64, i64, String, i64, i64, String)> = tx
             .query_row(
-                "SELECT id, COALESCE(updated_at, created_at), text, pinned FROM items
-                 WHERE source_machine=?1 AND origin_id=?2",
+                "SELECT id, COALESCE(updated_at, created_at), text, pinned, created_at, kind
+                   FROM items WHERE source_machine=?1 AND origin_id=?2",
                 params![item.source_machine, item.origin_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .optional()?;
 
@@ -1122,11 +1260,26 @@ impl Store {
                 )?;
                 ApplyOutcome::Inserted
             }
-            Some((id, local_updated, local_text, local_pinned)) => {
+            Some((id, local_updated, local_text, local_pinned, local_created, local_kind)) => {
                 let local_pinned = local_pinned != 0;
+                // The tiebreak has to order the WHOLE payload, or it is not
+                // total and two machines settle on different rows for the same
+                // identity with neither ever updating. `created_at` drives
+                // display order and retention, and `kind` decides which filter
+                // a row falls under, so leaving them out was a real divergence.
                 let wins = item.updated_at > local_updated
                     || (item.updated_at == local_updated
-                        && (item.text.as_str(), item.pinned) > (local_text.as_str(), local_pinned));
+                        && (
+                            item.text.as_str(),
+                            item.pinned,
+                            item.created_at,
+                            item.kind.as_str(),
+                        ) > (
+                            local_text.as_str(),
+                            local_pinned,
+                            local_created,
+                            local_kind.as_str(),
+                        ));
                 if wins {
                     tx.execute(
                         // `kind` is part of the payload and must move with it.
@@ -1158,8 +1311,14 @@ impl Store {
     }
 
     /// Apply a delete received from a peer: record it, and remove the local row
-    /// unless that row is strictly newer than the delete (an edit that happened
-    /// after the delete survives it).
+    /// unconditionally.
+    ///
+    /// A tombstone is ABSORBING. An earlier version spared a row whose clock
+    /// was newer than the delete, on the theory that an edit after a delete
+    /// should survive it — see `apply_remote_item` for why that is the wrong
+    /// answer here: one person, several machines, no undelete anywhere in the
+    /// product, and the realistic sequence is a password cleared on the laptop
+    /// while the desktop, not yet told, still shows it and gets it pinned.
     ///
     /// The outcome describes what changed on disk: `Inserted` for a tombstone
     /// we had never seen, `Updated` if a known tombstone moved forward or a row
@@ -1537,6 +1696,9 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
+        // Backfilled from the rowid, deliberately: these rows may already be
+        // known to a peer under that identity, so the migration must not
+        // re-mint them. Only NEW rows get a uuid (see stamp_origin).
         assert_eq!(origin.as_deref(), Some("1"));
         assert_eq!(updated, Some(500));
         assert_eq!(pinned, 1, "pin state survives the migration");
@@ -1641,7 +1803,10 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(origin.as_deref(), Some(id.to_string().as_str()));
+        // A UUID, not the rowid: the identity must not depend on which
+        // database file the row happens to live in. See stamp_origin.
+        assert_eq!(origin.as_deref().map(str::len), Some(36));
+        assert!(origin.as_deref().unwrap().contains('-'));
         assert_eq!(updated, created);
 
         // Without an identity there is nothing to attribute the row to.
@@ -1813,7 +1978,14 @@ mod tests {
 
         let stones = s.tombstones_since("g14", 0, 10).unwrap();
         assert_eq!(stones.len(), 1);
-        assert_eq!(stones[0].origin_id, id.to_string());
+        // The identity is a UUID, not the rowid — see stamp_origin — so the
+        // tombstone is checked against what the row actually carries.
+        let origin: String = s
+            .conn
+            .query_row("SELECT origin_id FROM tombstones", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stones[0].origin_id, origin);
+        assert_eq!(origin.len(), 36);
 
         // Re-inserting the same text is a NEW row with a new origin id, so the
         // old tombstone does not shoot it down.
@@ -2703,5 +2875,95 @@ mod adversarial_round3_migrations {
         }
         let s = Store::open(&p).expect("a database that only lacks its version stamp must open");
         assert_eq!(s.count().unwrap(), 1, "the row must survive");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW — ROUND 4: hostile input and tie-break totality.
+// Demonstrations only; nothing here is a fix.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round4_hostile {
+    use super::*;
+
+    const ME: &str = "11111111-1111-4111-8111-111111111111";
+    const PEER: &str = "22222222-2222-4222-8222-222222222222";
+
+    fn store() -> Store {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_device_id(ME);
+        s
+    }
+
+    /// R4-H2. A user-typed search string is not peer input, but it is still
+    /// untrusted with respect to the FTS query we build from it.
+    #[test]
+    fn r4_hostile_search_queries_never_raise() {
+        let s = store();
+        s.insert_clipboard("hello world", None, None).unwrap();
+        let mut broke: Vec<String> = Vec::new();
+        for q in [
+            "\"",
+            "\"\"",
+            "*",
+            "^",
+            "NEAR(",
+            "a OR",
+            "AND",
+            "(((",
+            ")))",
+            "a:b",
+            "-",
+            "{}",
+            "\u{0}",
+            "hello\u{0}world",
+            &"a ".repeat(2_000),
+            "\\",
+            "col:*",
+        ] {
+            if let Err(e) = s.search(q, None, 10) {
+                broke.push(format!("{q:?} -> {e}"));
+            }
+        }
+        assert!(broke.is_empty(), "search raised instead of degrading: {broke:#?}");
+    }
+
+    /// R4-H3. The equal-clock tie-break is documented as total, so that "a tie
+    /// cannot leave the two boxes permanently disagreeing". It compares only
+    /// (text, pinned) — `created_at` and `kind` are not in it, so two devices
+    /// can hold permanently different values for the same identity.
+    #[test]
+    fn r4_the_equal_clock_tiebreak_is_total_over_the_whole_payload() {
+        let left = store();
+        let right = store();
+        let t = now_ms() - 1_000_000;
+
+        let mut a = RemoteItem {
+            source_machine: PEER.into(),
+            origin_id: "row".into(),
+            kind: "transcription".into(),
+            text: "same text".into(),
+            created_at: t,
+            updated_at: t,
+            pinned: false,
+        };
+        let mut b = a.clone();
+        b.created_at = t - 500_000;
+        b.kind = "clipboard".into();
+
+        // Each device sees one version first, then the other.
+        left.apply_remote_item(PEER, &a).unwrap();
+        left.apply_remote_item(PEER, &b).unwrap();
+        right.apply_remote_item(PEER, &b).unwrap();
+        right.apply_remote_item(PEER, &a).unwrap();
+
+        let l = &left.items_since(PEER, 0, 10).unwrap()[0];
+        let r = &right.items_since(PEER, 0, 10).unwrap()[0];
+        assert_eq!(
+            (l.created_at, l.kind.clone()),
+            (r.created_at, r.kind.clone()),
+            "a tie left the two devices permanently disagreeing"
+        );
+        a.pinned = false;
     }
 }
