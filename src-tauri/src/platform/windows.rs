@@ -512,7 +512,32 @@ pub fn inject_text(
     restore: bool,
     press_enter: bool,
 ) -> InjectionOutcome {
+    // A genuinely SECURE FIELD: hand it over concealed and let the user paste.
+    //
+    // macOS grew this gate in round 11 and Windows did not, in the same commit
+    // that split the writer so only the excluded variant declares
+    // `CanUploadToCloudClipboard = 0`. The result was the worst arrangement of
+    // the two: the pipeline classified the dictation as secret and refused to
+    // put it in Parle's own LAN-only history, and this function handed the same
+    // string to Windows Cloud Clipboard, which uploads it to Microsoft and
+    // syncs it to the user's other machines.
+    if focused_field_is_secure() == Some(true) {
+        write_clipboard_excluded(text);
+        return InjectionOutcome {
+            method: InjectionMethod::ClipboardOnly,
+            manual_paste_required: true,
+        };
+    }
+
+    // Snapshot the MARKING as well as the text, exactly as macOS does.
+    //
+    // The restore put the user's original back with `write_clipboard`, which
+    // since round 11 declares no exclusion formats at all. Copy a password out
+    // of a password manager, dictate anywhere with the shipped restore default
+    // on, and Parle republished it with the owner's own "do not keep this, do
+    // not upload this" statement deleted.
     let previous = read_clipboard();
+    let previous_excluded = clipboard_is_excluded();
     write_clipboard(text);
     let seq_after_write = unsafe { GetClipboardSequenceNumber() };
     synth_ctrl_v();
@@ -532,7 +557,7 @@ pub fn inject_text(
                 // Restore only if nobody else wrote to the clipboard meanwhile.
                 let seq_now = unsafe { GetClipboardSequenceNumber() };
                 if seq_now == seq_after_write {
-                    write_clipboard(&prev);
+                    write_clipboard_inner(&prev, previous_excluded);
                 }
             });
         }
@@ -722,8 +747,17 @@ fn write_clipboard_inner(text: &str, exclude: bool) {
                 }
             }
         }
-        let _ = CloseClipboard();
+        // Read and stored BEFORE the close, matching macOS, where round 11
+        // moved the equivalent store above the payload and wrote down why:
+        // between the change becoming visible and us recording that it was
+        // ours, a monitor poll sees `we_wrote_change` as false. Two failures
+        // came out of that one line. Our own dictation could be captured as a
+        // clipboard row and replicated, which walks a withheld transcript back
+        // into history through the side door; and another process's write
+        // landing in the window was recorded as ours and then skipped, losing a
+        // real user copy.
         OUR_LAST_WRITE.store(GetClipboardSequenceNumber(), std::sync::atomic::Ordering::SeqCst);
+        let _ = CloseClipboard();
     }
 }
 
@@ -846,6 +880,55 @@ impl Drop for ClipboardMonitor {
 /// before the DWORD formats were honoured.
 ///
 /// Returns `None` when the capture must be skipped, `Some(text)` otherwise.
+/// Did the clipboard's current owner ask that this content not be kept?
+///
+/// The sibling of macOS's `clipboard_is_concealed`. `read_clipboard_unless_excluded`
+/// answers "may I capture this" by collapsing every refusal into `None`, which
+/// is the right answer for the monitor and useless to the RESTORE path, which
+/// has to put the content back exactly as it found it, marking included.
+fn clipboard_is_excluded() -> bool {
+    unsafe {
+        if !open_clipboard_retry() {
+            // Cannot tell. The conservative reading is that it was marked, so
+            // the restore re-declares the exclusion rather than dropping it.
+            return true;
+        }
+        let excluded = (|| -> bool {
+            for name in EXCLUDE_MARKER_FORMATS {
+                let fmt = register_format(name);
+                if fmt != 0 && IsClipboardFormatAvailable(fmt).is_ok() {
+                    return true;
+                }
+            }
+            for name in EXCLUDE_DWORD_FORMATS {
+                let fmt = register_format(name);
+                if fmt == 0 || IsClipboardFormatAvailable(fmt).is_err() {
+                    continue;
+                }
+                let Ok(handle) = GetClipboardData(fmt) else {
+                    return true;
+                };
+                let h = windows::Win32::Foundation::HGLOBAL(handle.0 as _);
+                if GlobalSize(h) < 4 {
+                    return true;
+                }
+                let ptr = GlobalLock(h) as *const u32;
+                if ptr.is_null() {
+                    return true;
+                }
+                let v = *ptr;
+                let _ = GlobalUnlock(h);
+                if v == 0 {
+                    return true;
+                }
+            }
+            false
+        })();
+        let _ = CloseClipboard();
+        excluded
+    }
+}
+
 fn read_clipboard_unless_excluded() -> Option<String> {
     unsafe {
         // The sequence number before and after. If it moves, the content we

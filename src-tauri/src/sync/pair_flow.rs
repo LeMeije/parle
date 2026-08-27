@@ -36,6 +36,37 @@ pub enum PairFlowError {
     Session(#[from] SessionError),
     #[error("peer speaks sync protocol {peer}, we speak {ours}")]
     Version { peer: u16, ours: u16 },
+    /// The showing machine turned us away, and said why.
+    ///
+    /// Without this the refusal was a closed socket, which arrives as
+    /// `Transport` and is surfaced as "check it is still awake and on this
+    /// network". The guard's four messages are the most actionable in the
+    /// product and every one of them was being replaced by a wrong one.
+    #[error("{0}")]
+    Refused(String),
+}
+
+/// Prefix of a refusal frame.
+///
+/// The pairing frames are raw SPAKE2 bytes, not `SyncMessage`, so a refusal
+/// cannot be a new enum variant. It is a frame that `looks_like_pairing_message`
+/// rejects by length, so it can never be mistaken for an opening message, and
+/// it is only ever read where a SPAKE2 reply was expected.
+pub const REFUSED_PREFIX: &[u8] = b"PARLE-PAIR-REFUSED:";
+
+/// Build a refusal frame carrying `reason`.
+pub fn refusal_frame(reason: &str) -> Vec<u8> {
+    let mut v = REFUSED_PREFIX.to_vec();
+    // Bounded: this is a display string and must never be able to deny
+    // anything, the same rule the Hello name follows.
+    v.extend_from_slice(reason.as_bytes().iter().take(256).copied().collect::<Vec<_>>().as_slice());
+    v
+}
+
+/// Read a refusal out of a frame, if that is what it is.
+fn refusal_reason(buf: &[u8]) -> Option<String> {
+    let rest = buf.strip_prefix(REFUSED_PREFIX)?;
+    Some(String::from_utf8_lossy(rest).to_string())
 }
 
 /// Length of a SPAKE2 opening message, measured from the library rather than
@@ -102,6 +133,9 @@ pub fn run_with<S: std::io::Read + std::io::Write>(
         Some(m) => m,
         None => read_frame(stream)?,
     };
+    if let Some(reason) = refusal_reason(&peer_msg) {
+        return Err(PairFlowError::Refused(reason));
+    }
 
     let (confirm, my_tag) = state.finish(&peer_msg)?;
     write_frame(stream, my_tag.as_bytes())?;

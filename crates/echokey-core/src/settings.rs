@@ -10,6 +10,16 @@ pub const SETTINGS_VERSION: u32 = 2;
 #[serde(default)]
 pub struct Settings {
     pub version: u32,
+    /// Shipped exclusions this install has ALREADY been offered.
+    ///
+    /// The union that adds newly shipped password managers has to fire for
+    /// every future addition, on every machine, or it reproduces the defect it
+    /// exists to fix. It also must not undo a deliberate removal, or the user
+    /// can never take an entry off the list at all. A version gate gave the
+    /// second and not the first; this gives both, because it records what was
+    /// offered rather than when.
+    #[serde(default)]
+    pub excluded_defaults_seen: Vec<String>,
     pub onboarding_complete: bool,
     pub models: ModelSettings,
     pub language: LanguageSettings,
@@ -30,6 +40,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             version: SETTINGS_VERSION,
+            // A fresh install starts with every shipped default already ON, so
+            // it has been offered all of them.
+            excluded_defaults_seen: default_excluded_apps(),
             onboarding_complete: false,
             models: ModelSettings::default(),
             language: LanguageSettings::default(),
@@ -503,14 +516,47 @@ impl Settings {
     /// silently leaving a password manager unprotected because of a decision
     /// they may not remember making.
     fn migrate(&mut self) {
-        if self.version < 2 {
+        // NO VERSION GATE. What gates the union is whether this install has been
+        // OFFERED that particular entry before.
+        //
+        // This was `if self.version < 2`, which can only ever fire once, so the
+        // next addition to `default_excluded_apps` would reach new installs and
+        // nobody else, which is precisely the defect the union exists to fix.
+        // Simply removing the gate is wrong in the other direction: the union
+        // then re-adds an entry the user deliberately removed on every single
+        // launch, so it can never be removed at all.
+        //
+        // Recording what was offered separates the two questions. A new default
+        // is offered once, wherever the install is in its history, and a
+        // removal made after that offer stands for ever.
+        {
             let defaults = default_excluded_apps();
+            let seen: std::collections::HashSet<String> =
+                self.excluded_defaults_seen.iter().map(|a| a.to_ascii_lowercase()).collect();
             let have: std::collections::HashSet<String> =
                 self.history.excluded_apps.iter().map(|a| a.to_ascii_lowercase()).collect();
+            // An install with no record has never run this scheme, and the
+            // version stamp cannot stand in for one: `#[serde(default)]` fills
+            // a MISSING version from `Settings::default()`, which is the
+            // newest, so a version-less file reads as already migrated and is
+            // silently skipped. That is the exact hole a round-11 diagnostic
+            // recorded and could not close.
+            //
+            // So the first run of this scheme offers everything, once, and
+            // records it. That is round 11's own accepted trade ("a user who
+            // deliberately removed an entry gets it back once, which is the
+            // lesser wrong"), and from the second launch onwards a removal
+            // stands for ever.
+            let first_run_of_this_scheme = self.excluded_defaults_seen.is_empty();
             let added: Vec<String> = defaults
+                .clone()
                 .into_iter()
-                .filter(|d| !have.contains(&d.to_ascii_lowercase()))
+                .filter(|d| {
+                    let k = d.to_ascii_lowercase();
+                    !have.contains(&k) && (first_run_of_this_scheme || !seen.contains(&k))
+                })
                 .collect();
+            self.excluded_defaults_seen = defaults;
             if !added.is_empty() {
                 tracing::info!(
                     "settings: adding {} password managers to the exclusion list that shipped \

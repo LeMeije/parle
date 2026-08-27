@@ -121,23 +121,27 @@ fn r11_a_deliberate_removal_survives_the_second_launch() {
 ///
 /// `#[serde(default)]` sits on the CONTAINER, so an absent `version` takes
 /// `Settings::default().version`, which is `SETTINGS_VERSION` — the newest, not
-/// the oldest. A file with no version therefore skips the migration entirely.
+/// the oldest. A file with no version therefore used to skip the migration
+/// entirely, and this test pinned that, noting it was unreachable in practice
+/// and that "absent means oldest" is the intuition a later round would bring.
 ///
-/// Reachability, stated rather than assumed: every write goes through
-/// `Settings::save`, which serialises the whole struct, so the app has never
-/// produced such a file and `set_settings` fills the field before saving. The
-/// premise can only be constructed by hand-editing. So this is not scored as a
-/// live defect; it is pinned, because "absent means oldest" is the intuition a
-/// later round will bring, and the code does the opposite.
+/// ROUND 12 INVERTED IT. The union no longer consults `version` at all: it
+/// records which shipped defaults an install has already been OFFERED. That
+/// closes this hole as a side effect, because a file with no record is offered
+/// them regardless of what its version field says or does not say.
 #[test]
-fn r11_absent_version_is_read_as_newest_not_oldest() {
+fn r11_absent_version_does_not_decide_who_gets_protected() {
     let p = tmp_settings("nover", r#"{"history":{"excluded_apps":["com.mine"]}}"#);
     let loaded = Settings::load(&p).unwrap();
-    assert_eq!(
-        loaded.history.excluded_apps,
-        vec!["com.mine".to_string()],
-        "an absent version currently SKIPS the migration; if this now fails, \
-         the container default changed and the invariant is worth re-reading"
+    assert!(
+        loaded.history.excluded_apps.iter().any(|x| x == "com.mine"),
+        "the user's own entry was dropped by the migration"
+    );
+    assert!(
+        loaded.history.excluded_apps.len() > 1,
+        "a settings file with no version field is still skipped by the exclusion union, so \
+         whether a machine protects its password managers depends on a field the user never \
+         sees and the app cannot tell apart from 'already current'"
     );
 }
 

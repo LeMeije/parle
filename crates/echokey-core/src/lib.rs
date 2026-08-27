@@ -10,6 +10,8 @@ mod adversarial_r8_data;
 mod adversarial_r9_data;
 mod adversarial_r10_data;
 mod adversarial_r11_data;
+#[cfg(test)]
+mod adversarial_r12_data;
 
 pub mod dictionary;
 pub mod formatter;

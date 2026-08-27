@@ -27,6 +27,7 @@ sha2 = "0.10"
 subtle = "2"
 # 6-digit pairing codes from the OS CSPRNG.
 getrandom = "0.4"
+unicode-properties = "0.1.4"
 
 
 [dev-dependencies]

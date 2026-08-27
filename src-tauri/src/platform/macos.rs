@@ -460,7 +460,17 @@ pub fn inject_text(
     let keystrokes_blocked = secure_input_active();
     if (prefer_ax || keystrokes_blocked) && ax_insert_text(text) {
         if keep_on_clipboard {
-            write_clipboard_marked(text, false);
+            // `keystrokes_blocked`, not `false`.
+            //
+            // Before round 11 this branch was `if secure_input_active()` and
+            // wrote CONCEALED. Splitting the flag apart from the password-field
+            // question was right and dropped the concealment with it. In the
+            // state round 11 itself measured, an accessibility probe that
+            // answers nothing with the flag up, `FieldSecrecy` decides the row
+            // is too sensitive to send to the user's own second device, and
+            // this handed the same string to every clipboard manager on the
+            // machine unmarked.
+            write_clipboard_marked(text, keystrokes_blocked);
         }
         if press_enter {
             synth_return();
@@ -471,7 +481,7 @@ pub fn inject_text(
     // Accessibility insertion did not take, and the OS will swallow a synthetic
     // Cmd-V, so there is nothing left but to hand it over and say so.
     if keystrokes_blocked {
-        write_clipboard_marked(text, false);
+        write_clipboard_marked(text, true);
         return InjectionOutcome {
             method: InjectionMethod::ClipboardOnly,
             manual_paste_required: true,

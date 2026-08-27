@@ -1152,7 +1152,20 @@ fn recv_watermarks<S: Read + Write>(
                     // is the only unsafe direction, and on the clock alone two
                     // chunks naming the same millisecond would keep whichever
                     // origin arrived last rather than the greater one.
-                    let clock = w.clock as i64;
+                    // `try_from`, not `as`: a `u64` above `i64::MAX` wraps
+                    // NEGATIVE on the cast, which lowers the floor and re-sends
+                    // rather than skipping, but arrives at it by accident.
+                    //
+                    // Deliberately NOT clamped to our own ceiling. Clamping to
+                    // `now + skew` turns an unreachable mark into a reachable
+                    // but unsatisfiable one: no row can ever be above it, and
+                    // `unreachable_cursor` no longer fires, so that peer is
+                    // starved for ever with nothing to notice it. Letting the
+                    // absurd value through is what lets the restart-at-zero see
+                    // it and act, which is round 11's design and is right. The
+                    // denial of delivery it used to cause was in the CALLER not
+                    // banking a resume debt, and that is fixed in manager.rs.
+                    let clock = i64::try_from(w.clock).unwrap_or(i64::MAX);
                     let e = out
                         .entry(w.source_device.as_str().to_string())
                         .or_insert((0, String::new()));

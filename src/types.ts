@@ -109,6 +109,9 @@ export interface HistoryItem {
   language: string | null;
   app_id: string | null;
   app_name: string | null;
+  // Kept on this device and never offered to a paired device. Set when the
+  // secure-field probe could not rule out that this was a password field.
+  local_only: boolean;
   meta: string | null;
 }
 
@@ -146,6 +149,10 @@ export type PipelineEvent =
   | {
       kind: 'completed';
       item_id: number;
+      // The dictation did NOT go into a syncing history. Every handler must
+      // consult this before rendering `text`: on a password-field dictation
+      // `text` is the password.
+      withheld: boolean;
       text: string;
       duration_ms: number;
       transcribe_ms: number;

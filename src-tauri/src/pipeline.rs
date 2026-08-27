@@ -36,6 +36,15 @@ pub enum PipelineEvent {
     MarkAdded { at_ms: u64, text: String },
     Completed {
         item_id: i64,
+        /// The row did NOT go into a syncing history, and the user needs to
+        /// know that rather than being told "Copied".
+        ///
+        /// An explicit field rather than an `item_id < 0` convention, because
+        /// every consumer that forgot to check the convention rendered the
+        /// transcript instead. Round 11 emitted a notice for this case and the
+        /// very next statement emitted `Completed`, whose handlers overwrote
+        /// the notice with the first 42 characters of the password.
+        withheld: bool,
         text: String,
         duration_ms: u64,
         transcribe_ms: u64,
@@ -475,6 +484,21 @@ impl Pipeline {
         };
         text = text.trim().to_string();
 
+        // Sampled ABOVE the empty-after-cleanup branch, not below it.
+        //
+        // Round 11's commit message says there are two dictation paths and one
+        // gate. There are three. The branch below stores the RAW transcript
+        // when cleanup empties the cleaned one, and it ran before
+        // `sample_field_secrecy()` was ever called, with no secrecy argument
+        // and no local-only flag. A dictation into a password field whose
+        // cleaned text collapses to nothing was therefore stored in full and
+        // replicated to every paired device, on the one branch whose own
+        // comment says "Nothing is ever lost".
+        //
+        // The sample is still taken before any injection, which is the property
+        // that matters: nothing below this line has moved focus.
+        let secrecy = sample_field_secrecy();
+
         if text.is_empty() {
             // Nothing is ever lost: cleanup may legitimately empty the text
             // ("scratch that", pure filler) — keep the raw transcript in
@@ -493,10 +517,13 @@ impl Pipeline {
                     low_confidence: vec![],
                     cleanup_tier: 0,
                 };
-                let _ = self
-                    .store
-                    .lock()
-                    .insert_transcription(&tr, app_id.as_deref(), app_name.as_deref());
+                let (_, notice) =
+                    store_transcription(&self.store, &tr, &app_id, &app_name, secrecy);
+                if let Some(reason) = notice {
+                    (self.sink)(PipelineEvent::Empty { reason });
+                    self.emit_idle_if_quiescent();
+                    return;
+                }
             }
             (self.sink)(PipelineEvent::Empty { reason: "Nothing left after cleanup (kept raw in history)".into() });
             self.emit_idle_if_quiescent();
@@ -507,8 +534,8 @@ impl Pipeline {
         let low_confidence = collect_low_confidence(&asr, &text);
 
         // Output: inject + clipboard + history, simultaneously in intent.
-        // Sampled BEFORE `inject_text`, which pastes and may post Return.
-        let secrecy = sample_field_secrecy();
+        // `secrecy` was sampled above, before the empty-after-cleanup branch and
+        // before any injection.
         let injection = if settings.paste.inject && !frontmost_is_self() {
             Some(platform::imp::inject_text(
                 &text,
@@ -564,6 +591,7 @@ impl Pipeline {
 
         (self.sink)(PipelineEvent::Completed {
             item_id,
+            withheld: item_id < 0 || secrecy.keep_local_only(),
             text,
             duration_ms: recording.duration_ms,
             transcribe_ms: asr.transcribe_ms,
@@ -758,6 +786,7 @@ impl Pipeline {
 
         (self.sink)(PipelineEvent::Completed {
             item_id,
+            withheld: item_id < 0 || secrecy.keep_local_only(),
             text,
             duration_ms: recording.duration_ms,
             transcribe_ms,

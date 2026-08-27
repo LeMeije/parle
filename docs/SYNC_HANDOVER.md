@@ -20,9 +20,9 @@ Branch `windows-build`. Green, per package:
 
 | Package | Result |
 |---|---|
-| `echokey-core --lib` | 153 pass, 0 fail, 1 ignored diagnostic |
-| `echokey-sync` (all targets) | 55 pass, 0 fail, 1 ignored diagnostic |
-| `echokey --lib` | 205 pass, 0 fail, 0 ignored |
+| `echokey-core --lib` | 175 pass, 0 fail, 1 ignored diagnostic |
+| `echokey-sync` (all targets) | 68 pass, 0 fail, 1 ignored diagnostic |
+| `echokey --lib` | 259 pass, 0 fail, 2 ignored diagnostics |
 
 Nothing is ignored and nothing is quarantined. Two `#[ignore]`d **diagnostics**
 exist on purpose and are not part of that count; see section 5.

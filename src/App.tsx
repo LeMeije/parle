@@ -33,6 +33,11 @@ export default function App() {
     const un = onPipelineEvent((e: PipelineEvent) => {
       if (e.kind === 'state_changed') setRecording(e.state === 'recording');
       if (e.kind === 'completed') {
+        // A withheld dictation has already had its own toast from the `empty`
+        // event, and `e.text` is the thing we withheld. Rendering a preview of
+        // it here overwrote the explanation with the first 42 characters of the
+        // password.
+        if (e.withheld) return;
         const preview = e.text.length > 42 ? e.text.slice(0, 42) + '…' : e.text;
         showToast(
           e.injection?.manual_paste_required

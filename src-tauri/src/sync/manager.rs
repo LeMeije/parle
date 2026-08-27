@@ -665,6 +665,20 @@ impl SyncManager {
                 .paired
                 .iter()
                 .map(|p| UiPaired {
+                    // The LIVE name when the peer is on the LAN.
+                    //
+                    // `UiPaired.name` was written in exactly one place,
+                    // `complete_pairing`, so renaming a machine left the other
+                    // one showing the old label for ever, including in the
+                    // Unpair confirmation, which is the one destructive action
+                    // in that panel. `usable_peer_name` applies the same
+                    // character policy the pairing path applies, so an unsigned
+                    // name cannot arrive here unfiltered.
+                    name: i
+                        .peers
+                        .get(&p.id)
+                        .map(|q| usable_peer_name(&q.name, &p.id))
+                        .unwrap_or_else(|| p.name.clone()),
                     online: i.peers.contains_key(&p.id),
                     ..p.clone()
                 })
@@ -1141,6 +1155,18 @@ impl SyncManager {
             match i.guard.reserve(Instant::now(), from) {
                 Ok(c) => c,
                 Err(e) => {
+                    // TELL the other machine why.
+                    //
+                    // The guard produces four genuinely actionable messages
+                    // ("too many incorrect codes; try again in N seconds",
+                    // "show a new code"). Logging them and closing the socket
+                    // made the entering machine see a transport drop, which maps
+                    // to "check it is still awake and on this network": the
+                    // fourth wrong code sent the user to look at their Wi-Fi.
+                    // The comment on that mapping says six failures used to
+                    // collapse into one wrong answer. This is the same defect
+                    // pointed the other way.
+                    let _ = write_frame(&mut s, &pair_flow::refusal_frame(&e.to_string()));
                     tracing::info!("sync: pairing attempt refused: {e}");
                     return;
                 }
@@ -1285,6 +1311,10 @@ impl SyncManager {
                      (this one speaks sync protocol {ours}, that one speaks {peer}). \
                      Update both, then pair again."
                 ),
+                // Surfaced VERBATIM. The guard already words these for a
+                // person ("too many incorrect codes; try again in 240 seconds",
+                // "show a new code"), and anything we substitute is worse.
+                pair_flow::PairFlowError::Refused(ref why) => why.clone(),
                 pair_flow::PairFlowError::Transport(_) => {
                     "Lost the connection to that device before pairing finished. \
                      Check it is still awake and on this network, then try again."
@@ -1673,7 +1703,23 @@ impl SyncManager {
                 // Only once the re-offer actually finished. A truncated one
                 // leaves rows below the peer's cursor, which nothing else will
                 // ever offer again.
-                if resend_all {
+                //
+                // ROUND 12: `|| stats.truncated`, because an ORDINARY truncated
+                // pass now needs the debt too. Until round 11 it did not: a
+                // truncated exchange still moved the peer's cursor, so the next
+                // one carried on from there. `unreachable_cursor` is the first
+                // thing that breaks that. It ignores the cursor and restarts
+                // the source at zero on every exchange with `resend_all` false,
+                // so without a debt the same prefix is re-sent for ever and a
+                // history larger than the cap never delivers anything past it,
+                // deletes included. Round 11 priced that as bandwidth. It is a
+                // permanent denial of delivery, and one unvalidated integer in
+                // one message reaches it.
+                //
+                // When neither holds, the block is skipped entirely rather than
+                // falling into the clearing arm, so an ordinary complete pass
+                // still cannot discharge a re-offer debt it did not serve.
+                if resend_all || stats.truncated {
                     let resumed = {
                         let mut i = self.inner.lock();
                         if stats.truncated {
@@ -1744,10 +1790,33 @@ impl SyncManager {
                         ),
                     );
                 }
-                // ONLY on the Ok arm. This is the difference between "we tried"
-                // and "it worked", and the UI needs the second one.
-                if let Some(d) = self.inner.lock().paired.iter_mut().find(|d| d.id == peer_id) {
-                    d.last_sync_ok = Some(now_ms());
+                // A refusal is REPORTED, next to the oversized report above.
+                //
+                // `apply_remote_item` refuses a row whose clock is beyond our
+                // ceiling and logs "check that machine's clock". Nothing carried
+                // that anywhere: `stats.ignored` fed no surface, and the stamp
+                // below fired on the Ok arm regardless, so the UI showed the
+                // green dot and "Synced just now" for a device from which not
+                // one row had been accepted. The comment on that dot says it was
+                // moved off `online` precisely to stop being green and confident
+                // while nothing moved.
+                if stats.ignored > 0 {
+                    self.report_device_problem(
+                        &peer_id,
+                        &format!(
+                            "{} row{} refused. Check that device's clock is set correctly.",
+                            stats.ignored,
+                            if stats.ignored == 1 { " was" } else { "s were" }
+                        ),
+                    );
+                }
+                // ONLY on the Ok arm, and only when something was actually
+                // accepted. This is the difference between "we tried" and "it
+                // worked", and the UI needs the second one.
+                if stats.applied_items > 0 || stats.applied_tombstones > 0 || stats.ignored == 0 {
+                    if let Some(d) = self.inner.lock().paired.iter_mut().find(|d| d.id == peer_id) {
+                        d.last_sync_ok = Some(now_ms());
+                    }
                 }
             }
             Err(e) => tracing::info!("sync: exchange with {peer_id} ended: {e}"),

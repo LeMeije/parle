@@ -7,6 +7,15 @@ import { api, onLevel, onPartial, onPipelineEvent } from './api';
 import type { Settings } from './types';
 import './hud.css';
 
+/// The paste chord, which is not the same on both platforms Parle ships on.
+///
+/// `SettingsView` has used `IS_MAC` in eleven places since before sync landed;
+/// the HUD had no platform branch of any kind, and the one instruction the
+/// product gives told a Windows user to press a key their keyboard does not
+/// have.
+const IS_MAC = navigator.userAgent.includes('Mac');
+const PASTE_KEYS = IS_MAC ? '\u2318V' : 'Ctrl+V';
+
 const BAR_COUNT = 27;
 
 // Deck meter: discrete segments rather than the pill's continuous bar.
@@ -43,9 +52,17 @@ export default function Hud() {
         }
       }
       if (e.kind === 'empty') setOutcome({ text: e.reason, kind: 'ok' });
+      if (e.kind === 'completed' && e.withheld) return;
       if (e.kind === 'error') setOutcome({ text: e.message, kind: 'error' });
-      if (e.kind === 'completed' && e.injection?.manual_paste_required) {
-        setOutcome({ text: 'Copied. Press ⌘V to paste (secure field)', kind: 'ok' });
+      if (e.kind === 'completed' && e.injection?.manual_paste_required && !e.withheld) {
+        // PLATFORM-AWARE, and it does not claim to know why.
+        //
+        // This was a bare '⌘V', which is wrong on the half of the product that
+        // runs on Windows, and it is the only paste instruction Parle ever
+        // gives. It also asserted "(secure field)" unconditionally, while the
+        // same outcome is returned when the field is ordinary and merely a
+        // password manager is running.
+        setOutcome({ text: `Copied. Press ${PASTE_KEYS} to paste`, kind: 'ok' });
       }
       // Theme may have changed while the HUD was hidden.
       if (e.kind === 'state_changed' && e.state === 'recording') {

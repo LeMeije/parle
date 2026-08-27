@@ -78,6 +78,12 @@ fn r10_a_an_existing_install_never_gains_the_new_exclusions() {
     // An install created before the round-9 additions.
     let mut old = echokey_core::settings::Settings::default();
     old.version = 1;
+    // A build from before round 12 never wrote `excluded_defaults_seen`, so an
+    // old file does not have it. Synthesising the premise from the CURRENT
+    // default struct pre-populates it with every shipped exclusion, which
+    // claims the install has already been offered them all and is the opposite
+    // of what this test is describing.
+    old.excluded_defaults_seen.clear();
     old.history.excluded_apps =
         vec!["com.1password.1password".into(), "1Password.exe".into()];
     std::fs::write(&path, serde_json::to_string_pretty(&old).unwrap()).unwrap();

@@ -534,9 +534,17 @@ impl Store {
         app_id: Option<&str>,
         app_name: Option<&str>,
     ) -> Result<i64, StoreError> {
+        // ONE transaction, not an INSERT followed by an UPDATE.
+        //
+        // `insert_transcription` commits, and between that commit and a second
+        // one the row is durable, has an origin id and has `local_only = 0`,
+        // which is exactly the shape `items_from` hands to `serve`. This app
+        // quits with `libc::_exit(0)`. The row exposed by that window is the one
+        // this whole column exists to withhold.
+        let tx = self.conn.unchecked_transaction()?;
         let id = self.insert_transcription(r, app_id, app_name)?;
-        self.conn
-            .execute("UPDATE items SET local_only = 1 WHERE id = ?1", params![id])?;
+        tx.execute("UPDATE items SET local_only = 1 WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(id)
     }
 
@@ -901,8 +909,21 @@ impl Store {
             // dictation, and the other machine never learns. `next_clock_for`
             // is the max over every item AND tombstone we hold for the source,
             // so it beats the row and the cursor at once.
-            let _ = current;
-            Ok((self.local_clock_at(now_ms())?, true))
+            //
+            // ROUND 12. The paragraph above was written before the clock had a
+            // CEILING. `local_clock_at` now clamps to `now + MAX_CLOCK_SKEW_MS`,
+            // so after a backwards clock step it returns a value BELOW the row
+            // being edited, and the UPDATE walks the row's own clock down.
+            // A peer applies last-writer-wins on `updated_at` and refuses
+            // anything not strictly greater, so the correction is refused for
+            // ever. It is worse than the delete case round 11 fixed: the edit
+            // destroys the author's only copy of the higher clock, so no later
+            // exchange and no clock correction can produce one, and the two
+            // machines hold different text under one identity permanently.
+            //
+            // Both properties are needed, so take both: above the cursor, and
+            // above the row.
+            Ok((self.local_clock_at(now_ms())?.max(current.saturating_add(1)), true))
         } else {
             Ok((current, false))
         }
@@ -965,7 +986,23 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let row: Option<(Option<String>, Option<String>, i64)> = tx
             .query_row(
-                "SELECT source_machine, origin_id, COALESCE(updated_at, created_at) FROM items WHERE id=?1",
+                // `local_only=0` is part of the MATCH, not a check afterwards.
+                //
+                // Withholding the dictation did not withhold the FACT of it.
+                // `local_only` was filtered in exactly one place, `items_from`,
+                // and neither delete path consulted it, so every dictation the
+                // accessibility probe could not classify was announced to every
+                // paired peer as an ordinary tombstone carrying its identity,
+                // when it was taken and when it was deleted, and the peer
+                // banked a permanent absorbing tombstone for a row it was never
+                // allowed to see. `tombstones_from` cannot filter this itself:
+                // the tombstones table has no such column, by design, because a
+                // tombstone for a withheld row should never be written at all.
+                //
+                // No peer ever saw the row, so no peer needs to hear the
+                // delete. The row is still removed below.
+                "SELECT source_machine, origin_id, COALESCE(updated_at, created_at) FROM items \
+                 WHERE id=?1 AND local_only=0",
                 params![id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -990,8 +1027,19 @@ impl Store {
 
     /// The replication clock for a row WE are writing.
     ///
-    /// Strictly above every clock this machine has already stamped on its own
-    /// source, bounded at half the skew window exactly as `delete_clock` is.
+    /// Above every clock this machine has already stamped on its own source
+    /// WHERE THE CEILING ALLOWS IT, bounded at half the skew window exactly as
+    /// `delete_clock` is.
+    ///
+    /// Not "strictly above", which this said until round 12 and has not been
+    /// true since round 11 gave the clock a ceiling. Once `newest` reaches
+    /// `now + skew` the stamp stops climbing, so writes inside one millisecond
+    /// share a clock. That is survivable and deliberate: the cursor has been a
+    /// PAIR since schema v7, `items_from` pages on
+    /// `(updated_at, origin_id)`, and a shared clock is broken by origin, so
+    /// both rows are still offered. Reuse costs a row only where something
+    /// compares clocks ALONE, which is last-writer-wins on an edit, and
+    /// `edit_stamp` takes its own `max(current + 1)` for exactly that reason.
     ///
     /// The bare wall clock is not enough, and this is the third place that has
     /// had to learn it. Our own clock can be dragged AHEAD of the wall clock by
@@ -1228,7 +1276,7 @@ impl Store {
                             max(?2, min(COALESCE(n.c, 0) + 1, ?3)), 1
                        FROM items i
                        LEFT JOIN newest n ON n.src = i.source_machine
-                      WHERE i.kind=?1 AND i.pinned=0
+                      WHERE i.kind=?1 AND i.pinned=0 AND i.local_only=0
                         AND i.source_machine IS NOT NULL AND i.origin_id IS NOT NULL
                      ON CONFLICT(source_machine, origin_id)
                      DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at),
@@ -1254,7 +1302,7 @@ impl Store {
                             max(?1, min(COALESCE(n.c, 0) + 1, ?2)), 1
                        FROM items i
                        LEFT JOIN newest n ON n.src = i.source_machine
-                      WHERE i.pinned=0
+                      WHERE i.pinned=0 AND i.local_only=0
                         AND i.source_machine IS NOT NULL AND i.origin_id IS NOT NULL
                      ON CONFLICT(source_machine, origin_id)
                      DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at),
@@ -2163,7 +2211,7 @@ impl Store {
     }
 }
 
-const SELECT_COLS: &str = "SELECT id, kind, text, raw_text, created_at, pinned, duration_ms, model_id, language, app_id, app_name, meta FROM items";
+const SELECT_COLS: &str = "SELECT id, kind, text, raw_text, created_at, pinned, duration_ms, model_id, language, app_id, app_name, local_only, meta FROM items";
 
 fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
     let kind: String = row.get(1)?;
@@ -2179,7 +2227,8 @@ fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
         language: row.get(8)?,
         app_id: row.get(9)?,
         app_name: row.get(10)?,
-        meta: row.get(11)?,
+        local_only: row.get::<_, i64>(11)? != 0,
+        meta: row.get(12)?,
     })
 }
 

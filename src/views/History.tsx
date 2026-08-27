@@ -30,6 +30,23 @@ export default function HistoryView() {
   // `.catch`, so the click did nothing at all, silently, for ever. Say so and
   // reload rather than leaving the user pressing a dead button.
   const [gone, setGone] = useState(false);
+  // Names for the delete confirmation. A delete travels and is absorbing on the
+  // peer, so the confirmation has to be able to say WHERE it travels to.
+  const [pairedNames, setPairedNames] = useState<string[]>([]);
+  useEffect(() => {
+    api
+      .syncStatus()
+      .then((st) => setPairedNames(st.enabled ? st.paired.map((d) => d.name) : []))
+      .catch(() => setPairedNames([]));
+  }, []);
+
+  function confirmDelete(item: HistoryItem): boolean {
+    const where =
+      pairedNames.length > 0 && !item.local_only
+        ? `\n\nThis also deletes it from ${pairedNames.join(', ')}.`
+        : '';
+    return window.confirm(`Delete this item? It cannot be undone.${where}`);
+  }
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -160,7 +177,18 @@ export default function HistoryView() {
               <div className="row-footer">
                 <div className="row-meta">
                   <span>{timeAgo(item.created_at)}</span>
-                  {item.app_name && <span>· {item.app_name}</span>}
+                  {/* `?? app_id`: the Windows probe returns the exe name in
+                      `app_id` and hard-codes the display slot to null, so a
+                      Windows-authored row showed no application at all, on both
+                      machines, in the same list as Mac rows that showed one. */}
+                  {(item.app_name ?? item.app_id) && <span>· {item.app_name ?? item.app_id}</span>}
+                  {/* A row that will never reach the other machine says so on a
+                      feature whose whole promise is that it does. */}
+                  {item.local_only && (
+                    <span className="badge" title="Parle could not rule out that this was a password field, so it is kept on this device and never sent to your other devices">
+                      this device only
+                    </span>
+                  )}
                   {item.duration_ms != null && <span>· {(item.duration_ms / 1000).toFixed(1)}s</span>}
                   {item.model_id && <span>· {shortModel(item.model_id)}</span>}
                   {item.language && item.kind === 'transcription' && (
@@ -188,7 +216,13 @@ export default function HistoryView() {
                   <button title={item.pinned ? 'Unpin' : 'Pin'} onClick={(e) => { e.stopPropagation(); api.pinItem(item.id, !item.pinned).then(refresh).catch(vanished); }}>
                     {item.pinned ? <PinOff size={14} /> : <Pin size={14} />}
                   </button>
-                  <button className="danger" title="Delete" onClick={(e) => { e.stopPropagation(); api.deleteItem(item.id).then(refresh).catch(vanished); }}>
+                  {/* Confirmed, because a delete TRAVELS.
+                      Clearing all history is guarded by a callout naming every
+                      paired device; deleting one row, which is equally
+                      irreversible and equally absorbing on the peer, was a
+                      single unguarded click. The capability existed and had
+                      simply not been applied to the riskier action. */}
+                  <button className="danger" title="Delete" onClick={(e) => { e.stopPropagation(); if (!confirmDelete(item)) return; api.deleteItem(item.id).then(refresh).catch(vanished); }}>
                     <Trash2 size={14} />
                   </button>
                 </div>

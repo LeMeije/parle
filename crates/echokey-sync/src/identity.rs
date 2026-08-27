@@ -111,8 +111,25 @@ pub fn validate_device_name(name: &str) -> Result<(), IdentityError> {
     // putting it here refuses such a name rather than displaying it. A device
     // announcing "Ben\u{202E}koobcaM sneB" renders as a plausible reading of
     // the user's own laptop; it does not get to appear in the list at all.
+    // The WHITESPACE COLLAPSE is checked here, not only in the sanitiser.
+    //
+    // Round 11 taught `sanitise_device_name` to collapse whitespace runs and
+    // wrote down exactly what it was defending: the pairing list, which is
+    // HTML, so a browser collapses the run; whose duplicate check is exact
+    // string equality, so two rows that render identically are not flagged; and
+    // which shows no device id to tell them apart. Every word of that was
+    // right, and the fix went on a function the pairing list never calls.
+    //
+    // The unpaired list is built by `discovery::peer_from`, whose only gate is
+    // THIS function. `sanitise_device_name` is reached from `usable_peer_name`,
+    // which is applied to the PAIRED list. So "Ben's  MacBook Pro" still
+    // reached the list where the user aims the only authentication in the
+    // system, still rendered pixel-identically to the honest peer, and still
+    // was not flagged as a duplicate.
+    let collapsed = name.split_whitespace().collect::<Vec<_>>().join(" ");
     let ok = !name.is_empty()
         && name.len() <= MAX_DEVICE_NAME_BYTES
+        && name == collapsed
         && !name.contains('=')
         && !name.chars().any(char::is_control)
         && !name.chars().any(is_invisible_or_bidi);
@@ -135,6 +152,29 @@ pub fn validate_device_name(name: &str) -> Result<(), IdentityError> {
 /// format characters are invisible, so two devices can show labels that are
 /// indistinguishable on screen and different on the wire.
 fn is_invisible_or_bidi(c: char) -> bool {
+    // CATEGORY FIRST, then the handful of characters that are not Cf.
+    //
+    // The list below was extended twice by hand and was wrong both times, in
+    // the same way: round 11 added U+115F and U+1160 with the note that
+    // "listing one without the others was banning a construct by example", and
+    // then banned U+2060 WORD JOINER while admitting its immediate neighbours
+    // U+2061 to U+2064, which are the same category, render as nothing, and
+    // produce a pairing-list label pixel-identical to an honest peer's.
+    //
+    // `Cf` (format) is the authoritative name for "not a control character and
+    // does not render", so ask the Unicode data rather than a list somebody has
+    // to remember to extend.
+    //
+    // ZWNJ and ZWJ are Cf and are deliberately ALLOWED through below: they are
+    // load-bearing in Persian, Hindi and emoji sequences, and banning them
+    // would refuse honest names. Variation selectors are Mn, not Cf, so the
+    // existing exemption for them is unaffected.
+    use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+    if c.general_category() == GeneralCategory::Format
+        && !matches!(c, '\u{200C}' | '\u{200D}')
+    {
+        return true;
+    }
     matches!(c,
         // Soft hyphen and the zero-width space family.
         '\u{00AD}' | '\u{200B}' | '\u{2060}' | '\u{FEFF}' | '\u{180E}'

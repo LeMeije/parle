@@ -99,6 +99,36 @@ tombstone already held for that source, bounded at half the skew window so the
 fix cannot itself produce a delete the receiving side would refuse. The older
 stamp has not been needed since tombstones became absorbing.
 
+### Secrets do not cross, and there are THREE answers not two
+
+A dictation is classified before it is injected, by `FieldSecrecy` in
+`pipeline.rs`:
+
+- **Secure.** The accessibility probe says this is a password field. The row is
+  never stored. The text goes to the clipboard concealed, for the user to paste.
+- **Ordinary.** Stored and replicated normally.
+- **Unknown.** The probe could not answer AND secure input is on. This is the
+  third answer, and it exists because a boolean forced a bad guess: dropping
+  every one of these made the product discard real dictations, and storing them
+  sent suspected passwords to the user's other machine. Such a row is stored
+  with `items.local_only = 1` (schema v8), kept on this device and never offered
+  to a peer.
+
+Three consequences that are easy to get wrong, and were:
+
+- `local_only` is filtered in `items_from`, and the DELETE paths have to filter
+  it too. Withholding the row does not withhold the FACT of it: an unfiltered
+  delete mints an ordinary tombstone naming the identity and the timing, and the
+  peer banks a permanent absorbing tombstone for a row it was never allowed to
+  see.
+- The row must be flagged in the SAME transaction that inserts it. An INSERT
+  followed by an UPDATE leaves it durable and replicable in between.
+- Withholding a row is invisible unless the user is told. `secure_input_active()`
+  is process-global on macOS and one crashed app can leave it stuck on, in which
+  case every dictation is withheld. The pipeline emits `PipelineEvent::Empty`
+  and marks `Completed { withheld }` so no later event overwrites the
+  explanation.
+
 ### Other things that are load-bearing
 
 - **Turn-taking.** The dialler writes first, the acceptor reads first. A

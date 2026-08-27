@@ -63,3 +63,12 @@ mod adversarial_r11_sec;
 
 #[cfg(test)]
 mod adversarial_r11_data;
+
+#[cfg(test)]
+mod adversarial_r12_flow;
+
+#[cfg(test)]
+mod adversarial_r12_sec;
+
+#[cfg(test)]
+mod adversarial_r12_data;

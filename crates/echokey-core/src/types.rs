@@ -76,6 +76,13 @@ pub struct HistoryItem {
     /// Source app (bundle id on macOS, exe name on Windows).
     pub app_id: Option<String>,
     pub app_name: Option<String>,
+    /// Kept on this device and never offered to a paired device.
+    ///
+    /// On a feature whose whole promise is "it is on both machines", a row that
+    /// will never be on the other one has to say so. The column existed from
+    /// schema v8 and was honoured by `items_from` and nowhere else, so it could
+    /// not reach the IPC payload and the UI could not show it.
+    pub local_only: bool,
     /// JSON blob: trimmed spans, low-confidence spans, cleanup tier, etc.
     pub meta: Option<String>,
 }

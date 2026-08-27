@@ -112,8 +112,12 @@ and the one most likely to surprise.
    switched on. On macOS, accept the local-network prompt.
 2. **Discovery.** Confirm each machine lists the other. If not, work down the
    remediation list in the failure message of `mdns_field_check`.
-3. **Pair.** The machine SHOWING the code is the one that only receives. Type the
-   6 digits on the other.
+3. **Pair.** One machine shows a 6 digit code, the other types it. That is the
+   only asymmetry: it decides who dials, not who sends. Pairing is mutual and
+   history flows BOTH ways from the first exchange, which is what step 4 and
+   step 5 are checking. The earlier wording here said the showing machine "only
+   receives", which is true of the connection and false of the data, and a
+   tester who believed it would read the next two steps as failures.
 4. **A dictation on one appears on the other.**
 5. **A copy on one appears on the other**, with the clipboard kind switched on.
 6. **Delete on the RECEIVING device and confirm it disappears on the author.**

@@ -741,7 +741,7 @@ fn r11_the_settings_migration_is_idempotent_and_a_union() {
 }
 
 #[test]
-fn r11_diag_what_the_settings_version_field_defaults_to() {
+fn r11_the_exclusion_union_does_not_depend_on_the_version_field() {
     use crate::settings::{Settings, SETTINGS_VERSION};
     let dir = tempfile::tempdir().unwrap();
 
@@ -760,13 +760,17 @@ fn r11_diag_what_the_settings_version_field_defaults_to() {
     std::fs::write(&q, r#"{"version":9,"history":{"excluded_apps":["com.mine.only"]}}"#).unwrap();
     let b = Settings::load(&q).unwrap();
 
-    // Recorded, not judged: every settings.json this app has ever written
-    // carries `version` (the field is in the first commit that created the
-    // struct), so (a) is unreachable today. (b) needs a downgrade.
+    // (a) INVERTED IN ROUND 12, on this test's own instruction. Round 12 found
+    // that the `if self.version < 2` gate could only ever fire once, which
+    // reproduces for the next addition exactly the defect the union exists to
+    // fix. The gate is gone and the union now runs on every load, so a
+    // version-less file migrates like any other and the hole this recorded is
+    // closed rather than merely documented.
     assert!(
-        !migrated_without_a_version,
-        "if this ever starts passing, a version-less settings file DOES migrate and this \
-         diagnostic can go"
+        migrated_without_a_version,
+        "a settings file with no version field does not pick up the shipped exclusions. The \
+         union is meant to run on every load precisely so that no gate decides who gets \
+         protected"
     );
     assert_eq!(
         b.version, SETTINGS_VERSION,
