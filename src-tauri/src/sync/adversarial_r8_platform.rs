@@ -582,26 +582,54 @@ fn r8_device_names_pass_invisible_and_direction_changing_characters() {
         );
     }
 
-    // The gap. Each of these is accepted verbatim and shown to the user.
+    // INVERTED: these must now be STRIPPED, not passed through.
+    //
+    // The name arrives in an UNSIGNED mDNS record and is what the user reads
+    // when choosing which machine to type a 6-digit pairing code into, so it is
+    // a security-relevant label. `char::is_control` covers none of these:
+    // U+202E reverses everything after it, so a hostile device can present a
+    // name that reads like the user's own laptop, and the zero-width ones let
+    // two devices show labels that are identical on screen and different on the
+    // wire.
     let sneaky = [
         ("bidi override", "Ben's Mac\u{202E}kcaM s'reggoL"),
         ("zero width space", "Ben's\u{200B} Mac"),
         ("soft hyphen", "Ben's\u{00AD}Mac"),
         ("rtl mark", "G14\u{200F}"),
+        ("lri isolate", "G14\u{2066}spoof"),
     ];
     for (label, raw) in sneaky {
         let out = sanitise_device_name(raw)
-            .unwrap_or_else(|| panic!("{label}: expected it to be accepted"));
-        assert_eq!(out, raw, "{label}: passed through untouched");
-        assert!(validate_device_name(&out).is_ok(), "{label}: and the wire accepts it");
+            .unwrap_or_else(|| panic!("{label}: there are usable characters, so it must survive"));
+        assert!(
+            !out.chars().any(|c| matches!(c,
+                '\u{00AD}' | '\u{200B}' | '\u{FEFF}' | '\u{200C}' | '\u{200D}'
+                | '\u{200E}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')),
+            "{label}: an invisible or direction-changing character survived as {out:?}"
+        );
+        assert!(validate_device_name(&out).is_ok(), "{label}: and the result must be sendable");
     }
 
-    // Two different machines can also collapse to the SAME label, because the
-    // 64-byte trim cuts a non-Latin hostname at about 21 characters.
+    // Control: the stripping is targeted, not a blanket ban on non-ASCII.
+    for name in ["会議室のMac", "Ben's Mac", "Bureau-Élodie"] {
+        assert_eq!(
+            sanitise_device_name(name).as_deref(),
+            Some(name),
+            "ordinary non-ASCII names must be left alone"
+        );
+    }
+
+    // STILL OPEN, and recorded rather than asserted away: the 64-BYTE trim cuts
+    // a non-Latin hostname at about 21 characters, so two distinct machines can
+    // present one indistinguishable label. Truncation is unavoidable (the wire
+    // caps the name) and the honest fix is in the UI, which should disambiguate
+    // identical names with the device id short form that discovery already
+    // computes. Asserted so the day it changes, this note gets revisited.
     let one = sanitise_device_name(&format!("{}-laptop", "会議室".repeat(7))).unwrap();
     let two = sanitise_device_name(&format!("{}-desktop", "会議室".repeat(7))).unwrap();
     assert_eq!(
         one, two,
-        "two distinct hostnames sanitise to one indistinguishable name in the pairing list"
+        "two distinct hostnames still sanitise to one label; the pairing list is where that has \
+         to be disambiguated, with the device id"
     );
 }

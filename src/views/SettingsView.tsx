@@ -969,7 +969,17 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
                         user needs to be able to see. */}
                     <span className={`sync-dot ${d.last_sync_ok ? 'online' : ''}`} />
                     <span className="sync-device-body">
-                      <span className="sync-device-name">{d.name}</span>
+                      {/* The id is shown when two devices present the SAME
+                          name. Names come from an unsigned mDNS record and are
+                          trimmed to a byte budget, so two distinct machines can
+                          collapse to one label; picking the wrong one to trust
+                          is the whole pairing decision. */}
+                      <span className="sync-device-name">
+                        {d.name}
+                        {status.paired.filter((o) => o.name === d.name).length > 1 && (
+                          <code className="sync-device-id"> {d.id.slice(0, 8)}</code>
+                        )}
+                      </span>
                       <span className="sync-device-meta">
                         {d.last_sync_ok
                           ? `Synced ${agoLabel(d.last_sync_ok)}`
@@ -1104,7 +1114,12 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
                           setPairError(null);
                         }}
                       >
-                        <span className="sync-peer-name">{p.name}</span>
+                        <span className="sync-peer-name">
+                          {p.name}
+                          {unpaired.filter((o) => o.name === p.name).length > 1 && (
+                            <code className="sync-device-id"> {p.id.slice(0, 8)}</code>
+                          )}
+                        </span>
                         <span className="sync-peer-addr">
                           {p.addr}:{p.port}
                         </span>

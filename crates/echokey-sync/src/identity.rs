@@ -107,6 +107,30 @@ pub fn validate_device_name(name: &str) -> Result<(), IdentityError> {
     }
 }
 
+/// Characters that are not control characters but do not honestly render.
+///
+/// A device name arrives from an UNSIGNED mDNS record and is what the user
+/// reads when deciding which machine to type a 6-digit pairing code into. That
+/// makes it a security-relevant label, not decoration.
+///
+/// `char::is_control` does not cover any of these. U+202E (right-to-left
+/// override) reverses everything after it, so a hostile machine can present a
+/// name that reads like the user's own laptop. U+200B, U+00AD and the other
+/// format characters are invisible, so two devices can show labels that are
+/// indistinguishable on screen and different on the wire.
+fn is_invisible_or_bidi(c: char) -> bool {
+    matches!(c,
+        // Zero-width and soft hyphen.
+        '\u{00AD}' | '\u{200B}' | '\u{FEFF}'
+        // Zero-width joiners and non-joiners.
+        | '\u{200C}' | '\u{200D}'
+        // Bidirectional marks, embeddings, overrides and isolates.
+        | '\u{200E}'..='\u{200F}'
+        | '\u{202A}'..='\u{202E}'
+        | '\u{2066}'..='\u{2069}'
+    )
+}
+
 /// Make a user-chosen name safe to put on the wire, or say it cannot be.
 ///
 /// `validate_device_name` is a gate on a value that is already stored, and the
@@ -130,7 +154,7 @@ pub fn validate_device_name(name: &str) -> Result<(), IdentityError> {
 pub fn sanitise_device_name(raw: &str) -> Option<String> {
     let cleaned: String = raw
         .chars()
-        .filter(|c| !c.is_control() && *c != '=')
+        .filter(|c| !c.is_control() && *c != '=' && !is_invisible_or_bidi(*c))
         .collect::<String>()
         .trim()
         .to_string();

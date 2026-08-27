@@ -432,11 +432,33 @@ impl Pipeline {
             low_confidence: low_confidence.clone(),
             cleanup_tier: if settings.cleanup.enabled { 1 } else { 0 },
         };
-        let item_id = self
-            .store
-            .lock()
-            .insert_transcription(&tr, app_id.as_deref(), app_name.as_deref())
-            .unwrap_or(-1);
+        // A dictation into a SECURE FIELD is not kept.
+        //
+        // `inject_text` reports `manual_paste_required` when macOS secure event
+        // input is on, which is what a password field turns on. On that path the
+        // platform layer deliberately marks the clipboard write CONCEALED so no
+        // other clipboard manager keeps it, and then this line stored it anyway
+        // and replication carried it to every paired device. Parle was telling
+        // every other app on the machine not to hold the user's banking
+        // password while holding it itself and posting it to their work PC.
+        //
+        // The row is dropped rather than flagged: there is no view in which a
+        // password typed into a password field belongs in a history that syncs.
+        // The text is still on the clipboard for the user to paste, which is
+        // the whole point of that branch.
+        let into_secure_field = injection
+            .as_ref()
+            .map(|o| o.manual_paste_required)
+            .unwrap_or(false);
+        let item_id = if into_secure_field {
+            tracing::info!("dictation went to a secure field; not storing it in history");
+            -1
+        } else {
+            self.store
+                .lock()
+                .insert_transcription(&tr, app_id.as_deref(), app_name.as_deref())
+                .unwrap_or(-1)
+        };
 
         (self.sink)(PipelineEvent::Completed {
             item_id,
