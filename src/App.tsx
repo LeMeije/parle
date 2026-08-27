@@ -36,7 +36,7 @@ export default function App() {
         const preview = e.text.length > 42 ? e.text.slice(0, 42) + '…' : e.text;
         showToast(
           e.injection?.manual_paste_required
-            ? 'Copied — press paste to insert (secure field)'
+            ? 'Copied. Press paste to insert (secure field)'
             : e.injection
               ? `Inserted "${preview}"`
               : `Copied "${preview}"`,

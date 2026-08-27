@@ -123,7 +123,7 @@ const TRAY_STYLES: [string, string, [string, 'light' | 'dark'][]][] = IS_MAC
       ['badge', 'Blue badge', [[trayBadge, 'light']]],
       [
         'auto',
-        'Auto — match taskbar',
+        'Auto: match taskbar',
         [
           [trayDark, 'light'],
           [trayLight, 'dark'],
@@ -240,7 +240,7 @@ export default function SettingsView({
       </header>
 
       <Section title="Hotkeys">
-        <Field label="Dictation key" hint={IS_MAC ? 'Fn needs Accessibility permission' : 'Right Alt is AltGr on many layouts — Right Ctrl is safer'}>
+        <Field label="Dictation key" hint={IS_MAC ? 'Fn needs Accessibility permission' : 'Right Alt is AltGr on many layouts, so Right Ctrl is safer'}>
           <select
             value={isCustom ? CUSTOM : dictationKey}
             onChange={(e) => {
@@ -395,7 +395,7 @@ export default function SettingsView({
         )}
         <Toggle
           label="Press Enter after inserting"
-          hint="Sends the message right after pasting — handy for chat apps. Never fires on secure fields."
+          hint="Sends the message right after pasting, handy for chat apps. Never fires on secure fields."
           value={s.paste.press_enter}
           onChange={(v) => set((d) => (d.paste.press_enter = v))}
         />
@@ -411,7 +411,7 @@ export default function SettingsView({
             ))}
           </div>
         </Field>
-        <Field label="Palette" hint="Pastel tints itself from your accent colour — try it with the custom wheel">
+        <Field label="Palette" hint="Pastel tints itself from your accent colour, so try it with the custom wheel">
           <div className="seg">
             {['paper', 'pastel', 'bold', 'retro'].map((p) => (
               <button key={p} className={s.appearance.palette === p ? 'active' : ''} onClick={() => set((d) => (d.appearance.palette = p))}>
@@ -497,8 +497,30 @@ export default function SettingsView({
 
       <Section title="History & privacy">
         <Toggle label="Capture clipboard" hint="Everything you copy, searchable. Password managers are excluded" value={s.history.clipboard_capture} onChange={(v) => set((d) => (d.history.clipboard_capture = v))} />
+        {/* Narrowing this deletes rows outright and writes NO tombstone, so the
+            peer never re-offers them: they are gone from this machine for good
+            even while the other one still has them. Widening is safe and is
+            repaired automatically (set_retention_days clears the receipts), so
+            only the narrowing direction is confirmed. */}
         <Field label="Keep items for">
-          <select value={s.history.retention_days} onChange={(e) => set((d) => (d.history.retention_days = Number(e.target.value)))}>
+          <select
+            value={s.history.retention_days}
+            onChange={(e) => {
+              const next = Number(e.target.value);
+              const current = s.history.retention_days;
+              // 0 is "forever", so it is the WIDEST window, not the narrowest.
+              const narrowing = next !== 0 && (current === 0 || next < current);
+              if (
+                narrowing &&
+                !window.confirm(
+                  'Items older than that will be deleted from this device and cannot be brought back, even from a paired device. Continue?'
+                )
+              ) {
+                return;
+              }
+              set((d) => (d.history.retention_days = next));
+            }}
+          >
             <option value={0}>Forever</option>
             <option value={90}>90 days</option>
             <option value={30}>30 days</option>
@@ -799,6 +821,18 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
     setActionError(null);
     try {
       await api.syncSetDeviceName(next);
+      // The backend SANITISES rather than rejects: it strips `=` (the name
+      // rides in an mDNS TXT key=value pair), strips invisible and
+      // direction-changing characters, and trims to a byte budget. All of that
+      // used to happen in silence, so a user typing "Ben=Work" got "BenWork"
+      // back with no word about why. Compare and say so.
+      const st = await api.syncStatus();
+      setStatus(st);
+      if (st.device_name !== next) {
+        setActionError(
+          `Saved as "${st.device_name}". A device name cannot contain "=" or hidden characters, and is trimmed to fit.`
+        );
+      }
     } catch (e) {
       setActionError(errText(e));
     }
@@ -1156,15 +1190,27 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
             )}
           </div>
 
+          {/* Turning either of these back ON is not a light switch: it owes
+              every paired device a full re-offer of this machine's history and
+              clears every receipt so the peers re-offer theirs. The hint says so
+              only when there is actually a paired device to re-send to. */}
           <Toggle
             label="Sync dictations"
-            hint="Everything you dictate shows up in History on both machines"
+            hint={
+              status.paired.length > 0
+                ? 'Everything you dictate shows up in History on both machines. Turning this back on re-sends your history to your paired devices, which can take a moment.'
+                : 'Everything you dictate shows up in History on both machines'
+            }
             value={kinds.dictations}
             onChange={(v) => saveKinds({ ...kinds, dictations: v })}
           />
           <Toggle
             label="Sync clipboard"
-            hint="Copy on one machine, paste on the other"
+            hint={
+              status.paired.length > 0
+                ? 'Copy on one machine, paste on the other. Turning this back on re-sends your history to your paired devices, which can take a moment.'
+                : 'Copy on one machine, paste on the other'
+            }
             value={kinds.clipboard}
             onChange={(v) => saveKinds({ ...kinds, clipboard: v })}
           />
@@ -1261,9 +1307,9 @@ function bindingFromEvent(e: KeyboardEvent): string | null {
 
 function bindingWarning(key: string): string | null {
   if (key === 'LeftCtrl' || key === 'LeftControl')
-    return 'Left Ctrl drives most keyboard shortcuts — binding it will fire during normal use.';
+    return 'Left Ctrl drives most keyboard shortcuts, so binding it will fire during normal use.';
   if (key === 'LeftShift')
-    return 'Left Shift is pressed constantly while typing — expect false triggers.';
+    return 'Left Shift is pressed constantly while typing, so expect false triggers.';
   if (key === 'RightAlt' || key === 'RightOption')
     return 'Right Alt is AltGr on many layouts, so it types accented characters. Right Ctrl is safer.';
   return null;

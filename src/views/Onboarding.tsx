@@ -185,7 +185,7 @@ function ModelStep({ onNext }: { onNext: () => void }) {
         we recommend <strong>{rec?.model.replace('whisper-', '') ?? '…'}</strong>. You can add or switch models
         any time in Settings → Models.
       </p>
-      {error && <div className="callout error">Download failed: {error}. Check your connection and retry — it resumes where it stopped.</div>}
+      {error && <div className="callout error">Download failed: {error}. Check your connection and retry: it resumes where it stopped.</div>}
       {done ? (
         <button className="btn primary" onClick={onNext}>
           Model ready <ChevronRight size={15} />
@@ -222,13 +222,13 @@ function HotkeyStep({ onNext }: { onNext: () => void }) {
       <h1>Your key</h1>
       {IS_MAC ? (
         <p>
-          Default: the <strong>🌐 Fn key</strong>. Hold it and talk, release to paste — or tap it quickly to
+          Default: the <strong>🌐 Fn key</strong>. Hold it and talk, release to paste, or tap it quickly to
           latch recording on. Tip: set System Settings → Keyboard → “Press 🌐 key to” to{' '}
           <strong>Do Nothing</strong> so macOS dictation doesn't fight for it.
         </p>
       ) : (
         <p>
-          Default: <strong>Right Ctrl</strong>. Hold it and talk, release to paste — or tap it quickly to
+          Default: <strong>Right Ctrl</strong>. Hold it and talk, release to paste, or tap it quickly to
           latch recording on. Have a Copilot key? Bind it in Settings → Hotkeys and Parle will take it
           over completely.
         </p>
@@ -287,7 +287,7 @@ function TestStep({ onDone }: { onDone: () => void }) {
       </button>
       {result !== null && (
         <div className={`ob-result ${result ? '' : 'faint'}`}>
-          {result || 'No speech detected — try again a little louder.'}
+          {result || 'No speech detected. Try again a little louder.'}
         </div>
       )}
       <button className="btn ghost" onClick={onDone}>

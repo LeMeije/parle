@@ -45,7 +45,7 @@ export default function Hud() {
       if (e.kind === 'empty') setOutcome({ text: e.reason, kind: 'ok' });
       if (e.kind === 'error') setOutcome({ text: e.message, kind: 'error' });
       if (e.kind === 'completed' && e.injection?.manual_paste_required) {
-        setOutcome({ text: 'Copied — press ⌘V to paste (secure field)', kind: 'ok' });
+        setOutcome({ text: 'Copied. Press ⌘V to paste (secure field)', kind: 'ok' });
       }
       // Theme may have changed while the HUD was hidden.
       if (e.kind === 'state_changed' && e.state === 'recording') {
@@ -104,7 +104,7 @@ export default function Hud() {
       {style === 'minimal' ? (
         <div
           className="hud-min-inner"
-          title={state === 'recording' ? 'Recording — click to stop' : 'Transcribing…'}
+          title={state === 'recording' ? 'Recording. Click to stop' : 'Transcribing…'}
           onClick={() => (state === 'recording' ? api.stopRecording() : undefined)}
         >
           {state === 'transcribing' ? <Spinner /> : <span className="hud-dot" />}
