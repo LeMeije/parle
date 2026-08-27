@@ -20,9 +20,9 @@ Branch `windows-build`. Green, per package:
 
 | Package | Result |
 |---|---|
-| `echokey-core --lib` | 104 pass, 0 fail, 0 ignored |
-| `echokey-sync` (all targets) | 35 pass, 0 fail, 0 ignored |
-| `echokey --lib` | 139 pass, 0 fail, 0 ignored |
+| `echokey-core --lib` | 153 pass, 0 fail, 1 ignored diagnostic |
+| `echokey-sync` (all targets) | 55 pass, 0 fail, 1 ignored diagnostic |
+| `echokey --lib` | 205 pass, 0 fail, 0 ignored |
 
 Nothing is ignored and nothing is quarantined. Two `#[ignore]`d **diagnostics**
 exist on purpose and are not part of that count; see section 5.
@@ -150,6 +150,46 @@ carry the reasoning.
 
 ---
 
+## 3b. What rounds 8 to 10 established
+
+Three more adversarial rounds ran after the section above was written: eleven
+reviewers across data integrity, security, concurrency, cross-platform behaviour
+and user experience. Every one returned FAIL on its first pass. The rules in
+section 2 held; almost everything around them did not.
+
+**The newest code is the most dangerous code.** Seven times now a fix has become
+the next round's defect, and by round 10 it was the single most reliable
+predictor in this project. Round 9 found four of its eleven findings in round 8's
+fixes; round 10 found six of its eleven in round 9's. Brief the next round to
+ATTACK THE LAST ROUND'S FIXES before hunting new ground. That is where the
+defects are.
+
+**The clock rule took three rounds to get right, and each wrong version was a
+plausible reading of the last one's finding.** Round 8 clamped the floor and lost
+rows whenever a peer inside the accepted skew pushed us over. Round 9 removed the
+clamp and made a machine whose clock was once wrong permanently unable to sync,
+because nothing lowers our own newest clock. Round 10 clamped the CEILING, which
+is right because a peer only ever banks a cursor at or below its own
+`now + skew`: a stored clock above ours cannot be protecting a real cursor. If
+you change `next_clock_impl`, read all three arguments first.
+
+**A gate can be worse than the leak it closes.** Round 9 keyed the secure-field
+drop off `IsSecureEventInputEnabled()`, which is process-global and reads TRUE
+whenever a password manager is merely running. The app discarded every dictation.
+Ask the focused element, not the machine.
+
+**A stub that reads as coverage is worse than an absent one.** A fabricated macOS
+bundle id for a Windows-only product, and a `secure_input_active() -> false` with
+no comment, both passed review as protection. So did an exclusion list that
+reached new installs only, because `#[serde(default)]` fills in absent fields and
+does nothing for stale ones.
+
+**When two rounds disagree, record the disagreement in the test.** Rounds 9 and 10
+reached opposite conclusions three times (the `created_at` receipt, the transient
+marking, the variation-selector ban). Each resolution is written into the test
+that changed, with both arguments, because the verdict alone does not survive
+contact with the next reviewer.
+
 ## 4. Process rules, these are not optional
 
 ### 4.1 Triage before you fix
@@ -163,6 +203,17 @@ deliberately rejected (rewrite it to the achievable contract and record why).
 Never silently delete one.
 
 ### 4.2 Prove a test can fail
+
+A test whose PREMISE can no longer be constructed is not a finding: say the
+defect is unreachable and pin the invariant that makes it so.
+
+Timing-dependent guards are themselves defects. A vacuity check that needs two
+writes in the same wall-clock millisecond, or a wall-clock ratio, passes alone
+and fails under load; both cost a round here. Assert the invariant, or the query
+plan, instead.
+
+Keep failure output small. A test that dumps two ninety-element vectors makes
+its own result unreadable.
 
 Round 7 wrote two tests that passed against the UNFIXED code, one flooded with
 tombstones dated in the past so the eviction order could not discriminate, the

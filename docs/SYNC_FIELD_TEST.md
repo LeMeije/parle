@@ -82,6 +82,23 @@ rebuild, delete the `Parle sync` items from Keychain Access and pair again.
 
 ---
 
+## Before the field test: two things that are still true
+
+Neither is a code defect, and both change what step 5 will show you.
+
+**Accessibility permission decides whether a password-field dictation is kept.**
+The secure-field gate asks the accessibility tree what the user is typing into.
+With that permission denied it cannot tell, and a dictation into a password field
+IS stored. Parle needs the permission for paste-at-cursor anyway, so grant it on
+both machines before testing, or you will be testing the degraded path without
+knowing.
+
+**On Windows the gate sees classic Win32 password fields only.** A WinUI
+PasswordBox or a browser password input is not recognised, so a dictation into
+one is stored and replicated. That gap is written into
+`platform::windows::focused_field_is_secure` and needs UI Automation to close.
+Do not read step 5 passing as proof that secure fields are covered on Windows.
+
 ## Not done: the milestone
 
 **Two machines have still never synced.** Nothing below has been run. It needs a
@@ -117,6 +134,14 @@ and the one most likely to surprise.
     `delete_clock` made a local delete's clock strictly exceed every tombstone
     already held for that source. Worth doing by hand because the failure was
     invisible: the delete simply never arrived.
+
+12. **Set one machine's clock a day fast, write a few rows, then correct it.**
+    This is the sequence three consecutive rounds got wrong. Everything written
+    while the clock was wrong may never reach the other machine, which is
+    accepted. What must be true is that the machine RECOVERS: rows written after
+    the correction must arrive, and Clear History must still propagate. If they
+    do not, the ceiling clamp in `Store::next_clock_impl` has regressed and
+    section 3b of the handover explains why it is shaped the way it is.
 
 ## Also still open on Windows
 
