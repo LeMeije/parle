@@ -24,6 +24,12 @@ export default function HistoryView() {
   const [selected, setSelected] = useState(0);
   const [editing, setEditing] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
+  // A row can vanish underneath an open list: a delete made on a paired device
+  // arrives over sync and removes it from the store. Every action below then
+  // rejects with "not found", and each used to be a bare promise with no
+  // `.catch`, so the click did nothing at all, silently, for ever. Say so and
+  // reload rather than leaving the user pressing a dead button.
+  const [gone, setGone] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -36,6 +42,14 @@ export default function HistoryView() {
   }, [query, filter]);
 
   useEffect(refresh, [refresh]);
+
+  // Any action on a row that is no longer there. The refresh is the important
+  // half: the list is stale by definition if we got here.
+  const vanished = useCallback(() => {
+    setGone(true);
+    refresh();
+    window.setTimeout(() => setGone(false), 4000);
+  }, [refresh]);
 
   useEffect(() => {
     const un1 = onHistoryChanged(refresh);
@@ -97,11 +111,18 @@ export default function HistoryView() {
         </div>
       </div>
 
+      {gone && (
+        <div className="callout warn">
+          That item is no longer here. It was deleted on another device, so the list has been
+          refreshed.
+        </div>
+      )}
+
       <div className="history-list" ref={listRef}>
         {items.length === 0 && (
           <div className="empty">
             <Mic size={28} strokeWidth={1.6} />
-            <p>{query ? 'No matches.' : 'Nothing here yet — hold your hotkey and speak.'}</p>
+            <p>{query ? 'No matches.' : 'Nothing here yet. Hold your hotkey and speak.'}</p>
           </div>
         )}
         {items.map((item, i) => (
@@ -148,10 +169,10 @@ export default function HistoryView() {
                   <TrimBadge item={item} onRestored={refresh} />
                 </div>
                 <div className="row-actions">
-                  <button className="cta" title="Paste into the previous app (Enter)" onClick={(e) => { e.stopPropagation(); api.pasteItem(item.id); }}>
+                  <button className="cta" title="Paste into the previous app (Enter)" onClick={(e) => { e.stopPropagation(); api.pasteItem(item.id).catch(vanished); }}>
                     <CornerDownLeft size={14} /> Paste
                   </button>
-                  <button className="cta" title="Copy (⌘Enter)" onClick={(e) => { e.stopPropagation(); api.copyItem(item.id); }}>
+                  <button className="cta" title="Copy (⌘Enter)" onClick={(e) => { e.stopPropagation(); api.copyItem(item.id).catch(vanished); }}>
                     <Copy size={14} /> Copy
                   </button>
                   <button
@@ -164,10 +185,10 @@ export default function HistoryView() {
                   >
                     <Pencil size={14} />
                   </button>
-                  <button title={item.pinned ? 'Unpin' : 'Pin'} onClick={(e) => { e.stopPropagation(); api.pinItem(item.id, !item.pinned).then(refresh); }}>
+                  <button title={item.pinned ? 'Unpin' : 'Pin'} onClick={(e) => { e.stopPropagation(); api.pinItem(item.id, !item.pinned).then(refresh).catch(vanished); }}>
                     {item.pinned ? <PinOff size={14} /> : <Pin size={14} />}
                   </button>
-                  <button className="danger" title="Delete" onClick={(e) => { e.stopPropagation(); api.deleteItem(item.id).then(refresh); }}>
+                  <button className="danger" title="Delete" onClick={(e) => { e.stopPropagation(); api.deleteItem(item.id).then(refresh).catch(vanished); }}>
                     <Trash2 size={14} />
                   </button>
                 </div>

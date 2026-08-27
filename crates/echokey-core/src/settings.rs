@@ -340,25 +340,42 @@ pub struct HistorySettings {
     pub max_items: u32,
 }
 
+/// Password managers excluded from clipboard capture, BOTH identifiers for
+/// every product.
+///
+/// Generated from one table rather than two hand-kept lists, because the two
+/// lists had drifted and the drift crosses machines. LastPass carried a macOS
+/// bundle id and no Windows exe name, so copying a password out of LastPass on
+/// the PC was captured there and then replicated to the Mac, whose own list
+/// would have refused it. The exclusion rule is applied once, at capture, on
+/// the capturing machine, so an entry missing from one half is not a smaller
+/// hole on that platform: it is a hole in the pair.
+///
+/// KeePass 2.x is a different product from KeePassXC and was in neither half.
+fn default_excluded_apps() -> Vec<String> {
+    // (macOS bundle ids, Windows executable names)
+    const PASSWORD_MANAGERS: [(&[&str], &[&str]); 7] = [
+        (&["com.1password.1password", "com.agilebits.onepassword7"], &["1Password.exe"]),
+        (&["com.bitwarden.desktop"], &["Bitwarden.exe"]),
+        (&["com.lastpass.LastPass"], &["LastPass.exe"]),
+        (&["org.keepassxc.keepassxc"], &["KeePassXC.exe"]),
+        (&["com.dashlane.Dashlane"], &["Dashlane.exe"]),
+        (&["com.kee.keepass"], &["KeePass.exe"]),
+        (&["in.sinew.Enpass-Desktop"], &["Enpass.exe"]),
+    ];
+    PASSWORD_MANAGERS
+        .iter()
+        .flat_map(|(mac, win)| mac.iter().chain(win.iter()))
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
 impl Default for HistorySettings {
     fn default() -> Self {
         Self {
             clipboard_capture: true,
             retention_days: 0,
-            excluded_apps: vec![
-                // macOS bundle ids
-                "com.1password.1password".into(),
-                "com.agilebits.onepassword7".into(),
-                "com.bitwarden.desktop".into(),
-                "com.lastpass.LastPass".into(),
-                "org.keepassxc.keepassxc".into(),
-                "com.dashlane.Dashlane".into(),
-                // Windows exe names
-                "1Password.exe".into(),
-                "Bitwarden.exe".into(),
-                "KeePassXC.exe".into(),
-                "Dashlane.exe".into(),
-            ],
+            excluded_apps: default_excluded_apps(),
             encrypt_at_rest: false,
             max_items: 10_000,
         }

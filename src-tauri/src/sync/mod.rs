@@ -30,3 +30,15 @@ mod adversarial_r6_sec;
 
 #[cfg(test)]
 mod adversarial_r7_scale;
+
+#[cfg(test)]
+mod adversarial_r8_sec;
+
+#[cfg(test)]
+mod adversarial_r8_conc;
+
+#[cfg(test)]
+mod adversarial_r8_platform;
+
+#[cfg(test)]
+mod adversarial_r8_data;

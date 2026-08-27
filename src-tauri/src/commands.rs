@@ -445,6 +445,10 @@ pub fn open_permission_settings(which: String) {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     match which.as_str() {
         "microphone" => platform::imp::open_microphone_settings(),
+        // Without this arm "local-network" fell through to Accessibility, so
+        // the one button offered to a user whose mDNS is being filtered sent
+        // them to the wrong settings pane entirely.
+        "local-network" => platform::imp::open_local_network_settings(),
         _ => platform::imp::open_accessibility_settings(),
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]

@@ -603,6 +603,40 @@ pub fn read_clipboard() -> Option<String> {
     }
 }
 
+/// Clipboard formats that mean "do not capture this", in ONE place.
+///
+/// These used to be two separate lists, and they had drifted: `write_clipboard`
+/// declared three formats when marking Parle's own output, while
+/// `clipboard_is_excluded` consulted only two of them on the way IN. The same
+/// file treated `CanIncludeInClipboardHistory` as meaningful when it wrote it
+/// and meaningless when it read it, so an app that opts out only that way had
+/// its secret captured, stored, and replicated to the user's Mac, whose own
+/// stricter NSPasteboard rules never got a vote.
+///
+/// Split by SEMANTICS, because these two groups are not read the same way.
+///
+/// Presence-only markers: the format existing at all is the whole signal. Both
+/// are long-standing clipboard-manager conventions (KeePassXC, ClipMate).
+const EXCLUDE_MARKER_FORMATS: [&str; 2] = [
+    "ExcludeClipboardContentFromMonitorProcessing",
+    "Clipboard Viewer Ignore",
+];
+
+/// DWORD-valued formats where the VALUE decides: 0 means "no", non-zero means
+/// "yes, allowed". Checking presence alone would wrongly exclude content from
+/// an app that explicitly opted IN by writing 1.
+///
+/// `CanUploadToCloudClipboard` is the most on-point signal there is for this
+/// app: it is Windows' way of saying "do not move this off this machine", which
+/// is precisely what LAN sync would do. Nothing consulted it before.
+const EXCLUDE_DWORD_FORMATS: [&str; 2] =
+    ["CanIncludeInClipboardHistory", "CanUploadToCloudClipboard"];
+
+fn register_format(name: &str) -> u32 {
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe { RegisterClipboardFormatW(windows::core::PCWSTR(wide.as_ptr())) }
+}
+
 /// Write text, marked so Win+V history / cloud sync / other monitors skip it.
 pub fn write_clipboard(text: &str) {
     unsafe {
@@ -623,14 +657,10 @@ pub fn write_clipboard(text: &str) {
                 );
             }
         }
-        // Exclusion formats (KeePassXC/ClipMate conventions + Win+V history).
-        for name in [
-            "ExcludeClipboardContentFromMonitorProcessing",
-            "CanIncludeInClipboardHistory",
-            "Clipboard Viewer Ignore",
-        ] {
-            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-            let fmt = RegisterClipboardFormatW(windows::core::PCWSTR(wide.as_ptr()));
+        // Every format we would HONOUR on the way in, we also declare on the
+        // way out. Same two lists, so they cannot drift apart again.
+        for name in EXCLUDE_MARKER_FORMATS.iter().chain(EXCLUDE_DWORD_FORMATS.iter()) {
+            let fmt = register_format(name);
             if fmt != 0 {
                 // A DWORD zero payload (0 = exclude for CanIncludeInClipboardHistory).
                 if let Ok(hmem) = GlobalAlloc(GMEM_MOVEABLE, 4) {
@@ -753,16 +783,49 @@ impl Drop for ClipboardMonitor {
     }
 }
 
+/// Does the current clipboard carry any "do not capture this" marker?
+///
+/// Honours every format `write_clipboard` declares, which it did not before:
+/// `CanIncludeInClipboardHistory` was written and then ignored on the way in.
+///
+/// The caller must NOT hold the clipboard open: this opens it itself.
 fn clipboard_is_excluded() -> bool {
     unsafe {
-        for name in [
-            "ExcludeClipboardContentFromMonitorProcessing",
-            "Clipboard Viewer Ignore",
-        ] {
-            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-            let fmt = RegisterClipboardFormatW(windows::core::PCWSTR(wide.as_ptr()));
+        for name in EXCLUDE_MARKER_FORMATS {
+            let fmt = register_format(name);
             if fmt != 0 && IsClipboardFormatAvailable(fmt).is_ok() {
                 return true;
+            }
+        }
+        // For these the VALUE is the signal, so presence is not enough and
+        // absence is not a refusal: an app that never writes them has simply
+        // not expressed a preference.
+        for name in EXCLUDE_DWORD_FORMATS {
+            let fmt = register_format(name);
+            if fmt == 0 || IsClipboardFormatAvailable(fmt).is_err() {
+                continue;
+            }
+            if !open_clipboard_retry() {
+                // Cannot read the value. Refuse to capture rather than guess:
+                // the format is present, so somebody expressed a preference,
+                // and the only safe reading of an unreadable preference is no.
+                return true;
+            }
+            let allowed = (|| {
+                let handle = GetClipboardData(fmt).ok()?;
+                let ptr = GlobalLock(windows::Win32::Foundation::HGLOBAL(handle.0 as _)) as *const u32;
+                if ptr.is_null() {
+                    return None;
+                }
+                let v = *ptr;
+                let _ = GlobalUnlock(windows::Win32::Foundation::HGLOBAL(handle.0 as _));
+                Some(v != 0)
+            })();
+            let _ = CloseClipboard();
+            match allowed {
+                Some(true) => continue,   // explicitly allowed
+                Some(false) => return true, // explicitly excluded
+                None => return true,      // present but unreadable: assume no
             }
         }
         false
@@ -864,6 +927,14 @@ pub fn open_accessibility_settings() {}
 
 /// Deep-link to Settings > Privacy & security > Microphone. This is the only
 /// actionable path on Windows: there is no prompt API for unpackaged apps.
+/// Windows has no per-app local network permission; the firewall is the
+/// equivalent gate, so send the user there.
+pub fn open_local_network_settings() {
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "", "ms-settings:windowsdefender"])
+        .spawn();
+}
+
 pub fn open_microphone_settings() {
     let _ = std::process::Command::new("explorer")
         .arg("ms-settings:privacy-microphone")

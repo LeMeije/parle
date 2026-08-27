@@ -179,6 +179,14 @@ export default function SettingsView({
 
   const [customPicked, setCustomPicked] = useState(false);
   const [capturing, setCapturing] = useState(false);
+  // Clearing history is not a local action once anything is paired: `clear()`
+  // writes a tombstone for EVERY unpinned row whoever authored it, and a
+  // tombstone is absorbing and travels to every paired device. That is the
+  // intended design, it is what stops a cleared password coming back thirty
+  // seconds later, and it is exactly why the user has to be told. The paired
+  // names are fetched when the button is pressed rather than subscribed to,
+  // because this section has no other use for sync state.
+  const [confirmClear, setConfirmClear] = useState<string[] | null>(null);
 
   useEffect(() => {
     api.listAudioDevices().then(setDevices);
@@ -506,9 +514,43 @@ export default function SettingsView({
           />
         </Field>
         <Field label="Danger zone">
-          <button className="btn danger" onClick={() => api.clearHistory().then(() => window.location.reload())}>
-            Clear all unpinned history
-          </button>
+          {confirmClear === null ? (
+            <button
+              className="btn danger"
+              onClick={() => {
+                api
+                  .syncStatus()
+                  .then((st) => setConfirmClear(st.paired.map((d) => d.name)))
+                  .catch(() => setConfirmClear([]));
+              }}
+            >
+              Clear all unpinned history
+            </button>
+          ) : (
+            <div className="callout warn">
+              {confirmClear.length > 0 ? (
+                <>
+                  This deletes every unpinned item on this device and on{' '}
+                  {confirmClear.join(', ')}. Pinned items stay. It cannot be undone.
+                </>
+              ) : (
+                <>
+                  This deletes every unpinned item on this device. Pinned items stay. It
+                  cannot be undone.
+                </>
+              )}{' '}
+              <button
+                className="btn danger"
+                onClick={() => {
+                  setConfirmClear(null);
+                  api.clearHistory().then(() => window.location.reload());
+                }}
+              >
+                Clear it
+              </button>{' '}
+              <button onClick={() => setConfirmClear(null)}>Keep it</button>
+            </div>
+          )}
         </Field>
       </Section>
 
@@ -666,7 +708,23 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
   const [code, setCode] = useState('');
   const [pairError, setPairError] = useState<string | null>(null);
   const [pairBusy, setPairBusy] = useState(false);
+  // One in-flight flag for the actions that had none. Without it the enable
+  // toggle, Show a code, Cancel, Unpair and the kind switches could each be
+  // fired repeatedly while their command was still running. The backend is
+  // hardened against the worst of that, but flicking a kind switch queues a
+  // FULL re-offer of the history to every paired device each time, which is
+  // not something to let someone do by accident while wondering if it helped.
+  const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  // When we started looking with nothing found. A denied Local Network
+  // permission on macOS 14+ is INVISIBLE to us: `Discovery::start` succeeds and
+  // browsing simply never resolves anyone, so `scanning` stays true, `error`
+  // stays null and the peer list stays empty for ever. That is pixel-identical
+  // to "the other machine is off", and the user has no way to tell the two
+  // apart or to find the switch that fixes one of them. We cannot detect it, so
+  // we do the next best thing: after a while of finding nothing, say what the
+  // usual cause is and offer the pane.
+  const [emptySince, setEmptySince] = useState<number | null>(null);
 
   useEffect(() => {
     api
@@ -690,6 +748,19 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
     };
   }, []);
 
+  const nothingFound = !!status?.enabled && status.peers.length === 0;
+  useEffect(() => {
+    if (!nothingFound) {
+      setEmptySince(null);
+      return;
+    }
+    setEmptySince((t) => t ?? Date.now());
+    // Tick so the escalation can appear without needing another status event.
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [nothingFound]);
+  const searchedAWhile = emptySince !== null && now - emptySince > 25_000;
+
   const shownCode =
     status?.pairing?.role === 'showing' && status.pairing.code
       ? { code: status.pairing.code, expires_at: status.pairing.expires_at }
@@ -706,6 +777,8 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
   }, [expiresAt]);
 
   async function setEnabled(v: boolean) {
+    if (busy) return;
+    setBusy(true);
     setActionError(null);
     setStatus((st) => (st ? { ...st, enabled: v } : st));
     try {
@@ -713,6 +786,8 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
     } catch (e) {
       setActionError(errText(e));
       api.syncStatus().then(setStatus).catch(() => {});
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -730,11 +805,15 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
   }
 
   async function startPairing() {
+    if (busy) return;
+    setBusy(true);
     setActionError(null);
     try {
       setSeedCode(await api.syncStartPairing());
     } catch (e) {
       setActionError(errText(e));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -764,16 +843,22 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
   }
 
   async function unpair(id: string) {
+    if (busy) return;
+    setBusy(true);
     setConfirmUnpair(null);
     setActionError(null);
     try {
       await api.syncUnpair(id);
     } catch (e) {
       setActionError(errText(e));
+    } finally {
+      setBusy(false);
     }
   }
 
   async function saveKinds(next: { dictations: boolean; clipboard: boolean }) {
+    if (busy) return;
+    setBusy(true);
     const prev = kinds;
     setKinds(next);
     setActionError(null);
@@ -782,6 +867,8 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
     } catch (e) {
       setKinds(prev);
       setActionError(errText(e));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -789,7 +876,7 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
     return (
       <Section title="Sync">
         <div className="sync-block">
-          <div className="callout error">Sync isn’t available right now — {loadError}</div>
+          <div className="callout error">Sync isn’t available right now. {loadError}</div>
         </div>
       </Section>
     );
@@ -812,31 +899,39 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
     <Section title="Sync">
       <Toggle
         label="Sync with my other devices"
-        hint="Off unless you turn it on. Your Mac and PC talk straight to each other over your local network, end-to-end encrypted — no account, no cloud, nothing uploaded anywhere."
+        hint="Off unless you turn it on. Your Mac and PC talk straight to each other over your local network, end-to-end encrypted, with no account and nothing uploaded anywhere. While it is on, Parle announces this device's name to other machines on the same network so they can find it."
         value={status.enabled}
         onChange={setEnabled}
       />
 
+      {/* OUTSIDE the `status.enabled` guard, deliberately.
+          These two callouts used to live inside it, which made the most
+          important one unreachable: `SyncManager::fail` sets `error` AND clears
+          `enabled` in the same breath, so a failed port bind, a missing sync
+          identity or a listener that would not start wrote the explanation and
+          closed the only thing that could show it. The user flipped the switch,
+          watched it flip itself back, and got nothing. */}
+      {actionError && (
+        <div className="sync-block">
+          <div className="callout error">
+            {actionError} <button onClick={() => setActionError(null)}>Dismiss</button>
+          </div>
+        </div>
+      )}
+
+      {status.error && (
+        <div className="sync-block">
+          <div className="callout warn">
+            {status.error}{' '}
+            <button onClick={() => setEnabled(true)} disabled={busy}>
+              Try again
+            </button>
+          </div>
+        </div>
+      )}
+
       {status.enabled && (
         <>
-          {actionError && (
-            <div className="sync-block">
-              <div className="callout error">
-                {actionError} <button onClick={() => setActionError(null)}>Dismiss</button>
-              </div>
-            </div>
-          )}
-
-          {/* The backend reports why sync is on but not working — a failed port
-              bind, no usable network, a keychain refusal. Without this the panel
-              would just show an empty device list, which reads as "nothing found
-              yet" rather than "this is broken". */}
-          {status.error && (
-            <div className="sync-block">
-              <div className="callout warn">{status.error}</div>
-            </div>
-          )}
-
           <Field label="This device" hint="The name the other machine sees while pairing.">
             <input
               className="sync-name-input"
@@ -860,21 +955,41 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
               <small>Only these machines can see your history. Pairing is mutual.</small>
             </div>
             {status.paired.length === 0 ? (
-              <span className="sync-empty">No devices paired yet — pair one below to start syncing.</span>
+              <span className="sync-empty">No devices paired yet. Pair one below to start syncing.</span>
             ) : (
               <div className="sync-list">
                 {status.paired.map((d) => (
                   <div key={d.id} className="sync-device">
-                    <span className={`sync-dot ${d.online ? 'online' : ''}`} />
+                    {/* The dot follows SYNCING, not mere visibility.
+                        It used to follow `online`, which is mDNS presence
+                        alone, so a pairing whose key the keychain refuses sat
+                        here green and confident saying "Online now" while not a
+                        single row moved. Presence is still shown, in words,
+                        because "visible but not syncing" is exactly the state a
+                        user needs to be able to see. */}
+                    <span className={`sync-dot ${d.last_sync_ok ? 'online' : ''}`} />
                     <span className="sync-device-body">
                       <span className="sync-device-name">{d.name}</span>
                       <span className="sync-device-meta">
-                        {d.online ? 'Online now' : lastSeenLabel(d.last_seen)}
+                        {d.last_sync_ok
+                          ? `Synced ${agoLabel(d.last_sync_ok)}`
+                          : d.online
+                            ? 'Visible on the network, but nothing has synced yet'
+                            : lastSeenLabel(d.last_seen)}
                       </span>
                     </span>
                     {confirmUnpair === d.id ? (
                       <span className="sync-confirm">
-                        <span>Unpair {d.name}? It stops syncing and needs a new code to come back.</span>
+                        {/* Says what unpairing does NOT do, deliberately. It
+                            destroys the key and stops future exchanges; it
+                            writes no tombstones, so everything already on that
+                            device stays there. Someone unpairing a laptop they
+                            have just handed back needs to know that is not a
+                            wipe. */}
+                        <span>
+                          Unpair {d.name}? It stops syncing and needs a new code to come back. Anything
+                          already on {d.name} stays there.
+                        </span>
                         <button className="btn ghost" onClick={() => setConfirmUnpair(null)}>
                           Keep it
                         </button>
@@ -918,7 +1033,7 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
                   </div>
                   <div className="sync-countdown">
                     {remaining > 0
-                      ? `Type it on the other device — expires in ${fmtCountdown(remaining)}`
+                      ? `Type it on the other device. Expires in ${fmtCountdown(remaining)}`
                       : 'This code has expired.'}
                   </div>
                   {remaining > 0 ? (
@@ -945,15 +1060,36 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
               <>
                 {unpaired.length === 0 ? (
                   <span className="sync-empty">
-                    {status.scanning ? (
+                    {!status.scanning ? (
                       <>
-                        Looking for devices on this network… Open Parle on the other machine and turn Sync on
-                        there too.
+                        Not searching for devices right now. Open Parle on the other machine, turn Sync on
+                        there too and make sure both are on the same network.
+                      </>
+                    ) : searchedAWhile ? (
+                      <>
+                        Still nothing after a while. Check that Parle is open on the other machine with Sync
+                        turned on, and that both are on the same network.{' '}
+                        {IS_MAC ? (
+                          <>
+                            If that all looks right, macOS may be blocking Parle from seeing the local
+                            network, which looks exactly like this.{' '}
+                            <button onClick={() => api.openPermissionSettings('local-network')}>
+                              Open Local Network settings
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            If that all looks right, Windows Firewall may be blocking Parle.{' '}
+                            <button onClick={() => api.openPermissionSettings('local-network')}>
+                              Open firewall settings
+                            </button>
+                          </>
+                        )}
                       </>
                     ) : (
                       <>
-                        Not searching for devices right now. Open Parle on the other machine, turn Sync on
-                        there too, and make sure both are on the same network.
+                        Looking for devices on this network… Open Parle on the other machine and turn Sync on
+                        there too.
                       </>
                     )}
                   </span>
@@ -982,7 +1118,7 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
                     inputMode="numeric"
                     autoComplete="off"
                     spellCheck={false}
-                    placeholder="——————"
+                    placeholder="000000"
                     value={code}
                     onChange={(e) => {
                       setCode(e.target.value.replace(/\D/g, '').slice(0, 6));
@@ -1042,14 +1178,20 @@ function fmtCountdown(secs: number): string {
   return m > 0 ? `${m}:${String(secs % 60).padStart(2, '0')}` : `${secs}s`;
 }
 
-function lastSeenLabel(at: number | null): string {
-  if (at == null) return 'Never connected';
+/// "just now", "5m ago", "3h ago", "12 Mar". The bare phrase, so callers can
+/// put their own verb in front of it.
+function agoLabel(at: number): string {
   const ms = toMillis(at);
   const s = Math.floor((Date.now() - ms) / 1000);
-  if (s < 60) return 'Last seen just now';
-  if (s < 3600) return `Last seen ${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `Last seen ${Math.floor(s / 3600)}h ago`;
-  return `Last seen ${new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`;
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}
+
+function lastSeenLabel(at: number | null): string {
+  if (at == null) return 'Never connected';
+  return `Last seen ${agoLabel(at)}`;
 }
 
 function keyLabel(k: string): string {

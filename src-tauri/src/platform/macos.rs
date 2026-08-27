@@ -81,6 +81,18 @@ pub fn open_accessibility_settings() {
         .spawn();
 }
 
+/// The Local Network pane, which is where a denied mDNS permission is repaired.
+///
+/// macOS 14+ gates local network access, and a denial is SILENT for us:
+/// `Discovery::start` still succeeds, browsing simply never resolves anyone. So
+/// the app cannot detect it, and the only honest thing it can do is put the
+/// user in front of the switch.
+pub fn open_local_network_settings() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")
+        .spawn();
+}
+
 pub fn open_microphone_settings() {
     let _ = std::process::Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")

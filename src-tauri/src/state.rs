@@ -63,10 +63,16 @@ impl AppState {
             }
         }
         let device_id = loaded.sync.device_id.clone();
+        // Taken here, before `loaded` moves into the mutex. The store must know
+        // the exclusion list from the first exchange, not from the first
+        // settings write: a listener can be serving within milliseconds of
+        // launch, and a row from an excluded app must not leave in that window.
+        let excluded_apps = loaded.history.excluded_apps.clone();
         let settings = Arc::new(Mutex::new(loaded));
         let store = Arc::new(Mutex::new({
             let mut s = Store::open(&history_db_path()).expect("history store");
             s.set_device_id(&device_id);
+            s.set_excluded_apps(excluded_apps);
             s
         }));
         // Both snapshots are taken and the guard DROPPED before SyncManager::new
@@ -321,6 +327,10 @@ impl AppState {
             #[cfg(target_os = "windows")]
             h.set_suppress_copilot(s.hotkeys.suppress_copilot);
         }
+        // Replication must never hand out a row from an app the user excluded,
+        // including one captured BEFORE they added it to the list. The store is
+        // where that is enforced, so it has to be told on every settings write.
+        self.store.lock().set_excluded_apps(s.history.excluded_apps.clone());
         // Replication refuses rows older than we keep, so it has to know.
         self.sync.set_retention_days(s.history.retention_days);
         // Mirrored alongside retention, not just at launch. Missing it meant

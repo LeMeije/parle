@@ -378,8 +378,26 @@ pub struct UiPeer {
 pub struct UiPaired {
     pub id: String,
     pub name: String,
+    /// When we last ATTEMPTED an exchange with this device, successful or not.
     pub last_seen: Option<i64>,
+    /// Visible on the network right now, from mDNS alone.
+    ///
+    /// This is presence, NOT health. It says a record for this id is being
+    /// announced; it says nothing about whether a single row has ever moved.
     pub online: bool,
+    /// When an exchange with this device last actually SUCCEEDED.
+    ///
+    /// Separate from `last_seen`, which was set after the match on the exchange
+    /// result and so advanced on failure too. Between that and `online` coming
+    /// from mDNS, a pairing whose key the keychain now refuses displayed a
+    /// green dot and the words "Online now", indefinitely, while nothing
+    /// synced at all. The design notes predicted that failure would surface as
+    /// "not paired"; it surfaced as a healthy device, which is worse than
+    /// saying nothing.
+    ///
+    /// In memory only, deliberately: after a restart we genuinely have not
+    /// synced yet, and saying so is honest.
+    pub last_sync_ok: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -512,6 +530,10 @@ impl SyncManager {
                         name: p.name.clone(),
                         last_seen: p.last_seen,
                         online: false,
+                        // Nothing has synced since this process started, and
+                        // claiming otherwise from a persisted value would be
+                        // the same lie the field exists to stop.
+                        last_sync_ok: None,
                     })
                     .collect(),
                 guard: PairingGuard::new(),
@@ -674,6 +696,25 @@ impl SyncManager {
                     .name("echokey-sync-discovery".into())
                     .spawn(move || {
                         for ev in rx {
+                            // Decided under the lock, ACTED ON after it.
+                            //
+                            // The dial used to be spawned while `inner` was
+                            // still held, and `DialGuard` is built before the
+                            // spawn so that a failed spawn still frees the
+                            // slot. Those two facts together deadlock the whole
+                            // app: when `Builder::spawn` fails, std drops the
+                            // closure on the CALLING thread, so `DialGuard::drop`
+                            // runs here and calls `release_dial`, which locks
+                            // `inner` again. `parking_lot::Mutex` is not
+                            // reentrant, so this thread parks for ever holding
+                            // `inner` — and `sync_status` is a synchronous
+                            // command that locks `inner` on the main thread, so
+                            // the menu bar, the history window and the hotkey UI
+                            // all freeze behind it and the app needs a force
+                            // quit. The `tracing::warn!` written for a failed
+                            // spawn sits on the far side of the deadlock and
+                            // never runs.
+                            let mut to_dial: Option<String> = None;
                             let mut i = me.inner.lock();
                             match ev {
                                 DiscoveryEvent::PeerFound(p) => {
@@ -725,33 +766,7 @@ impl SyncManager {
                                     let room = i.dialing.len() < MAX_DIALS;
                                     if known && due && room && i.dialing.insert(id.clone()) {
                                         i.last_dial.insert(id.clone(), Instant::now());
-                                        let me3 = me.clone();
-                                        // Builder for the same reason as the
-                                        // accept loop, and the guard is built
-                                        // HERE rather than inside the closure:
-                                        // a spawn failure would otherwise leave
-                                        // the id stuck in `dialing` for ever.
-                                        let guard = DialGuard::new(me3.clone(), id.clone());
-                                        let launched = std::thread::Builder::new()
-                                            .name("echokey-sync-dial".into())
-                                            .spawn(move || {
-                                            // RAII, for the same reason the
-                                            // inbound path uses SlotGuard.
-                                            // Removing the entry as a plain
-                                            // statement after dial() meant any
-                                            // unwind inside keystore::load,
-                                            // the handshake or the exchange
-                                            // skipped it: that peer was then
-                                            // never dialled again for the life
-                                            // of the process, and four such
-                                            // panics exhausted MAX_DIALS so the
-                                            // machine dialled nobody at all.
-                                                let _slot = guard;
-                                                me3.clone().dial(id.clone());
-                                            });
-                                        if let Err(e) = launched {
-                                            tracing::warn!("sync: could not start a dial thread: {e}");
-                                        }
+                                        to_dial = Some(id.clone());
                                     }
                                 }
                                 DiscoveryEvent::PeerLost(id) => {
@@ -759,6 +774,27 @@ impl SyncManager {
                                 }
                             }
                             drop(i);
+                            // The lock is released, so a failed spawn dropping
+                            // the guard on this thread is now an ordinary
+                            // `release_dial` rather than a deadlock.
+                            if let Some(id) = to_dial {
+                                let me3 = me.clone();
+                                // RAII, for the same reason the inbound path
+                                // uses SlotGuard, and built HERE rather than
+                                // inside the closure: constructed inside, it
+                                // never exists when the spawn fails, and the id
+                                // stays in `dialing` for the life of the process.
+                                let guard = DialGuard::new(me3.clone(), id.clone());
+                                let launched = std::thread::Builder::new()
+                                    .name("echokey-sync-dial".into())
+                                    .spawn(move || {
+                                        let _slot = guard;
+                                        me3.clone().dial(id.clone());
+                                    });
+                                if let Err(e) = launched {
+                                    tracing::warn!("sync: could not start a dial thread: {e}");
+                                }
+                            }
                             me.publish();
                         }
                     })
@@ -917,6 +953,28 @@ impl SyncManager {
         }
         self.publish();
         Ok(())
+    }
+
+    /// Surface a problem that concerns ONE paired device.
+    ///
+    /// Distinct from `fail`, which is about the whole feature and switches it
+    /// off. A device whose key we cannot read must not take sync down for every
+    /// other device; it just has to stop pretending to be healthy.
+    fn report_device_problem(&self, peer_id: &str, msg: &str) {
+        let named = {
+            let i = self.inner.lock();
+            i.paired
+                .iter()
+                .find(|d| d.id == peer_id)
+                .map(|d| format!("{}: {msg}", d.name))
+        };
+        if let Some(text) = named {
+            tracing::warn!("sync: {text}");
+            let mut i = self.inner.lock();
+            i.error = Some(text);
+            drop(i);
+            self.publish();
+        }
     }
 
     /// Record why sync is not running, and make sure it stops claiming to be.
@@ -1191,8 +1249,42 @@ impl SyncManager {
         let mut s = Timed::new(s, deadline);
         write_byte(&mut s, MODE_PAIR).map_err(|e| e.to_string())?;
 
-        let p = pair_flow::run(&mut s, PairingRole::Responder, &code, (&me_id, &me_name))
-            .map_err(|_| "That code did not match. Check the digits and try again.".to_string())?;
+        // Six distinct failures used to collapse into "that code did not
+        // match", including ones where the code matched perfectly.
+        //
+        // `pair_flow::run` fails closed on a wrong code: everything after
+        // `verify_peer` runs only once the digits are PROVEN correct. So a
+        // version mismatch, a transport drop or a malformed identity all arrive
+        // here having got past the code, and telling the user their digits were
+        // wrong sends them to retype something that was never the problem. It
+        // costs them too: the showing device only refunds a guess on success,
+        // so each retry burns backoff and walks towards a lockout that no
+        // amount of retyping can clear.
+        let p = pair_flow::run(&mut s, PairingRole::Responder, &code, (&me_id, &me_name)).map_err(
+            |e| match e {
+                pair_flow::PairFlowError::Pairing(_) => {
+                    "That code did not match. Check the digits and try again.".to_string()
+                }
+                pair_flow::PairFlowError::Version { peer, ours } => format!(
+                    "These machines are running different versions of Parle \
+                     (this one speaks sync protocol {ours}, that one speaks {peer}). \
+                     Update both, then pair again."
+                ),
+                pair_flow::PairFlowError::Transport(_) => {
+                    "Lost the connection to that device before pairing finished. \
+                     Check it is still awake and on this network, then try again."
+                        .to_string()
+                }
+                pair_flow::PairFlowError::BadTag | pair_flow::PairFlowError::BadIdentity => {
+                    "That device sent something Parle could not read. If this keeps \
+                     happening, make sure it really is your device."
+                        .to_string()
+                }
+                pair_flow::PairFlowError::Session(_) => {
+                    "Could not open a secure channel to that device. Try again.".to_string()
+                }
+            },
+        )?;
         self.complete_pairing(p)
     }
 
@@ -1258,6 +1350,8 @@ impl SyncManager {
                     name: p.device_name,
                     last_seen: Some(now_ms()),
                     online: true,
+                    // Paired is not synced. The first exchange sets this.
+                    last_sync_ok: None,
                 });
             }
         }
@@ -1597,6 +1691,43 @@ impl SyncManager {
                     stats.ignored
                 );
                 self.prune_after_exchange();
+                // Tell the history window something arrived.
+                //
+                // `history-changed` was emitted from exactly ONE place in the
+                // backend: the LOCAL clipboard capture path. So a row that came
+                // in over sync did not appear in an open history window, and a
+                // row deleted on the other machine did not disappear from one,
+                // until the user happened to type in the search box. That is the
+                // feature's whole promise ("a dictation on the Mac is
+                // immediately pasteable on the Windows box") failing to be
+                // visible at the moment it actually works.
+                //
+                // The stale row was worse than the missing one: it was still
+                // clickable, and every action on it failed silently because the
+                // row was gone from the store.
+                if stats.applied_items + stats.applied_tombstones > 0 {
+                    let _ = self.app.emit("history-changed", ());
+                }
+                // An item too big for the wire is now skipped rather than
+                // failing the exchange, so the user has to be told: otherwise
+                // one row is quietly missing from the other machine for ever
+                // and nothing anywhere says which or why.
+                if stats.oversized > 0 {
+                    self.report_device_problem(
+                        &peer_id,
+                        &format!(
+                            "{} item{} too large to sync ({} MB limit). Everything else synced.",
+                            stats.oversized,
+                            if stats.oversized == 1 { " is" } else { "s are" },
+                            echokey_sync::MAX_ITEM_TEXT_BYTES / (1024 * 1024)
+                        ),
+                    );
+                }
+                // ONLY on the Ok arm. This is the difference between "we tried"
+                // and "it worked", and the UI needs the second one.
+                if let Some(d) = self.inner.lock().paired.iter_mut().find(|d| d.id == peer_id) {
+                    d.last_sync_ok = Some(now_ms());
+                }
             }
             Err(e) => tracing::info!("sync: exchange with {peer_id} ended: {e}"),
         }
@@ -1668,11 +1799,31 @@ impl SyncManager {
                 None => return,
             }
         };
+        // A key we cannot read is REPORTED, not swallowed.
+        //
+        // Keychain items are ACL'd to the identity that wrote them, so a
+        // rebuilt or re-signed bundle can be refused access to a key an earlier
+        // build stored. `docs/SYNC_DESIGN.md` predicted that would surface as
+        // "this device is not paired". It surfaced as nothing whatsoever: both
+        // arms returned silently, the device kept its place in the roster, and
+        // the only signal was a log line the user will never open. Unpairing
+        // and pairing again is the fix, and the user has to be told that.
         let key = match keystore::load(&peer_id) {
             Ok(Some(k)) => k,
-            Ok(None) => return,
+            Ok(None) => {
+                self.report_device_problem(
+                    &peer_id,
+                    "Parle has no stored key for this device. Unpair it and pair again.",
+                );
+                return;
+            }
             Err(e) => {
                 tracing::warn!("sync: keychain unavailable: {e}");
+                self.report_device_problem(
+                    &peer_id,
+                    "Cannot read the key for this device from the keychain. \
+                     Unpair it and pair again.",
+                );
                 return;
             }
         };
@@ -2004,7 +2155,7 @@ mod adversarial_round4 {
     use super::*;
 
     fn peer(id: &str) -> UiPaired {
-        UiPaired { id: id.into(), name: id.into(), last_seen: None, online: false }
+        UiPaired { id: id.into(), name: id.into(), last_seen: None, online: false, last_sync_ok: None }
     }
 
     fn info() -> PeerInfo {
@@ -2106,7 +2257,7 @@ mod adversarial_round5_availability {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     fn paired(id: &str) -> UiPaired {
-        UiPaired { id: id.into(), name: id.into(), last_seen: None, online: false }
+        UiPaired { id: id.into(), name: id.into(), last_seen: None, online: false, last_sync_ok: None }
     }
 
     fn info(addr: IpAddr, port: u16, id: &str) -> PeerInfo {
@@ -2278,7 +2429,7 @@ mod adversarial_r6_conc {
     use std::net::{IpAddr, Ipv4Addr};
 
     fn r6_paired(id: &str) -> UiPaired {
-        UiPaired { id: id.into(), name: id.into(), last_seen: None, online: false }
+        UiPaired { id: id.into(), name: id.into(), last_seen: None, online: false, last_sync_ok: None }
     }
 
     fn r6_info(addr: IpAddr, port: u16, id: &str) -> PeerInfo {

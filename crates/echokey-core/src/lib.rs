@@ -6,6 +6,7 @@
 #[cfg(test)]
 mod adversarial_r6_data;
 mod adversarial_r7_store;
+mod adversarial_r8_data;
 
 pub mod dictionary;
 pub mod formatter;

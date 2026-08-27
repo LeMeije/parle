@@ -117,6 +117,11 @@ pub struct RoundStats {
     /// meant a history larger than the cap could never finish: every pass
     /// re-sent the same first batch and stopped in the same place.
     pub resend_progress: Option<i64>,
+    /// Rows skipped because their text is larger than the wire will carry.
+    ///
+    /// Counted rather than silently dropped: one of these used to abort the
+    /// WHOLE exchange, permanently, so the number matters to the user.
+    pub oversized: usize,
     /// We hit the per-exchange batch cap with rows still to send.
     ///
     /// An ordinary exchange resumes next time, because the peer's cursor moved.
@@ -499,11 +504,43 @@ fn serve<S: Read + Write>(
             }
             let last = page.last().expect("page is not empty");
             let (last_clock, last_origin) = (last.updated_at, last.origin_id.clone());
+            // Oversized rows are SKIPPED here, not left for the encoder.
+            //
+            // `to_wire` copied the text unconditionally and nothing on this
+            // side consulted `MAX_ITEM_TEXT_BYTES`, so the refusal happened
+            // inside `session.send` and failed the ENTIRE exchange. One 5 MB
+            // clipboard row therefore stopped a pairing dead, permanently and
+            // in both directions: the page is one message so the rows in front
+            // of it never went either, the dialler serves before it drains so
+            // the peer's rows never arrived, and the cursor never advanced so
+            // the next exchange hit the same row again. Deletes stopped
+            // propagating too, which is the one guarantee the design names.
+            //
+            // The cursor still advances past a skipped row, because `last` is
+            // taken from the page before this filter. Skipping without
+            // advancing would re-offer it for ever.
+            let mut oversized_here = 0usize;
             let out: Vec<SyncItem> = page
                 .iter()
                 .filter(|r| kinds.allows(&r.kind))
+                // The user's exclusion list is applied in `Store::items_from`,
+                // inside the SQL, so LIMIT counts rows we will actually send.
+                // See `Store::set_excluded_apps` for why it lives there.
+                .filter(|r| {
+                    let ok = r.text.len() <= echokey_sync::MAX_ITEM_TEXT_BYTES;
+                    if !ok {
+                        oversized_here += 1;
+                        tracing::warn!(
+                            "sync: not sending a {} byte item; the limit is {}",
+                            r.text.len(),
+                            echokey_sync::MAX_ITEM_TEXT_BYTES
+                        );
+                    }
+                    ok
+                })
                 .filter_map(to_wire)
                 .collect();
+            stats.oversized += oversized_here;
             let more = full;
             if !out.is_empty() {
                 stats.sent_items += out.len();
@@ -691,18 +728,30 @@ fn drain<S: Read + Write>(
                     // on. So they still bank, which is what stops the peer
                     // re-offering the same rows on every exchange forever.
                     //
-                    // Still taken BEFORE the policy checks below, which is
-                    // safe because receipts are per (peer, source): what this
-                    // peer has offered us cannot touch the cursor we keep for
-                    // the device that actually wrote the row. Without it, every
-                    // row we refuse for a reversible reason is re-sent on every
-                    // exchange for the life of the pairing.
-                    if attribution.may_create(it.source_device.as_str()) {
-                        store
-                            .lock()
-                            .note_received(attribution.peer_id, it.source_device.as_str(), it.updated_at)
-                            .map_err(|e| ReplicateError::Store(e.to_string()))?;
-                    }
+                    // NO standalone receipt here any more.
+                    //
+                    // It used to be taken before the policy checks below, in its
+                    // own committed transaction, several statements before the
+                    // row was stored in a DIFFERENT transaction. `mark_received_in`
+                    // states the invariant it broke: "we hold it" and "we have
+                    // seen it" must commit together or not at all.
+                    //
+                    // Between those two commits the process can die, and this app
+                    // quits with `libc::_exit(0)` without waiting for an exchange
+                    // to finish, so it is not an exotic window. The receipt was
+                    // durable, the row was not, and a cursor never moves
+                    // backwards: that row was then never offered again, by
+                    // anyone, for ever. The tombstone arm had the same split and
+                    // lost DELETES the same way, which resurrects a row the user
+                    // cleared.
+                    //
+                    // A row that is APPLIED now takes its receipt inside
+                    // `apply_remote_item`'s own transaction. A row that is
+                    // REFUSED for a reason that can later stop applying still
+                    // needs one, or the peer re-offers it on every exchange for
+                    // ever; those branches bank it explicitly below, where the
+                    // refusal is the only outcome and there is no row to be
+                    // atomic with.
                     if !attribution.accepts(it.source_device.as_str()) {
                         attribution.log_refusal(it.source_device.as_str(), "author rows for");
                         stats.refused += 1;
@@ -740,12 +789,21 @@ fn drain<S: Read + Write>(
                     // row, and because an update may change `kind`, rewrite
                     // clipboard entries that had never left this machine while
                     // clipboard sync was switched off.
-                    if let Some(local) = store
+                    // Bound to a local BEFORE the branch, deliberately.
+                    //
+                    // `if let Some(x) = store.lock().kind_of(...)` keeps the
+                    // lock guard alive until the end of the whole `if let`
+                    // BODY, because the temporary lives to the end of the
+                    // statement. Taking the store again inside that body is a
+                    // re-entrant `parking_lot` acquisition, which deadlocks the
+                    // exchange thread outright.
+                    let held_kind = store
                         .lock()
                         .kind_of(it.source_device.as_str(), &it.origin_id)
-                        .map_err(|e| ReplicateError::Store(e.to_string()))?
-                    {
+                        .map_err(|e| ReplicateError::Store(e.to_string()))?;
+                    if let Some(local) = held_kind {
                         if !kinds.allows(&local) {
+                            note_refused(store, attribution.peer_id, it.source_device.as_str(), it.updated_at)?;
                             stats.refused += 1;
                             continue;
                         }
@@ -758,6 +816,12 @@ fn drain<S: Read + Write>(
                     if !retention.keeps(it.created_at) {
                         // Older than this machine keeps. Refusing is what stops
                         // prune and replication fighting each other forever.
+                        //
+                        // Reversible: the user can widen retention. The receipt
+                        // stops the peer re-offering it meanwhile, and
+                        // `set_retention_days` clears every receipt when the
+                        // window widens, so nothing is stranded.
+                        note_refused(store, attribution.peer_id, it.source_device.as_str(), it.updated_at)?;
                         stats.ignored += 1;
                         continue;
                     }
@@ -770,6 +834,9 @@ fn drain<S: Read + Write>(
                         ItemKind::Clipboard => "clipboard",
                     };
                     if !kinds.allows(kind) {
+                        // Reversible: the user can switch the kind back on, and
+                        // `set_kinds` clears every receipt when they do.
+                        note_refused(store, attribution.peer_id, it.source_device.as_str(), it.updated_at)?;
                         stats.ignored += 1;
                         continue;
                     }
@@ -871,10 +938,10 @@ fn drain<S: Read + Write>(
                         stats.refused += 1;
                         continue;
                     }
-                    store
-                        .lock()
-                        .note_received(attribution.peer_id, t.source_device.as_str(), t.deleted_at)
-                        .map_err(|e| ReplicateError::Store(e.to_string()))?;
+                    // No standalone receipt: `apply_remote_tombstone` takes one
+                    // inside the same transaction that stores the tombstone. A
+                    // receipt committed here and a delete lost to a quit is how
+                    // a cleared password comes back and stays back.
                     // The kind gate applies to deletes too, on the kind we
                     // hold — but ONLY to a relayed delete. Without it a peer
                     // could erase clipboard history the user had excluded from
@@ -887,12 +954,15 @@ fn drain<S: Read + Write>(
                     // would leave a password we were asked to forget sitting
                     // here for as long as the toggle stayed off.
                     if !authored {
-                        if let Some(local) = store
+                        // Bound to a local before the branch, for the same
+                        // re-entrancy reason as the item arm above.
+                        let held_kind = store
                             .lock()
                             .kind_of(t.source_device.as_str(), &t.origin_id)
-                            .map_err(|e| ReplicateError::Store(e.to_string()))?
-                        {
+                            .map_err(|e| ReplicateError::Store(e.to_string()))?;
+                        if let Some(local) = held_kind {
                             if !kinds.allows(&local) {
+                                note_refused(store, attribution.peer_id, t.source_device.as_str(), t.deleted_at)?;
                                 stats.refused += 1;
                                 continue;
                             }
@@ -1006,6 +1076,28 @@ fn recv_watermarks<S: Read + Write>(
     Ok(out)
 }
 
+
+/// Bank a receipt for something we saw and deliberately did NOT store.
+///
+/// Only for refusals whose reason can later stop applying (a retention window
+/// the user may widen, a sync kind they may switch back on). Both are repaired
+/// by clearing every receipt at the moment the setting changes, so the cursor
+/// cannot strand anything.
+///
+/// A row we ACCEPT must never use this: its receipt belongs in the same
+/// transaction as the row itself, or a crash between the two hides the row for
+/// ever.
+fn note_refused(
+    store: &Arc<Mutex<Store>>,
+    peer_id: &str,
+    source: &str,
+    clock: i64,
+) -> Result<(), ReplicateError> {
+    store
+        .lock()
+        .note_received(peer_id, source, clock)
+        .map_err(|e| ReplicateError::Store(e.to_string()))
+}
 
 fn apply_item(
     store: &Arc<Mutex<Store>>,

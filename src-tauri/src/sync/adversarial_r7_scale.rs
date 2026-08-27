@@ -220,12 +220,14 @@ fn r7_clear_history_over_a_large_replicated_history_completes_and_loses_no_delet
         assert!(round < 5, "the pair had not converged after six exchanges");
     }
 
-    assert_eq!(
-        b.lock().count().unwrap(),
-        0,
-        "the user cleared history and B kept {} of the cleared rows",
-        b.lock().count().unwrap()
-    );
+    // Bound to a local FIRST. `assert_eq!(x.lock()..., 0, "...{}", x.lock()...)`
+    // deadlocks on the FAILURE path: the left operand's guard is a temporary
+    // alive until the end of the statement, and parking_lot's mutex is not
+    // reentrant, so formatting the message parks for ever instead of reporting.
+    // The test then hangs the whole suite rather than failing, which is exactly
+    // what this file was written to stop happening.
+    let left = b.lock().count().unwrap();
+    assert_eq!(left, 0, "the user cleared history and B kept {left} of the cleared rows");
 }
 
 // ---------------------------------------------------------------------------
@@ -391,9 +393,9 @@ fn r7_a_delete_for_a_source_we_might_still_hear_from_is_never_written_off() {
     assert_eq!(b.lock().count().unwrap(), 1, "precondition: B now holds C's row");
 
     sync_with_rosters((&a, A, roster.clone()), (&b, B, roster.clone()));
+    let left = b.lock().count().unwrap();
     assert_eq!(
-        b.lock().count().unwrap(),
-        0,
+        left, 0,
         "the delete never landed once the row it deletes finally arrived: \
          a password the user cleared, alive on this machine for ever"
     );

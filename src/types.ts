@@ -170,8 +170,12 @@ export interface SyncPeer {
 export interface SyncPairedDevice {
   id: string;
   name: string;
+  /** When an exchange was last ATTEMPTED, successful or not. */
   last_seen: number | null;
+  /** Visible on the network right now, from mDNS alone. Presence, not health. */
   online: boolean;
+  /** When an exchange with this device last actually SUCCEEDED, epoch ms. */
+  last_sync_ok: number | null;
 }
 
 /** `code` is only populated when this device is the one showing it. */

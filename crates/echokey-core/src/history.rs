@@ -95,6 +95,8 @@ pub struct Store {
     /// keys on. Empty until set_device_id runs, in which case rows stay NULL
     /// exactly as they did before sync existed.
     device_id: Option<String>,
+    /// Lower-cased. See `set_excluded_apps`.
+    excluded_apps: Vec<String>,
 }
 
 impl Store {
@@ -418,7 +420,24 @@ impl Store {
         // schema outrun the stamp.
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
-        Ok(Self { conn, device_id: None })
+        Ok(Self { conn, device_id: None, excluded_apps: Vec::new() })
+    }
+
+    /// Apps whose rows must never be handed to replication.
+    ///
+    /// Kept on the store rather than threaded through `exchange` because the
+    /// question "may this row leave the machine?" belongs with the thing that
+    /// holds the rows, and because `items_from` is the single door every
+    /// outbound row goes through.
+    ///
+    /// The exclusion list used to be consulted once, at capture, in
+    /// `state.rs::on_platform_event`, and never again. Adding a password
+    /// manager to it therefore did nothing about the rows already captured
+    /// from that app: every one of them replicated to every paired device on
+    /// the very next exchange. The user's reading of that setting is "stop
+    /// holding this app's clipboard", and the rows were already held.
+    pub fn set_excluded_apps(&mut self, apps: Vec<String>) {
+        self.excluded_apps = apps.into_iter().map(|a| a.to_lowercase()).collect();
     }
 
     /// Assign this install's identity. Call once, after settings load.
@@ -713,7 +732,38 @@ impl Store {
             .optional()?;
         let Some((current, source)) = row else { return Ok((now_ms(), true)) };
         if self.authored_here(source.as_deref()) {
-            Ok((now_ms().max(current.saturating_add(1)), true))
+            // BOUNDED, for the same reason `delete_clock` is bounded.
+            //
+            // This was an unbounded `max(now, current + 1)`, and a clock that
+            // only ever climbs is a clock that can climb above our own wall
+            // clock. Once it has, a peer banks it as its cursor for our source,
+            // and every ordinary row we write afterwards is stamped with the
+            // bare `now_ms()` of `insert_clipboard` or `insert_transcription`,
+            // which is BELOW that cursor. Those rows are then never offered to
+            // that peer again.
+            //
+            // The realistic trigger is not repetition, it is the wall clock
+            // stepping BACKWARDS on this machine: an NTP correction after a bad
+            // RTC, a VM or laptop resume. Everything captured until the clock
+            // catches up is invisible on the other machine, silently.
+            //
+            // The two-minute skew window is no help here: it only judges clocks
+            // arriving FROM a peer, and these rows never arrive anywhere to be
+            // judged. `delete_clock` already solved exactly this for tombstones
+            // and bounds itself at half the window; the item path never got the
+            // same treatment.
+            let now = now_ms();
+            let ceiling = now + MAX_CLOCK_SKEW_MS / 2;
+            let wanted = now.max(current.saturating_add(1));
+            if wanted > ceiling {
+                tracing::warn!(
+                    "sync: this row's clock is already {} ms ahead of this machine's clock; \
+                     stamping the edit at the wall clock instead. Check the clocks on your devices.",
+                    current.saturating_sub(now)
+                );
+                return Ok((now, true));
+            }
+            Ok((wanted, true))
         } else {
             Ok((current, false))
         }
@@ -1336,13 +1386,39 @@ impl Store {
         after_origin: &str,
         limit: usize,
     ) -> Result<Vec<RemoteItem>, StoreError> {
-        let mut stmt = self.conn.prepare(
+        // The exclusion filter is in the SQL, not applied to the page
+        // afterwards, so that LIMIT counts rows we will actually send. Filtering
+        // in Rust would make a full page read short, and `serve` decides whether
+        // to keep paging from `page.len() >= PAGE` — so a page of excluded rows
+        // would silently end the pass with rows still to come.
+        let mut sql = String::from(
             "SELECT source_machine, origin_id, kind, text, created_at, updated_at, pinned FROM items
              WHERE source_machine = ?1 AND origin_id IS NOT NULL
-               AND (updated_at > ?2 OR (updated_at = ?2 AND origin_id > ?3))
-             ORDER BY updated_at ASC, origin_id ASC LIMIT ?4",
-        )?;
-        let rows = stmt.query_map(params![source, at_or_after, after_origin, limit as i64], |r| {
+               AND (updated_at > ?2 OR (updated_at = ?2 AND origin_id > ?3))",
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(source.to_string()),
+            Box::new(at_or_after),
+            Box::new(after_origin.to_string()),
+        ];
+        if !self.excluded_apps.is_empty() {
+            let holes = (0..self.excluded_apps.len())
+                .map(|i| format!("?{}", i + 5))
+                .collect::<Vec<_>>()
+                .join(",");
+            sql.push_str(&format!(
+                " AND (app_id   IS NULL OR LOWER(app_id)   NOT IN ({holes}))
+                  AND (app_name IS NULL OR LOWER(app_name) NOT IN ({holes}))"
+            ));
+        }
+        sql.push_str(" ORDER BY updated_at ASC, origin_id ASC LIMIT ?4");
+        args.push(Box::new(limit as i64));
+        for a in &self.excluded_apps {
+            args.push(Box::new(a.clone()));
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+        let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), |r| {
             Ok(RemoteItem {
                 source_machine: r.get(0)?,
                 origin_id: r.get(1)?,
