@@ -4,5 +4,31 @@
 <dict>
     <key>NSMicrophoneUsageDescription</key>
     <string>Parle needs the microphone to transcribe your dictation, entirely on this device.</string>
+
+    <!--
+      LAN sync. Both keys are required and neither was here.
+
+      macOS 14 and later gate local-network access. Without
+      NSLocalNetworkUsageDescription the prompt has no explanation to show, and
+      without NSBonjourServices the system filters the app's mDNS traffic
+      outright: browsing returns nothing and registration is not seen by
+      anyone. The failure is SILENT — discovery reports no error, it simply
+      finds no peers for ever — so sync would have appeared to work and then
+      never found the other machine, which is the first thing anyone would try.
+
+      NSBonjourServices must list the service type WITHOUT the trailing
+      ".local.", so it reads "_echokey._tcp" against
+      echokey_sync::discovery::SERVICE_TYPE ("_echokey._tcp.local.").
+
+      The service type still says echokey rather than parle. It is the wire
+      identifier two installs must agree on, so renaming it is a protocol
+      break for no user-visible gain; it is deliberately left alone.
+    -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Parle finds your other devices on this network so your dictation and clipboard history can sync directly between them. Nothing is sent to the internet.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_echokey._tcp</string>
+    </array>
 </dict>
 </plist>
