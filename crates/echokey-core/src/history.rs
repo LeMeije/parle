@@ -857,13 +857,24 @@ impl Store {
             Some(k) => {
                 tx.execute(
                     // Per source, one clock strictly above every tombstone
-                    // already held for it, bounded by ?3 — the same rule as
-                    // `delete_clock`, expressed in SQL because a Clear writes
-                    // the whole batch in one statement.
+                    // already held for it — the same rule as `delete_clock`,
+                    // expressed in SQL because a Clear writes the whole batch in
+                    // one statement, INCLUDING its fallback: past the ceiling we
+                    // drop back to the plain wall clock.
+                    //
+                    // This used to `min(ceiling, ...)`, which is not the same
+                    // thing: it stamped every delete a full minute in the future
+                    // where `delete_clock` stamps `now`. Two paths that write
+                    // the same field must agree, or a Clear and a single delete
+                    // produce different clocks from the same state.
                     "INSERT INTO tombstones (source_machine, origin_id, deleted_at, local)
                      SELECT i.source_machine, i.origin_id,
-                            min(?3, max(?2, COALESCE((SELECT MAX(t.deleted_at) FROM tombstones t
-                                               WHERE t.source_machine = i.source_machine), 0) + 1)), 1
+                            CASE WHEN COALESCE((SELECT MAX(t.deleted_at) FROM tombstones t
+                                                 WHERE t.source_machine = i.source_machine), 0) + 1 > ?3
+                                 THEN ?2
+                                 ELSE max(?2, COALESCE((SELECT MAX(t.deleted_at) FROM tombstones t
+                                                          WHERE t.source_machine = i.source_machine), 0) + 1)
+                            END, 1
                        FROM items i
                       WHERE i.kind=?1 AND i.pinned=0
                         AND i.source_machine IS NOT NULL AND i.origin_id IS NOT NULL
@@ -878,8 +889,12 @@ impl Store {
                 tx.execute(
                     "INSERT INTO tombstones (source_machine, origin_id, deleted_at, local)
                      SELECT i.source_machine, i.origin_id,
-                            min(?2, max(?1, COALESCE((SELECT MAX(t.deleted_at) FROM tombstones t
-                                               WHERE t.source_machine = i.source_machine), 0) + 1)), 1
+                            CASE WHEN COALESCE((SELECT MAX(t.deleted_at) FROM tombstones t
+                                                 WHERE t.source_machine = i.source_machine), 0) + 1 > ?2
+                                 THEN ?1
+                                 ELSE max(?1, COALESCE((SELECT MAX(t.deleted_at) FROM tombstones t
+                                                          WHERE t.source_machine = i.source_machine), 0) + 1)
+                            END, 1
                        FROM items i
                       WHERE i.pinned=0
                         AND i.source_machine IS NOT NULL AND i.origin_id IS NOT NULL

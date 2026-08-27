@@ -639,6 +639,24 @@ fn drain<S: Read + Write>(
     abort: &dyn Fn() -> bool,
     stats: &mut RoundStats,
 ) -> Result<(), ReplicateError> {
+    // Sources we could still legitimately acquire rows for, built ONCE and
+    // only if a tombstone actually needs it.
+    //
+    // The reachability test below started life inline, calling
+    // `known_sources()` per tombstone — a DISTINCT over items UNION tombstones,
+    // under the store mutex the history UI shares, for every entry in the
+    // batch. That is precisely backwards: the case it exists to fix is a peer
+    // carrying thousands of dead tombstones, so the check would have run a
+    // full-table scan thousands of times per exchange and frozen the history
+    // window while it did.
+    //
+    // Building it once is safe because the set only ever GROWS during a drain,
+    // and it grows exactly when we accept something for a new source — which is
+    // handled by inserting into the cache at those points. A source missing
+    // from a stale cache would be treated as unreachable and bank a receipt for
+    // a delete we might later want; keeping it current is what stops that.
+    let mut reachable: Option<std::collections::HashSet<String>> = None;
+
     for _ in 0..MAX_EXCHANGE_MESSAGES {
         if abort() {
             return Err(ReplicateError::Aborted);
@@ -756,6 +774,9 @@ fn drain<S: Read + Write>(
                         continue;
                     }
                     apply_item(store, attribution.peer_id, it, stats)?;
+                    if let Some(set) = reachable.as_mut() {
+                        set.insert(it.source_device.as_str().to_string());
+                    }
                 }
                 if !more && items.is_empty() {
                     break;
@@ -820,17 +841,22 @@ fn drain<S: Read + Write>(
                     // row will not arrive tomorrow. It is bounded by what the
                     // peer holds for that source, and unpairing the dead device
                     // makes the refusal permanent and stops it.
-                    let may_still_arrive = attribution
-                        .known
-                        .iter()
-                        .any(|d| d == t.source_device.as_str())
-                        || store
-                            .lock()
-                            .known_sources()
-                            .map_err(|e| ReplicateError::Store(e.to_string()))?
-                            .iter()
-                            .any(|src| src == t.source_device.as_str());
                     if !authored && !held {
+                        let set = match reachable.as_ref() {
+                            Some(s) => s,
+                            None => {
+                                let mut s: std::collections::HashSet<String> = store
+                                    .lock()
+                                    .known_sources()
+                                    .map_err(|e| ReplicateError::Store(e.to_string()))?
+                                    .into_iter()
+                                    .collect();
+                                s.extend(attribution.known.iter().cloned());
+                                reachable = Some(s);
+                                reachable.as_ref().expect("just set")
+                            }
+                        };
+                        let may_still_arrive = set.contains(t.source_device.as_str());
                         if !may_still_arrive {
                             // Range-checked inside `note_received`.
                             store
@@ -883,6 +909,11 @@ fn drain<S: Read + Write>(
                         .lock()
                         .apply_remote_tombstone(attribution.peer_id, &rt)
                         .map_err(|e| ReplicateError::Store(e.to_string()))?;
+                    // We now hold something for this source, so the cache built
+                    // above must say so for the rest of this drain.
+                    if let Some(set) = reachable.as_mut() {
+                        set.insert(t.source_device.as_str().to_string());
+                    }
                     match outcome {
                         echokey_core::history::ApplyOutcome::Ignored => stats.ignored += 1,
                         _ => stats.applied_tombstones += 1,
