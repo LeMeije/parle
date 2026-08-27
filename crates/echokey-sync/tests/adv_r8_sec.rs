@@ -91,7 +91,11 @@ fn r8_decode_allocation_is_bounded_by_the_byte_cap_alone() {
     let on_the_wire = payload.len();
     assert_eq!(on_the_wire, ESCAPES * 6, "the control really is six bytes per character");
     let escaped = format!(
-        r#"{{"hello":{{"protocol_version":3,"device_id":"{UUID_A}","device_name":"{payload}"}}}}"#
+        // PROTOCOL_VERSION, not a literal 3. The literal went stale the moment
+        // the cursor became a pair and the version bumped, and a decode test
+        // that fails for the wrong reason teaches you to edit the test.
+        r#"{{"hello":{{"protocol_version":{v},"device_id":"{UUID_A}","device_name":"{payload}"}}}}"#,
+        v = echokey_sync::PROTOCOL_VERSION
     );
     match SyncMessage::decode(escaped.as_bytes()) {
         Ok(SyncMessage::Hello { device_name, .. }) => {

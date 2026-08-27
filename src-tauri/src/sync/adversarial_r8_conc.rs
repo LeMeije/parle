@@ -243,59 +243,59 @@ fn r8_a_receipt_banked_without_its_row_hides_that_row_for_ever() {
         );
     }
 
-    // -- THE CRASH RESIDUE. -------------------------------------------------
-    // Exactly what replicate.rs:700-705 commits, and nothing else. This is the
-    // on-disk state after a quit between that commit and apply_item.
+    // -- THE CRASH RESIDUE, AND WHY IT NO LONGER STRANDS THE ROW. ----------
+    //
+    // The finding was real and is fixed at BOTH layers, so this now pins both.
+    //
+    // Layer one: `drain` no longer commits a standalone receipt for a row it is
+    // about to store. The receipt for an applied row comes from
+    // `apply_remote_item`'s own transaction, so "we hold it" and "we have seen
+    // it" commit together or not at all, and a quit between them is no longer a
+    // window. Only genuinely reversible refusals bank on their own, where there
+    // is no row to be atomic with.
+    //
+    // Layer two, and the reason this test's original shape no longer
+    // reproduces: a cursor is a PAIR now. The residue below is what a
+    // clock-only receipt looks like, and `(clock, "")` sorts BELOW every real
+    // origin id, so it no longer hides anything written in that millisecond.
+    // That is the same fix that stopped an interrupted Clear stranding the rest
+    // of its millisecond.
     let a = store_for(A);
     let b = store_for(B);
     seed_one(&a, A, "row-000001", clock);
     b.lock().note_received(A, A, clock).unwrap();
 
-    // The promise is durable; the row is not. Both halves asserted, so the test
-    // cannot pass vacuously on a store that silently refused the receipt (it
-    // would, for a clock outside the skew window).
+    // The receipt really did commit, so this is exercising the window and not a
+    // store that silently refused it.
     let marks = b.lock().watermarks(A).unwrap();
     assert!(
         marks.iter().any(|(src, c)| src == A && *c == clock),
         "the receipt did not commit, so this test is not exercising the window; marks = {marks:?}"
     );
-    assert_eq!(b.lock().count().unwrap(), 0, "and the row is not here");
+    assert_eq!(b.lock().count().unwrap(), 0, "and the row is not here yet");
 
-    // -- RECOVERY ATTEMPT: a full, healthy exchange. ------------------------
+    // One ordinary exchange now recovers it.
     sync_bounded((&a, A), (&b, B));
-
+    let recovered = b.lock().count().unwrap();
     assert_eq!(
-        b.lock().count().unwrap(),
+        recovered, 1,
+        "a bare clock receipt still hides a row written in that millisecond: the cursor is \
+         supposed to be a (clock, origin) pair, and an empty origin must mean 're-offer this \
+         whole millisecond' rather than 'never ask again'"
+    );
+
+    // And the PAIR still works as a cursor, or the receipt would stop bounding
+    // anything and every exchange would re-send the world.
+    let c = store_for(A);
+    let d = store_for(B);
+    seed_one(&c, A, "row-000001", clock);
+    d.lock().note_received_at(A, A, clock, "row-000001").unwrap();
+    sync_bounded((&c, A), (&d, B));
+    assert_eq!(
+        d.lock().count().unwrap(),
         0,
-        "sanity: the row cannot appear from nowhere"
-    );
-    assert_eq!(
-        a.lock().count().unwrap(),
-        1,
-        "the author still holds it, so nothing is wrong with A"
-    );
-
-    // And again, because "it will catch up next time" is the obvious defence.
-    for _ in 0..3 {
-        sync_bounded((&a, A), (&b, B));
-    }
-    assert_eq!(
-        b.lock().count().unwrap(),
-        0,
-        "R8-1 CONFIRMED: the receipt is a promise never to ask for that clock again, \
-         so a row whose receipt committed without it is gone from this machine for \
-         ever. Four exchanges did not recover it. The user sees an item present on \
-         one device and absent on the other, with no error anywhere."
-    );
-
-    // The proof that the receipt is the cause, not the harness: clear it and
-    // the very next exchange delivers the row.
-    b.lock().reset_source_marks().unwrap();
-    sync_bounded((&a, A), (&b, B));
-    assert_eq!(
-        b.lock().count().unwrap(),
-        1,
-        "clearing the receipt recovers the row, so the receipt was the thing hiding it"
+        "a receipt for the exact (clock, origin) must still suppress that row, or the cursor \
+         bounds nothing and every exchange re-sends everything"
     );
 }
 
@@ -417,23 +417,32 @@ fn r8_a_receipt_banked_without_its_tombstone_resurrects_a_deleted_row_for_ever()
     );
     assert_eq!(b.lock().count().unwrap(), 1, "and B still holds the row");
 
-    for _ in 0..4 {
-        sync_bounded((&a, A), (&b, B));
-    }
-    assert_eq!(
-        b.lock().count().unwrap(),
-        1,
-        "R8-1b CONFIRMED: four exchanges did not deliver the delete. The user cleared \
-         an item — a password, in the case this feature exists to handle — on one \
-         device, saw it vanish there, and it is still on the other one for ever."
-    );
-
-    b.lock().reset_source_marks().unwrap();
+    // INVERTED: the delete must now arrive.
+    //
+    // Two fixes make it. `drain` no longer commits a receipt of its own for a
+    // tombstone it is about to store, so there is no window in which the
+    // promise outlives the delete. And a cursor is a PAIR, so the bare clock
+    // written above sorts below every real origin id and cannot suppress a
+    // delete stamped in that millisecond.
+    //
+    // A lost delete is the one failure this feature must not have: the user
+    // cleared an item, a password in the case it exists for, and watched it
+    // vanish on one machine.
     sync_bounded((&a, A), (&b, B));
     assert_eq!(
         b.lock().count().unwrap(),
         0,
-        "clearing the receipt delivers the delete, so the receipt was what suppressed it"
+        "a receipt committed without its tombstone still suppresses the delete, so the row the \
+         user cleared is alive on this machine for ever"
+    );
+
+    // And the pair still bounds what it should: a receipt for the exact
+    // (clock, origin) of a delete we already applied must not make the peer
+    // re-send it for ever.
+    let quiet = sync_bounded((&a, A), (&b, B)).0;
+    assert_eq!(
+        quiet.applied_tombstones, 0,
+        "the pair went quiet on the first exchange and must stay quiet on the second"
     );
 }
 

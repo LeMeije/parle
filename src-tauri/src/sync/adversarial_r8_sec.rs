@@ -254,31 +254,76 @@ fn r8_h1_a_row_from_an_excluded_app_must_not_cross_the_wire() {
 /// wanted to.
 #[test]
 fn r8_h2_the_replication_path_can_see_which_app_a_row_came_from() {
-    let src = std::fs::read_to_string(repo_root().join("src-tauri/src/sync/replicate.rs"))
-        .expect("replicate.rs is readable");
-    // Positive control: the file really is the one we think it is.
-    assert!(src.contains("fn serve<S: Read + Write>"), "read the wrong file");
-    // Positive control: the information exists. Every locally captured
-    // clipboard row records the app it came from.
+    // The finding was real: the exclusion list was consulted once, at capture,
+    // and the outbound path could not see the app at all, so adding a password
+    // manager to the list did nothing about the rows already captured from it.
+    //
+    // The fix is NOT where this test first looked. It went in
+    // `Store::items_from`, the single door every outbound row passes through,
+    // rather than in `serve`. Two reasons, both deliberate:
+    //
+    //   - `items_from` applies it in the SQL, so LIMIT counts rows that will
+    //     actually be sent. Filtering the page afterwards in `serve` makes a
+    //     full page read short, and `serve` decides whether to keep paging from
+    //     `page.len() >= PAGE`, so a page of excluded rows would end the pass
+    //     early with rows still to come.
+    //   - It cannot be forgotten by a future caller, which threading a list
+    //     through `exchange` could be.
+    //
+    // The reviewer also proposed carrying `app_id` ON THE WIRE so the receiver
+    // could apply its own list. That is REJECTED, and the rejection is the
+    // point of the second half of this test. Sending the app a row came from
+    // tells the peer which applications the user copies out of, which is a new
+    // disclosure in a feature whose whole claim is that nothing leaves the
+    // machine that should not. Enforcing on the sender means the row never
+    // leaves at all, which is strictly better for the same threat.
+    //
+    // The residual that leaves: an exclusion list is per-device, so an entry
+    // added on the Mac does not protect a capture on the PC. That is stated in
+    // the settings hint rather than solved by broadcasting app names.
     let store = std::fs::read_to_string(repo_root().join("crates/echokey-core/src/history.rs"))
         .expect("history.rs is readable");
+
+    // Control: the information exists on every locally captured row.
     assert!(
         store.contains("INSERT INTO items (kind, text, created_at, updated_at, app_id, app_name, source_machine)"),
         "insert_clipboard should record app_id; the control is wrong"
     );
-    // Comments do not count: strip anything after `//` before looking, or a
-    // passing mention of the word 'excluded' in prose makes this guard find
-    // nothing while looking as though it found everything.
-    let code: String = src
+
+    // The outbound query applies the list.
+    let outbound = store
+        .split("pub fn items_from(")
+        .nth(1)
+        .and_then(|s| s.split("\n    pub fn ").next())
+        .expect("items_from is in the file");
+    let code: String = outbound
         .lines()
         .map(|l| l.split("//").next().unwrap_or(""))
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        code.contains("app_id"),
-        "the outbound path never sees `app_id`: `RemoteItem` drops it and `serve` is handed only \
-         Kinds and Retention, so the user's excluded-apps list cannot be applied to rows already \
-         in the store"
+        code.contains("excluded_apps"),
+        "the outbound query does not consult the exclusion list, so a row captured before the \
+         user added that app still replicates to every paired device"
+    );
+    assert!(
+        code.contains("LOWER(app_id)") && code.contains("LOWER(app_name)"),
+        "both identifiers must be matched, case-insensitively: macOS reports a bundle id and \
+         Windows reports an exe name, and the user's list holds whichever they were shown"
+    );
+
+    // And the wire still carries no provenance. This half is the rejection.
+    let wire = std::fs::read_to_string(repo_root().join("crates/echokey-sync/src/wire.rs"))
+        .expect("wire.rs is readable");
+    let wire_code: String = wire
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !wire_code.contains("app_id") && !wire_code.contains("app_name"),
+        "the wire has grown app provenance. That tells a peer which applications the user \
+         copies out of, for a check the SENDER can already make without disclosing anything."
     );
 }
 
@@ -400,27 +445,72 @@ fn r8_h3_windows_honours_every_exclusion_format_it_writes() {
 /// from a test is out of bounds.
 #[test]
 fn r8_h4_both_platforms_attribute_a_clipboard_change_to_its_writer() {
+    // Rewritten to the ACHIEVABLE contract, which the finding itself named.
+    //
+    // The defect was real: macOS attributed a capture to whoever was frontmost
+    // when the 400ms poll noticed the change, which is the wrong app whenever
+    // the source yields focus, and a password manager panel that hides itself
+    // after a copy is exactly that. `excluded_apps` was then matched against
+    // the browser underneath and never fired.
+    //
+    // The original assertion, "the monitor must not call `frontmost_app()`",
+    // cannot be satisfied: macOS has no equivalent of `GetClipboardOwner`, and
+    // the finding says so in its own fix note. Asking for it would be asking
+    // for an impossibility, and a test that demands one gets deleted rather
+    // than fixed.
+    //
+    // What IS achievable, and what the finding proposed, is to use the reading
+    // from just BEFORE the change rather than after it, and to shorten the poll
+    // so both directions of error get a smaller window. That is what this now
+    // pins.
     let mac = std::fs::read_to_string(repo_root().join("src-tauri/src/platform/macos_clipboard.rs"))
         .expect("macos_clipboard.rs is readable");
     let win = std::fs::read_to_string(repo_root().join("src-tauri/src/platform/windows.rs"))
         .expect("windows.rs is readable");
 
-    // Positive control: Windows really does ask who owns the clipboard, so
-    // "name the writer" is a thing this codebase already knows how to do and
-    // this test is not asserting an impossibility.
+    // Control: Windows really does ask who owns the clipboard, so naming the
+    // writer is something this codebase does where the OS allows it.
     assert!(
         win.contains("GetClipboardOwner"),
         "the Windows monitor should attribute to the clipboard owner; the control is wrong"
     );
-    let monitor = mac
-        .split("PlatformEvent::ClipboardChanged")
-        .next()
+
+    let code: String = mac
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // The emitted event must carry the EARLIER sample, not a fresh call.
+    let emit_line = code
+        .lines()
+        .find(|l| l.contains("PlatformEvent::ClipboardChanged"))
         .expect("the macOS monitor emits ClipboardChanged");
     assert!(
-        !monitor.contains("frontmost_app()"),
-        "the macOS clipboard monitor attributes a capture to the FRONTMOST app at poll time, not \
-         to the app that wrote it, so `excluded_apps` misses any password manager that returns \
-         focus before the 400 ms poll. Windows uses GetClipboardOwner for the same decision."
+        !emit_line.contains("frontmost_app()"),
+        "the capture is still attributed to a frontmost reading taken AFTER the change was \
+         noticed: {emit_line}"
+    );
+    assert!(
+        code.contains("prev_app"),
+        "the monitor must remember who was frontmost before the change to attribute it"
+    );
+
+    // And the window must be smaller than the 400ms it was.
+    let poll = code
+        .lines()
+        .find(|l| l.contains("from_millis(") && l.contains("sleep"))
+        .expect("the monitor polls on a timer");
+    let ms: u64 = poll
+        .split("from_millis(")
+        .nth(1)
+        .and_then(|t| t.split(')').next())
+        .and_then(|t| t.trim().parse().ok())
+        .expect("the poll interval is a literal");
+    assert!(
+        ms <= 200,
+        "the poll is {ms}ms; every millisecond of it is a window in which the app that did the \
+         copy can yield focus and be misattributed"
     );
 }
 
@@ -469,7 +559,7 @@ fn r8_f1_a_paired_peer_cannot_renew_the_session_budget_with_traffic() {
             Err(_) => return 0usize,
         };
         let msg = SyncMessage::Watermarks {
-            entries: vec![Watermark { source_device: echokey_sync::DeviceId::parse(A).unwrap(), clock: 1 }],
+            entries: vec![Watermark { source_device: echokey_sync::DeviceId::parse(A).unwrap(), clock: 1, origin: String::new()  }],
             more: true,
         };
         // Hard bound: 60 sends at 60 ms is 3.6 s, comfortably past the victim's

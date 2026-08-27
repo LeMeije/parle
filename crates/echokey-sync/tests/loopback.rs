@@ -141,6 +141,7 @@ fn pair_then_replicate_in_both_directions() {
                     entries: vec![Watermark {
                         source_device: DeviceId::parse(DEVICE_B).unwrap(),
                         clock: 4,
+                        origin: String::new(),
                     }],
                     more: false,
                 })

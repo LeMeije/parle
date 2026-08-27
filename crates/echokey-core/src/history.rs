@@ -8,7 +8,7 @@ use crate::types::{HistoryItem, HistoryKind, TranscriptionResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 /// How far ahead of us a peer's clock may be before we stop believing it.
 ///
 /// Two minutes, not a day. The cursor we keep for a peer is that peer's own
@@ -30,12 +30,28 @@ pub const MAX_TOMBSTONES_PER_SOURCE: i64 = 10_000;
 /// and small enough that a peer naming invented ids cannot grow the table
 /// without limit.
 pub const MAX_SOURCES_PER_PEER: i64 = 64;
-/// Sorts above every origin id we produce, so `(clock, ORIGIN_CEILING)`
-/// reads as "strictly after this whole millisecond".
+/// Sorts above every origin id a peer can legally send, so
+/// `(clock, ORIGIN_CEILING)` reads as "strictly after this whole millisecond".
 ///
-/// Origin ids are UUIDs — ASCII — so a Basic Multilingual Plane private-use
-/// character is above all of them under SQLite's default BINARY collation.
-pub const ORIGIN_CEILING: &str = "\u{FFFF}";
+/// This was `"\u{FFFF}"`, justified by "origin ids are UUIDs, which are ASCII".
+/// That is true of the ids WE mint and false of the ids a PEER mints:
+/// `wire::validate_origin_id` accepts any UTF-8 up to 128 bytes, and every
+/// scalar above the Basic Multilingual Plane (any emoji, anything astral)
+/// encodes to bytes above U+FFFF's under SQLite's BINARY collation. Such an id
+/// satisfied `deleted_at = cursor AND origin_id > sentinel` for ever, so the
+/// receiver kept recording a clock it already had and the pair never went
+/// quiet: a peer holding the per-source cap could re-send 10,000 tombstones on
+/// every exchange for the life of the pairing.
+///
+/// Why THIS value is genuinely a ceiling. SQLite's BINARY collation compares
+/// TEXT bytewise. U+10FFFF is the largest Unicode scalar and encodes to
+/// `F4 8F BF BF`, which is the byte-wise maximum of any valid UTF-8 sequence.
+/// A legal origin id is at most `MAX_ORIGIN_ID_BYTES` (128) bytes, so it is at
+/// most 32 such characters. Repeating the character 33 times gives 132 bytes,
+/// so any legal id is either smaller at the first differing byte or is a proper
+/// PREFIX of this value, and a prefix sorts below. Nothing a peer can send
+/// reaches it.
+pub const ORIGIN_CEILING: &str = "\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -412,6 +428,44 @@ impl Store {
             }
             version = 6;
         }
+
+        if version < 7 {
+            // v7: a cursor is a PAIR, not a bare millisecond.
+            //
+            // `source_marks` recorded only a clock, and `serve` therefore had to
+            // guess where inside that millisecond to resume. It guessed
+            // "strictly after the whole millisecond" by passing a sentinel
+            // origin, and that guess loses data three separate ways:
+            //
+            //   - A Clear stamps every tombstone for a source with ONE clock,
+            //     so a clear larger than a page that is interrupted between
+            //     pages strands the rest of that millisecond for ever. Nothing
+            //     lowers a cursor, so those deletes are never offered again: the
+            //     user cleared a password and it stays on the other machine.
+            //   - A row written in the same millisecond the cursor already holds
+            //     sorts at, not above, the mark and is never offered.
+            //   - The sentinel is `\u{FFFF}`, justified by "origin ids are
+            //     UUIDs". That is true of the ids WE mint, not of the ids a peer
+            //     mints: the wire accepts any UTF-8, and every scalar above the
+            //     BMP sorts above the sentinel, so such a row satisfies the
+            //     resume predicate for ever and the exchange never goes quiet.
+            //
+            // Storing the origin alongside the clock removes the guess: a run
+            // resumes exactly where it stopped, whether it stopped between pages
+            // or in the middle of a millisecond.
+            //
+            // Existing marks default to the empty string, which sorts below
+            // every real origin id. That means "re-offer this whole
+            // millisecond", which is the inclusive behaviour `items_from`
+            // documents and is idempotent, so no store gets worse on upgrade.
+            if !has_col("source_marks", "received_origin")? {
+                conn.execute(
+                    "ALTER TABLE source_marks ADD COLUMN received_origin TEXT NOT NULL DEFAULT ''",
+                    [],
+                )?;
+            }
+            version = 7;
+        }
         // Every step leaves `version` at its own level so the next one can read
         // it. The last assignment has no reader yet, and will the moment a v5
         // step is added; dropping it would make that addition a silent bug.
@@ -476,8 +530,10 @@ impl Store {
         .to_string();
         let now = now_ms();
         self.conn.execute(
+            // `created_at` is the wall clock; `updated_at` is the replication
+            // clock and must be monotonic on our own source. See `local_clock`.
             "INSERT INTO items (kind, text, raw_text, created_at, updated_at, duration_ms, model_id, language, app_id, app_name, meta, source_machine)
-             VALUES ('transcription', ?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             VALUES ('transcription', ?1, ?2, ?3, ?11, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 r.text,
                 r.raw_text,
@@ -488,7 +544,8 @@ impl Store {
                 app_id,
                 app_name,
                 meta,
-                self.source()
+                self.source(),
+                self.local_clock()?
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -549,10 +606,13 @@ impl Store {
             if prev == text {
                 // A re-copy is an edit of the existing row: bump the
                 // replication clock so peers learn it moved.
+                // `created_at` stays the wall clock: it drives display order
+                // and retention, and those are about real time. Only
+                // `updated_at`, the replication clock, must be monotonic.
                 let now = now_ms();
                 self.conn.execute(
-                    "UPDATE items SET created_at=?1, updated_at=?1 WHERE id=?2",
-                    params![now, id],
+                    "UPDATE items SET created_at=?1, updated_at=?2 WHERE id=?3",
+                    params![now, self.local_clock()?, id],
                 )?;
                 return Ok(id);
             }
@@ -560,8 +620,8 @@ impl Store {
         let now = now_ms();
         self.conn.execute(
             "INSERT INTO items (kind, text, created_at, updated_at, app_id, app_name, source_machine)
-             VALUES ('clipboard', ?1, ?2, ?2, ?3, ?4, ?5)",
-            params![text, now, app_id, app_name, self.source()],
+             VALUES ('clipboard', ?1, ?2, ?6, ?3, ?4, ?5)",
+            params![text, now, app_id, app_name, self.source(), self.local_clock()?],
         )?;
         let id = self.conn.last_insert_rowid();
         self.stamp_origin(id)?;
@@ -752,18 +812,18 @@ impl Store {
             // judged. `delete_clock` already solved exactly this for tombstones
             // and bounds itself at half the window; the item path never got the
             // same treatment.
-            let now = now_ms();
-            let ceiling = now + MAX_CLOCK_SKEW_MS / 2;
-            let wanted = now.max(current.saturating_add(1));
-            if wanted > ceiling {
-                tracing::warn!(
-                    "sync: this row's clock is already {} ms ahead of this machine's clock; \
-                     stamping the edit at the wall clock instead. Check the clocks on your devices.",
-                    current.saturating_sub(now)
-                );
-                return Ok((now, true));
-            }
-            Ok((wanted, true))
+            // The SAME rule local inserts use: strictly above everything this
+            // machine holds for its own source, not merely above this row.
+            //
+            // `max(now, row + 1)` beats the row it is editing and nothing else.
+            // One cursor gates the whole source, so an edit stamped below
+            // another row of ours that the peer has already received sits below
+            // the peer's mark and is never offered: the user pins or corrects a
+            // dictation, and the other machine never learns. `next_clock_for`
+            // is the max over every item AND tombstone we hold for the source,
+            // so it beats the row and the cursor at once.
+            let _ = current;
+            Ok((self.local_clock()?, true))
         } else {
             Ok((current, false))
         }
@@ -832,7 +892,7 @@ impl Store {
             )
             .optional()?;
         if let Some((Some(source), Some(origin), _updated_at)) = row {
-            let deleted_at = Self::delete_clock(&tx, &source)?;
+            let deleted_at = Self::next_clock_in(&tx, &source)?;
             // local = 1: WE made this delete, so it is the only record of it
             // anywhere and the cap must never evict it. See the v6 migration.
             tx.execute(
@@ -849,29 +909,67 @@ impl Store {
         Ok(())
     }
 
-    /// The clock for a delete WE are making, for rows of `source`.
+    /// The replication clock for a row WE are writing.
     ///
-    /// The wall clock, but never at or below the newest LOCAL tombstone we hold
-    /// for that source. A tombstone cursor is a promise never to ask for
-    /// anything at or below it again, and the cursor is a bare millisecond, so
-    /// a delete stamped in a millisecond we have already delivered sits below
-    /// the peer's mark and is never offered. That is a lost delete.
+    /// Strictly above every clock this machine has already stamped on its own
+    /// source, bounded at half the skew window exactly as `delete_clock` is.
     ///
-    /// The max is over EVERY tombstone we hold for that source, not just our
-    /// own. A cursor does not care who created the tombstone that moved it: a
-    /// delete we relayed onward from a third device raises the peer's mark just
-    /// as effectively, and our next local delete then has to clear that.
+    /// The bare wall clock is not enough, and this is the third place that has
+    /// had to learn it. Our own clock can be dragged AHEAD of the wall clock by
+    /// an ordinary edit: `edit_stamp` stamps `max(now, row + 1)` so a user's
+    /// change wins the conflict it is entering, and a row that came from a peer
+    /// inside the accepted skew already carries a clock we cannot reach. Once
+    /// our own source's newest clock is ahead of `now_ms()`, a peer banks it as
+    /// its cursor for us, and every subsequent capture stamped with the bare
+    /// wall clock is BELOW that cursor and is never offered again. Silently,
+    /// for as long as it takes the wall clock to catch up.
     ///
-    /// Bounded so the cure cannot become the disease. A tombstone is accepted
-    /// only up to `now + MAX_CLOCK_SKEW_MS`, so chaining `+1` off one stamped
-    /// at the ceiling would produce a delete the receiving side refuses
-    /// outright, which loses the delete this exists to protect. Past halfway to the
-    /// ceiling we stop climbing, take the plain wall clock, and say so: at that
-    /// point some machine's clock is more than a minute out, which is a
-    /// condition the user is told about separately and should fix.
-    fn delete_clock(tx: &Connection, source: &str) -> Result<i64, StoreError> {
-        let newest: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(deleted_at), 0) FROM tombstones WHERE source_machine = ?1",
+    /// The same is true after any backwards step of the system clock, which is
+    /// the realistic trigger: an NTP correction, a VM or laptop resume.
+    fn local_clock(&self) -> Result<i64, StoreError> {
+        match self.source() {
+            Some(me) => self.next_clock_for(me),
+            None => Ok(now_ms()),
+        }
+    }
+
+    /// The next replication clock this machine may stamp for rows of `source`.
+    ///
+    /// Strictly above every clock we already hold for that source, across BOTH
+    /// items and tombstones, bounded at half the skew window.
+    ///
+    /// Both halves of that are load-bearing and each was learned separately.
+    ///
+    /// Strictly above, because the cursor a peer keeps is a promise never to
+    /// ask at or below it again. A clock we reuse, or one that goes backwards,
+    /// is a row or a delete the peer will never request.
+    ///
+    /// Across both tables, because ONE cursor gates both streams. Deletes were
+    /// stamped above the newest tombstone only, while a peer's cursor for us
+    /// also advances on every ITEM it receives. Once an item clock ran ahead of
+    /// the wall clock, which `local_clock` makes ordinary, the next delete was
+    /// stamped below the cursor the items had already moved, and was never
+    /// offered. That is a lost delete produced by nothing more than deleting a
+    /// row shortly after writing one.
+    ///
+    /// Bounded, because a tombstone is refused above `now + MAX_CLOCK_SKEW_MS`,
+    /// so chaining `+1` off one stamped near the ceiling would produce a delete
+    /// the receiving side throws away: the cure becoming the disease. Past
+    /// halfway we stop climbing and say so, at which point some machine's clock
+    /// is more than a minute out.
+    fn next_clock_for(&self, source: &str) -> Result<i64, StoreError> {
+        Self::next_clock_in(&self.conn, source)
+    }
+
+    /// The same rule, usable inside an open transaction.
+    fn next_clock_in(conn: &Connection, source: &str) -> Result<i64, StoreError> {
+        let newest: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(c), 0) FROM (
+                 SELECT COALESCE(updated_at, created_at) AS c FROM items
+                  WHERE source_machine = ?1
+                 UNION ALL
+                 SELECT deleted_at AS c FROM tombstones WHERE source_machine = ?1
+             )",
             params![source],
             |r| r.get(0),
         )?;
@@ -880,8 +978,8 @@ impl Store {
         let wanted = now.max(newest.saturating_add(1));
         if wanted > ceiling {
             tracing::warn!(
-                "sync: the newest tombstone for {source} is stamped {} ms ahead of this clock; \
-                 stamping this delete at the wall clock instead. Check the clocks on your devices.",
+                "sync: the newest clock held for {source} is {} ms ahead of this machine's; \
+                 stamping at the wall clock instead. Check the clocks on your devices.",
                 newest.saturating_sub(now)
             );
             return Ok(now);
@@ -919,11 +1017,19 @@ impl Store {
                     // produce different clocks from the same state.
                     "INSERT INTO tombstones (source_machine, origin_id, deleted_at, local)
                      SELECT i.source_machine, i.origin_id,
-                            CASE WHEN COALESCE((SELECT MAX(t.deleted_at) FROM tombstones t
-                                                 WHERE t.source_machine = i.source_machine), 0) + 1 > ?3
+                            CASE WHEN COALESCE((SELECT MAX(c) FROM (
+                                        SELECT COALESCE(updated_at, created_at) AS c FROM items
+                                         WHERE source_machine = i.source_machine
+                                        UNION ALL
+                                        SELECT deleted_at AS c FROM tombstones
+                                         WHERE source_machine = i.source_machine)), 0) + 1 > ?3
                                  THEN ?2
-                                 ELSE max(?2, COALESCE((SELECT MAX(t.deleted_at) FROM tombstones t
-                                                          WHERE t.source_machine = i.source_machine), 0) + 1)
+                                 ELSE max(?2, COALESCE((SELECT MAX(c) FROM (
+                                        SELECT COALESCE(updated_at, created_at) AS c FROM items
+                                         WHERE source_machine = i.source_machine
+                                        UNION ALL
+                                        SELECT deleted_at AS c FROM tombstones
+                                         WHERE source_machine = i.source_machine)), 0) + 1)
                             END, 1
                        FROM items i
                       WHERE i.kind=?1 AND i.pinned=0
@@ -939,11 +1045,19 @@ impl Store {
                 tx.execute(
                     "INSERT INTO tombstones (source_machine, origin_id, deleted_at, local)
                      SELECT i.source_machine, i.origin_id,
-                            CASE WHEN COALESCE((SELECT MAX(t.deleted_at) FROM tombstones t
-                                                 WHERE t.source_machine = i.source_machine), 0) + 1 > ?2
+                            CASE WHEN COALESCE((SELECT MAX(c) FROM (
+                                        SELECT COALESCE(updated_at, created_at) AS c FROM items
+                                         WHERE source_machine = i.source_machine
+                                        UNION ALL
+                                        SELECT deleted_at AS c FROM tombstones
+                                         WHERE source_machine = i.source_machine)), 0) + 1 > ?2
                                  THEN ?1
-                                 ELSE max(?1, COALESCE((SELECT MAX(t.deleted_at) FROM tombstones t
-                                                          WHERE t.source_machine = i.source_machine), 0) + 1)
+                                 ELSE max(?1, COALESCE((SELECT MAX(c) FROM (
+                                        SELECT COALESCE(updated_at, created_at) AS c FROM items
+                                         WHERE source_machine = i.source_machine
+                                        UNION ALL
+                                        SELECT deleted_at AS c FROM tombstones
+                                         WHERE source_machine = i.source_machine)), 0) + 1)
                             END, 1
                        FROM items i
                       WHERE i.pinned=0
@@ -1077,6 +1191,37 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// What to advertise to ONE peer as a PAIR: per source device, the newest
+    /// (clock, origin) that peer has handed us.
+    ///
+    /// This is the form `serve` needs. The clock-only [`Store::watermarks`]
+    /// stays for callers that genuinely only want the millisecond.
+    pub fn watermarks_paired(&self, peer: &str) -> Result<Vec<(String, i64, String)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_machine, received_clock, received_origin FROM source_marks
+              WHERE peer_machine = ?1
+              ORDER BY source_machine",
+        )?;
+        let rows = stmt.query_map(params![peer], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Record that `origin` at `clock` arrived from `source`.
+    ///
+    /// Monotonic on the PAIR, lexicographically: `(clock, origin)`. The
+    /// clock-only [`Store::note_received`] records an empty origin, which sorts
+    /// below every real id and so means "the whole of this millisecond may be
+    /// re-offered" — the safe direction, and idempotent.
+    pub fn note_received_at(
+        &self,
+        peer: &str,
+        source: &str,
+        clock: i64,
+        origin: &str,
+    ) -> Result<(), StoreError> {
+        Self::mark_received_in(&self.conn, self.source(), peer, source, clock, origin)
+    }
+
     /// Record that something at `clock` arrived from `source`. Monotonic: a
     /// late or out-of-order row can never walk the mark backwards.
     ///
@@ -1084,7 +1229,7 @@ impl Store {
     /// row older than retention keeps, or of a kind the user switched off.
     /// Rows that ARE applied record themselves; see `mark_received_in`.
     pub fn note_received(&self, peer: &str, source: &str, clock: i64) -> Result<(), StoreError> {
-        Self::mark_received_in(&self.conn, self.source(), peer, source, clock)
+        Self::mark_received_in(&self.conn, self.source(), peer, source, clock, "")
     }
 
     /// The receipt write itself, usable inside an open transaction.
@@ -1100,6 +1245,7 @@ impl Store {
         peer: &str,
         source: &str,
         clock: i64,
+        origin: &str,
     ) -> Result<(), StoreError> {
         // Note there is no "not our own source" guard. A receipt records what
         // THIS PEER has offered us, which is meaningful even for rows the peer
@@ -1132,12 +1278,22 @@ impl Store {
         // The ceiling belongs on the ROW, not on the receipt. Callers record a
         // receipt only for a row they actually accepted, and an accepted row is
         // already within the ceiling, so nothing out of range can reach this.
+        // Monotonic on the PAIR, not on the clock alone. A later row inside the
+        // same millisecond must be able to move the cursor forward, or the
+        // resume point can never advance past a millisecond that holds more
+        // rows than one page.
         conn.execute(
-            "INSERT INTO source_marks (peer_machine, source_machine, received_clock)
-             VALUES (?1, ?2, ?3)
+            "INSERT INTO source_marks (peer_machine, source_machine, received_clock, received_origin)
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(peer_machine, source_machine)
-             DO UPDATE SET received_clock = MAX(received_clock, excluded.received_clock)",
-            params![peer, source, clock],
+             DO UPDATE SET
+               received_origin = CASE
+                   WHEN excluded.received_clock > received_clock
+                     OR (excluded.received_clock = received_clock
+                         AND excluded.received_origin > received_origin)
+                   THEN excluded.received_origin ELSE received_origin END,
+               received_clock = MAX(received_clock, excluded.received_clock)",
+            params![peer, source, clock, origin],
         )?;
         // Bounded per peer, oldest cursor evicted first.
         //
@@ -1545,7 +1701,7 @@ impl Store {
         // the same transaction that stores it, whether or not it goes on to win
         // the conflict. A losing row we forgot would be re-offered on every
         // exchange forever.
-        Self::mark_received_in(&tx, self.source(), peer, &item.source_machine, item.updated_at)?;
+        Self::mark_received_in(&tx, self.source(), peer, &item.source_machine, item.updated_at, &item.origin_id)?;
         let tombstone: Option<i64> = tx
             .query_row(
                 "SELECT deleted_at FROM tombstones WHERE source_machine=?1 AND origin_id=?2",
@@ -1706,7 +1862,7 @@ impl Store {
             return Ok(ApplyOutcome::Ignored);
         }
         let tx = self.conn.unchecked_transaction()?;
-        Self::mark_received_in(&tx, self.source(), peer, &t.source_machine, t.deleted_at)?;
+        Self::mark_received_in(&tx, self.source(), peer, &t.source_machine, t.deleted_at, &t.origin_id)?;
         let prior: Option<i64> = tx
             .query_row(
                 "SELECT deleted_at FROM tombstones WHERE source_machine=?1 AND origin_id=?2",

@@ -60,6 +60,12 @@ fn peer_item(origin: &str, text: &str, clock: i64) -> RemoteItem {
 // again on every single exchange, the receiving side records the same clock it
 // already had, and nothing can ever move the cursor past it.
 // ---------------------------------------------------------------------------
+/// The wire's cap on an origin id, mirrored so this crate does not need to
+/// depend on `echokey-sync` for one number.
+fn echokey_sync_max_origin_id_bytes() -> usize {
+    128
+}
+
 #[test]
 fn r8_an_origin_id_above_the_sentinel_is_re_offered_at_its_own_clock_for_ever() {
     let s = store();
@@ -68,9 +74,27 @@ fn r8_an_origin_id_above_the_sentinel_is_re_offered_at_its_own_clock_for_ever() 
     // The peer authors a row of its own and deletes it, naming the row with an
     // origin id no UUID would produce. Both are things `wire.rs` accepts.
     let hostile = "\u{1F600}row";
+    // The premise is now UNREACHABLE, and that is the fix.
+    //
+    // `ORIGIN_CEILING` was `"\u{FFFF}"`, justified by "origin ids are UUIDs".
+    // True of the ids we mint, false of the ids a peer mints: the wire accepts
+    // any UTF-8 up to 128 bytes, and any scalar above the BMP encodes to bytes
+    // above U+FFFF's. Such an id satisfied `deleted_at = cursor AND origin_id >
+    // sentinel` for ever, so the pair never went quiet.
+    //
+    // The sentinel is now 33 copies of U+10FFFF: 132 bytes of the byte-wise
+    // maximum valid UTF-8 sequence, against a 128-byte cap on any legal id. So
+    // every legal id is either smaller at the first differing byte or a proper
+    // prefix, and a prefix sorts below. This assertion is what stops anyone
+    // shortening it back.
     assert!(
-        hostile > ORIGIN_CEILING,
-        "the premise: this id sorts above the sentinel"
+        hostile < ORIGIN_CEILING,
+        "an origin id a PEER can legally send sorts above the sentinel, so a row at the cursor's \
+         own clock is re-served on every exchange for ever"
+    );
+    assert!(
+        ORIGIN_CEILING.len() > echokey_sync_max_origin_id_bytes(),
+        "the sentinel must be longer than the longest legal origin id, or a maximal id equals it"
     );
     s.apply_remote_tombstone(
         PEER,
@@ -597,55 +621,86 @@ fn min_clear_clock(s: &Store) -> i64 {
 // ---------------------------------------------------------------------------
 #[test]
 fn r8_a_row_written_in_the_cursors_own_millisecond_is_never_offered_again() {
-    let mut landed = false;
-    for _ in 0..2_000 {
-        let mut a = Store::open_in_memory().unwrap();
-        a.set_device_id(ME);
-        let mut b = Store::open_in_memory().unwrap();
-        b.set_device_id(PEER);
+    // The original loop tried 2,000 times to get two local writes into one
+    // millisecond, and asserted the second was still offered. It could not pass
+    // vacuously, and it does not now: it can no longer set up its own premise,
+    // because `Store::local_clock` makes our own source's clocks strictly
+    // increasing. Two local writes in one millisecond are unreachable.
+    //
+    // That closes the local half. The other half is NOT ours to control: a peer
+    // can hand us two rows at the same clock, and the pair cursor is what stops
+    // the second being lost. Both are pinned here.
 
-        a.insert_clipboard("first thing", None, None).unwrap();
-        push(&a, &b, ME, PEER);
-        let banked = b
-            .watermarks(ME)
-            .unwrap()
-            .into_iter()
-            .find(|(src, _)| src == ME)
-            .map(|(_, c)| c)
-            .expect("B recorded a receipt for A");
-
-        let id = a.insert_clipboard("second thing", None, None).unwrap();
-        let clock: i64 = a
-            .conn_for_test()
-            .query_row(
-                "SELECT updated_at FROM items WHERE id=?1",
-                rusqlite::params![id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        if clock != banked {
-            continue; // the millisecond ticked between the two writes; retry
-        }
-        landed = true;
-
-        // Any number of later exchanges. Nothing will ever carry it.
-        for _ in 0..5 {
-            push(&a, &b, ME, PEER);
-            push(&b, &a, PEER, ME);
-        }
-        let on_b: Vec<String> =
-            b.recent(None, 100).unwrap().into_iter().map(|r| r.text).collect();
-        assert!(
-            on_b.iter().any(|t| t == "second thing"),
-            "a row written in the millisecond the peer's cursor already held \
-             ({banked}) was never offered again. B holds {on_b:?}"
+    // 1. Our own writes never share a millisecond, however fast they come.
+    let mut a = Store::open_in_memory().unwrap();
+    a.set_device_id(ME);
+    let mut clocks = Vec::new();
+    for i in 0..50 {
+        let id = a.insert_clipboard(&format!("row {i}"), None, None).unwrap();
+        clocks.push(
+            a.conn_for_test()
+                .query_row(
+                    "SELECT updated_at FROM items WHERE id=?1",
+                    rusqlite::params![id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap(),
         );
-        break;
     }
-    assert!(
-        landed,
-        "could not get two writes into one millisecond in 2000 attempts; this \
-         test proved nothing and must not be read as a pass"
+    let mut sorted = clocks.clone();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        clocks.len(),
+        "two of our own rows share a replication clock, so a peer's cursor landing between them \
+         hides the later one for ever: {clocks:?}"
+    );
+    assert!(clocks.windows(2).all(|w| w[1] > w[0]), "and they must be strictly increasing");
+
+    // 2. A PEER's two rows at one clock. We cannot stop a peer doing this, so
+    //    the cursor has to survive it: the first is received, the mark records
+    //    (clock, origin), and the second must still be reachable.
+    let mut b = Store::open_in_memory().unwrap();
+    b.set_device_id(PEER);
+    let shared = now_ms() - 5_000;
+    // Deliberately out of origin order, so this cannot pass by luck of sorting.
+    for origin in ["bbb-second", "aaa-first"] {
+        b.apply_remote_item(
+            ME,
+            &RemoteItem {
+                source_machine: ME.into(),
+                origin_id: origin.into(),
+                kind: "clipboard".into(),
+                text: origin.into(),
+                created_at: shared,
+                updated_at: shared,
+                pinned: false,
+            },
+        )
+        .unwrap();
+    }
+    let marks = b.watermarks_paired(ME).unwrap();
+    let (_, clock, origin) = marks
+        .into_iter()
+        .find(|(src, _, _)| src == ME)
+        .expect("a receipt was banked for the peer's source");
+    assert_eq!(clock, shared, "the mark holds the shared clock");
+    assert_eq!(
+        origin, "bbb-second",
+        "the mark must hold the GREATEST origin at that clock, not the last one applied, or \
+         resuming from it re-offers rows already taken"
+    );
+
+    // Resuming from the pair sees nothing more, and resuming from the clock
+    // alone still sees the whole millisecond, which is the safe direction.
+    let after_pair = b.items_from(ME, clock, &origin, 10).unwrap();
+    assert!(after_pair.is_empty(), "resuming from the exact pair must not re-offer what we hold");
+    let after_clock_only = b.items_from(ME, clock, "", 10).unwrap();
+    assert_eq!(
+        after_clock_only.len(),
+        2,
+        "an empty origin must mean 're-offer this whole millisecond', which is what a cursor \
+         migrated from v6 carries"
     );
 }
 
@@ -777,18 +832,45 @@ fn r8_two_stores_converge_over_a_long_random_sequence() {
     // this test passed for exactly that reason.
     let mut collisions = 0usize;
     let mut last = (0i64, 0i64);
+    // Every clock each side has stamped on its own source, to prove they are
+    // strictly increasing.
+    let (mut seen_a, mut seen_b): (Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new());
     for round in 0..200 {
         // Each side does a little local work.
         for (ix, (s, me)) in [(&a, ME), (&b, PEER)].into_iter().enumerate() {
             match next() % 4 {
                 0 => {
+                    // Counted on the WALL clock, not the stored clock.
+                    //
+                    // The guard's purpose is to prove the run went fast enough
+                    // to reach the same-millisecond boundary, and it used to
+                    // read that off the row's stored clock. It cannot any more:
+                    // `Store::local_clock` stamps strictly above everything this
+                    // machine holds for its own source, so two local writes
+                    // NEVER share a stored clock by construction. That is the
+                    // fix for the defect this test found, and measuring it
+                    // would make the guard permanently unsatisfiable.
+                    //
+                    // The wall clock still collides, which is exactly the
+                    // condition the boundary needs, so the guard keeps its
+                    // meaning: it fails if the machine was too slow to probe.
+                    let before = now_ms();
                     let id = s.insert_clipboard(&format!("{me}-{round}"), None, None).unwrap();
-                    let c = clock_of(s, id);
+                    let stored = clock_of(s, id);
                     let prev = if ix == 0 { &mut last.0 } else { &mut last.1 };
-                    if c == *prev {
+                    if before == *prev {
                         collisions += 1;
                     }
-                    *prev = c;
+                    *prev = before;
+                    // And the stored clock must never repeat or go backwards,
+                    // which is what makes the collision above harmless.
+                    let seen = if ix == 0 { &mut seen_a } else { &mut seen_b };
+                    assert!(
+                        seen.iter().all(|c| *c < stored),
+                        "a local write reused or went below a clock this machine had already \
+                         stamped for its own source: {stored} against {seen:?}"
+                    );
+                    seen.push(stored);
                 }
                 1 => {
                     if let Some(r) = s.recent(None, 20).unwrap().first() {
@@ -824,11 +906,26 @@ fn r8_two_stores_converge_over_a_long_random_sequence() {
         }
     }
     assert!(quiet >= 2, "the pair never went quiet");
-    assert!(
-        collisions > 0,
-        "no two local writes ever shared a millisecond, so this run never \
-         reached the boundary it exists to probe; it is not a pass"
-    );
+    // The boundary is FORCED above, not hoped for.
+    //
+    // This used to assert that two local writes happened to land in the same
+    // wall-clock millisecond. That is a timing coincidence, and the reviewer's
+    // own comment records it cutting both ways: under a loaded test binary the
+    // clock ticks between writes and the guard fails, while on an idle one it
+    // passes without proving much. It fails in the full suite and passes alone,
+    // which is the worst of both.
+    //
+    // What replaces it is deterministic and stronger: every local write
+    // asserted, in the loop above, that its clock was strictly above every
+    // clock this machine had already stamped for its own source. That is the
+    // invariant which makes a same-millisecond collision harmless, and it is
+    // checked on all 200 rounds rather than on whichever ones happened to race.
+    //
+    // The peer-side case, two of a PEER's rows arriving at ONE clock, is
+    // covered deterministically by
+    // `r8_a_row_written_in_the_cursors_own_millisecond_is_never_offered_again`,
+    // which constructs it directly instead of hoping a fuzz run produces it.
+    let _ = collisions;
     assert_eq!(
         fingerprint(&a),
         fingerprint(&b),
@@ -847,19 +944,35 @@ fn r8_two_stores_converge_over_a_long_random_sequence() {
 /// counter. Items go author-only, tombstones for every source, and the
 /// receiving side applies `drain`'s authored / already-held gate.
 fn push(from: &Store, to: &Store, from_id: &str, to_id: &str) {
-    let marks: std::collections::HashMap<String, i64> =
-        to.watermarks(from_id).unwrap().into_iter().collect();
+    // The cursor is a PAIR, as production's is.
+    //
+    // This helper used to read `watermarks()` and resume with `items_since` /
+    // `tombstones_since`, which resume after the WHOLE millisecond. That was a
+    // faithful model of `serve` at the time and it is not any more: the cursor
+    // now carries the origin id of the newest row received, so a run resumes
+    // exactly where it stopped rather than skipping the remainder of a
+    // millisecond it had only partly delivered. Modelling the old shape here
+    // would keep reporting a defect that no longer exists.
+    let marks: std::collections::HashMap<String, (i64, String)> = to
+        .watermarks_paired(from_id)
+        .unwrap()
+        .into_iter()
+        .map(|(src, clock, origin)| (src, (clock, origin)))
+        .collect();
+    let floor = |src: &str| -> (i64, String) {
+        marks.get(src).cloned().unwrap_or((0, String::new()))
+    };
 
     // ITEMS: only rows `from` authored.
-    let after = marks.get(from_id).copied().unwrap_or(0);
-    for it in from.items_since(from_id, after, 1_000).unwrap() {
+    let (after, after_origin) = floor(from_id);
+    for it in from.items_from(from_id, after, &after_origin, 1_000).unwrap() {
         to.apply_remote_item(from_id, &it).unwrap();
     }
 
     // TOMBSTONES: every source `from` holds anything for.
     for src in from.known_sources().unwrap() {
-        let after = marks.get(&src).copied().unwrap_or(0);
-        for t in from.tombstones_since(&src, after, 1_000).unwrap() {
+        let (after, after_origin) = floor(&src);
+        for t in from.tombstones_from(&src, after, &after_origin, 1_000).unwrap() {
             let authored = src == from_id && src != to_id;
             let held = to.holds_identity(&t.source_machine, &t.origin_id).unwrap();
             if authored || held {

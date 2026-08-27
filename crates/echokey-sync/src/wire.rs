@@ -29,7 +29,7 @@ use std::marker::PhantomData;
 use crate::identity::{validate_device_name, DeviceId};
 
 /// Version of the message format below. Bump on any breaking change.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Hard cap on the text of a single item: 1 MiB.
 ///
@@ -132,6 +132,37 @@ impl Tombstone {
 pub struct Watermark {
     pub source_device: DeviceId,
     pub clock: u64,
+    /// The origin id of the newest row received at `clock`, making the cursor a
+    /// PAIR rather than a bare millisecond.
+    ///
+    /// Without it the sender had to guess where inside `clock` to resume, and
+    /// it guessed "after the whole millisecond". A Clear stamps every tombstone
+    /// for a source with ONE clock, so an interrupted clear larger than a page
+    /// stranded the rest of that millisecond for ever, and a row written in the
+    /// millisecond the cursor already held was never offered at all.
+    ///
+    /// Empty means "the whole of this millisecond may be re-offered", which is
+    /// the safe direction and is what a cursor migrated from v6 carries.
+    ///
+    /// `default` rather than required, deliberately. A missing origin decodes
+    /// to empty, which is exactly the v6 meaning, so a message that omits it is
+    /// understood as conservatively as possible instead of failing the whole
+    /// exchange. `deny_unknown_fields` still refuses anything it does not know.
+    #[serde(default)]
+    pub origin: String,
+}
+
+impl Watermark {
+    pub fn validate(&self) -> Result<(), WireError> {
+        // Peer-controlled and unbounded without this. Empty IS legal here,
+        // unlike an item's origin id: it is what a cursor migrated from v6
+        // carries and what a peer that has received nothing at this clock
+        // reports, and it means "re-offer the whole millisecond".
+        if self.origin.is_empty() {
+            return Ok(());
+        }
+        validate_origin_id(&self.origin)
+    }
 }
 
 
@@ -246,7 +277,10 @@ impl SyncMessage {
                 validate_device_name(device_name)?;
                 Ok(())
             }
-            SyncMessage::Watermarks { entries, .. } => check_len(entries.len()),
+            SyncMessage::Watermarks { entries, .. } => {
+                check_len(entries.len())?;
+                entries.iter().try_for_each(Watermark::validate)
+            }
             SyncMessage::Items { items, .. } => {
                 check_len(items.len())?;
                 items.iter().try_for_each(SyncItem::validate)
@@ -355,6 +389,7 @@ mod tests {
                 entries: vec![Watermark {
                     source_device: device(),
                     clock: 42,
+                    origin: String::new(),
                 }],
                 more: false,
             },

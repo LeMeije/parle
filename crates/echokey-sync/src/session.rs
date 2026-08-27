@@ -68,7 +68,7 @@ pub const NOISE_PATTERN: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
 
 /// Transport epoch. Mixed into the handshake hash; bump it when the framing or
 /// the Noise pattern changes.
-pub const NOISE_PROLOGUE: &[u8] = b"echokey-sync/noise/3";
+pub const NOISE_PROLOGUE: &[u8] = b"echokey-sync/noise/4";
 
 /// A Noise message can never exceed this (Noise spec).
 const MAX_NOISE_FRAME: usize = 65535;

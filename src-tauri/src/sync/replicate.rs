@@ -362,8 +362,8 @@ pub fn exchange<S: Read + Write>(
 /// The cost of dropping it is one extra round of echo per pairing: each side
 /// offers the other its own rows back once, they are recognised as no-ops, the
 /// cursor rises, and it stops. A wasted round beats a lost delete.
-fn floor_for(source: &str, peer_marks: &HashMap<String, i64>) -> i64 {
-    peer_marks.get(source).copied().unwrap_or(0)
+fn floor_for(source: &str, peer_marks: &HashMap<String, (i64, String)>) -> (i64, String) {
+    peer_marks.get(source).cloned().unwrap_or((0, String::new()))
 }
 
 fn serve<S: Read + Write>(
@@ -371,7 +371,7 @@ fn serve<S: Read + Write>(
     store: &Arc<Mutex<Store>>,
     me: (&str, &str),
     peer_id: &str,
-    peer_marks: &HashMap<String, i64>,
+    peer_marks: &HashMap<String, (i64, String)>,
     kinds: Kinds,
     resend_all: bool,
     resend_from: i64,
@@ -421,19 +421,25 @@ fn serve<S: Read + Write>(
         // stops this being wasteful: it tells us what it has already seen from
         // us about each source, including itself, so only rows we actually
         // changed go across.
-        let mut after = if resend_all {
-            resend_from
+        // The cursor is a PAIR, and it now arrives as one.
+        //
+        // The first page used to start at `ORIGIN_CEILING`, which reads as
+        // "strictly after the WHOLE millisecond the peer's clock names". That
+        // was a guess standing in for information the wire did not carry, and
+        // it lost data three ways: an interrupted Clear stranded the rest of a
+        // millisecond for ever (a Clear stamps one clock across every tombstone
+        // for a source), a row written in the cursor's own millisecond was
+        // never offered, and the sentinel is not even a ceiling for origin ids
+        // a PEER mints, so an id above the BMP was re-served on every exchange
+        // for ever.
+        //
+        // With the peer's own (clock, origin) we resume exactly where the last
+        // run stopped, whether it stopped between pages or mid-millisecond.
+        let (mut after, mut after_origin) = if resend_all {
+            (resend_from, String::new())
         } else {
             floor_for(source, peer_marks)
         };
-        // The cursor is a PAIR: clock and origin id. On the clock alone a page
-        // that ended inside a millisecond dropped the rest of it for good, and
-        // the only defence was a 20,000-row re-fetch in one statement — which
-        // missed the common case AND let a peer freeze the history UI for most
-        // of a second by stamping enough rows the same.
-        // Strictly after `after` on the first page: the peer already has that
-        // millisecond. Later pages continue on the (clock, origin) pair.
-        let mut after_origin = echokey_core::history::ORIGIN_CEILING.to_string();
         let mut served = 0usize;
         let mut truncated_here = false;
         // ITEMS: only the rows we authored.
@@ -585,13 +591,12 @@ fn serve<S: Read + Write>(
         // stopping point; the rest follows next exchange.
         let tomb_ceiling = if truncated_here { Some(after) } else { None };
 
-        // Tombstones for the same source.
-        let mut after = if resend_all {
-            resend_from
+        // Tombstones for the same source, resumed from the same pair.
+        let (mut after, mut after_origin) = if resend_all {
+            (resend_from, String::new())
         } else {
             floor_for(source, peer_marks)
         };
-        let mut after_origin = echokey_core::history::ORIGIN_CEILING.to_string();
         let mut tomb_served = 0usize;
         for _ in 0..MAX_BATCHES {
             if sent_messages + 2 >= MAX_EXCHANGE_MESSAGES {
@@ -803,7 +808,7 @@ fn drain<S: Read + Write>(
                         .map_err(|e| ReplicateError::Store(e.to_string()))?;
                     if let Some(local) = held_kind {
                         if !kinds.allows(&local) {
-                            note_refused(store, attribution.peer_id, it.source_device.as_str(), it.updated_at)?;
+                            note_refused(store, attribution.peer_id, it.source_device.as_str(), it.updated_at, &it.origin_id)?;
                             stats.refused += 1;
                             continue;
                         }
@@ -821,7 +826,7 @@ fn drain<S: Read + Write>(
                         // stops the peer re-offering it meanwhile, and
                         // `set_retention_days` clears every receipt when the
                         // window widens, so nothing is stranded.
-                        note_refused(store, attribution.peer_id, it.source_device.as_str(), it.updated_at)?;
+                        note_refused(store, attribution.peer_id, it.source_device.as_str(), it.updated_at, &it.origin_id)?;
                         stats.ignored += 1;
                         continue;
                     }
@@ -836,7 +841,7 @@ fn drain<S: Read + Write>(
                     if !kinds.allows(kind) {
                         // Reversible: the user can switch the kind back on, and
                         // `set_kinds` clears every receipt when they do.
-                        note_refused(store, attribution.peer_id, it.source_device.as_str(), it.updated_at)?;
+                        note_refused(store, attribution.peer_id, it.source_device.as_str(), it.updated_at, &it.origin_id)?;
                         stats.ignored += 1;
                         continue;
                     }
@@ -926,14 +931,13 @@ fn drain<S: Read + Write>(
                         let may_still_arrive = set.contains(t.source_device.as_str());
                         if !may_still_arrive {
                             // Range-checked inside `note_received`.
-                            store
-                                .lock()
-                                .note_received(
-                                    attribution.peer_id,
-                                    t.source_device.as_str(),
-                                    t.deleted_at,
-                                )
-                                .map_err(|e| ReplicateError::Store(e.to_string()))?;
+                            note_refused(
+                                store,
+                                attribution.peer_id,
+                                t.source_device.as_str(),
+                                t.deleted_at,
+                                &t.origin_id,
+                            )?;
                         }
                         stats.refused += 1;
                         continue;
@@ -962,7 +966,7 @@ fn drain<S: Read + Write>(
                             .map_err(|e| ReplicateError::Store(e.to_string()))?;
                         if let Some(local) = held_kind {
                             if !kinds.allows(&local) {
-                                note_refused(store, attribution.peer_id, t.source_device.as_str(), t.deleted_at)?;
+                                note_refused(store, attribution.peer_id, t.source_device.as_str(), t.deleted_at, &t.origin_id)?;
                                 stats.refused += 1;
                                 continue;
                             }
@@ -1008,14 +1012,15 @@ fn send_watermarks<S: Read + Write>(
 ) -> Result<(), ReplicateError> {
     let mine = store
         .lock()
-        .watermarks(peer_id)
+        .watermarks_paired(peer_id)
         .map_err(|e| ReplicateError::Store(e.to_string()))?;
     let marks: Vec<Watermark> = mine
         .iter()
-        .filter_map(|(src, clock)| {
+        .filter_map(|(src, clock, origin)| {
             DeviceId::parse(src).ok().map(|d| Watermark {
                 source_device: d,
                 clock: (*clock).max(0) as u64,
+                origin: origin.clone(),
             })
         })
         .collect();
@@ -1047,7 +1052,7 @@ fn send_watermarks<S: Read + Write>(
 /// remaining chunks surfaced where rows were expected and ended the exchange.
 fn recv_watermarks<S: Read + Write>(
     session: &mut Session<S>,
-) -> Result<HashMap<String, i64>, ReplicateError> {
+) -> Result<HashMap<String, (i64, String)>, ReplicateError> {
     let mut out = HashMap::new();
     // The bound has to be at least what `send_watermarks` can legitimately
     // produce, or an honest peer with many sources desynchronises the stream
@@ -1057,11 +1062,18 @@ fn recv_watermarks<S: Read + Write>(
         match session.recv()? {
             SyncMessage::Watermarks { entries, more } => {
                 for w in entries {
-                    // A duplicated source across chunks takes the higher mark:
-                    // sending less than the peer already has is the only unsafe
-                    // direction.
-                    let e = out.entry(w.source_device.as_str().to_string()).or_insert(0);
-                    *e = (*e).max(w.clock as i64);
+                    // A duplicated source across chunks takes the higher mark,
+                    // compared as a PAIR: sending less than the peer already has
+                    // is the only unsafe direction, and on the clock alone two
+                    // chunks naming the same millisecond would keep whichever
+                    // origin arrived last rather than the greater one.
+                    let clock = w.clock as i64;
+                    let e = out
+                        .entry(w.source_device.as_str().to_string())
+                        .or_insert((0, String::new()));
+                    if (clock, w.origin.as_str()) > (e.0, e.1.as_str()) {
+                        *e = (clock, w.origin);
+                    }
                 }
                 if !more {
                     break;
@@ -1092,10 +1104,16 @@ fn note_refused(
     peer_id: &str,
     source: &str,
     clock: i64,
+    origin: &str,
 ) -> Result<(), ReplicateError> {
+    // The ORIGIN matters as much as the clock now that the cursor is a pair.
+    // An empty origin sorts BELOW every real id, so banking `(clock, "")` for a
+    // refusal leaves the item still strictly above the mark and the peer
+    // re-offers it on every exchange for ever, which is the loop this receipt
+    // exists to close.
     store
         .lock()
-        .note_received(peer_id, source, clock)
+        .note_received_at(peer_id, source, clock, origin)
         .map_err(|e| ReplicateError::Store(e.to_string()))
 }
 

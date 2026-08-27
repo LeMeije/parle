@@ -506,7 +506,7 @@ export default function SettingsView({
             <option value={1}>1 day</option>
           </select>
         </Field>
-        <Field label="Excluded apps" hint="One per line — bundle id (Mac) or exe name (Windows)">
+        <Field label="Excluded apps" hint="One per line: bundle id on Mac, exe name on Windows. This list is per device, so add the entry on each machine. Parle never sends a row from an excluded app to your other devices.">
           <textarea
             className="excluded-apps"
             value={s.history.excluded_apps.join('\n')}

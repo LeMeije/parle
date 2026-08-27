@@ -628,9 +628,9 @@ fn r6sec_a_hostile_watermark_clock_cannot_produce_a_nonsense_floor() {
         // Clocks that are not representable as a positive i64.
         s.send(&SyncMessage::Watermarks {
             entries: vec![
-                Watermark { source_device: DeviceId::parse(A).unwrap(), clock: u64::MAX },
-                Watermark { source_device: DeviceId::parse(B).unwrap(), clock: 1u64 << 63 },
-                Watermark { source_device: DeviceId::parse(C).unwrap(), clock: i64::MAX as u64 },
+                Watermark { source_device: DeviceId::parse(A).unwrap(), clock: u64::MAX, origin: String::new()  },
+                Watermark { source_device: DeviceId::parse(B).unwrap(), clock: 1u64 << 63, origin: String::new()  },
+                Watermark { source_device: DeviceId::parse(C).unwrap(), clock: i64::MAX as u64, origin: String::new()  },
             ],
             more: false,
         })
