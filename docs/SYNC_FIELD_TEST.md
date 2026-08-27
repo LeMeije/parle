@@ -1,4 +1,4 @@
-# Parle sync — field test
+# Parle sync, field test
 
 The sync feature has never run between two physical machines. Everything in the
 suite is single-machine, over loopback sockets. This file records what has been
@@ -40,7 +40,7 @@ both now have an answer on real hardware rather than a guess. Each is a
 `#[ignore]`d diagnostic so it stays out of the ordinary suite and can be re-run
 on any new machine.
 
-### 1. mDNS discovery works — VERIFIED 27/08/2026
+### 1. mDNS discovery works, VERIFIED 27/08/2026
 
 ```bash
 cargo test -p echokey-sync --test mdns_field_check -- --ignored --nocapture
@@ -54,8 +54,8 @@ not conflict with macOS's mDNSResponder on this version.
 declared neither `NSBonjourServices` nor `NSLocalNetworkUsageDescription`. On
 macOS 14 and later the system filters an app's mDNS traffic outright without the
 first, and has no explanation to show in the permission prompt without the
-second. The failure is silent — discovery reports no error and simply never
-finds anyone — so the first two-machine attempt would have looked like a
+second. The failure is silent, discovery reports no error and simply never
+finds anyone, so the first two-machine attempt would have looked like a
 mysterious "they cannot see each other". Both keys are now in `Info.plist`.
 
 Caveat that is NOT settled: the diagnostic runs from the terminal, which already
@@ -63,7 +63,7 @@ holds local-network permission. The bundled, signed app asks for its own. Expect
 a prompt on first launch, and check **System Settings > Privacy & Security >
 Local Network** if discovery finds nothing.
 
-### 2. The keychain is silent — VERIFIED 27/08/2026
+### 2. The keychain is silent, VERIFIED 27/08/2026
 
 ```bash
 cargo test -p echokey --test keychain_field_check -- --ignored --nocapture
@@ -100,8 +100,8 @@ and the one most likely to surprise.
 4. **A dictation on one appears on the other.**
 5. **A copy on one appears on the other**, with the clipboard kind switched on.
 6. **Delete on the RECEIVING device and confirm it disappears on the author.**
-   This is the path the authority rules are built around — deletes travel for
-   every source while content travels only from its author — and it has never
+   This is the path the authority rules are built around, deletes travel for
+   every source while content travels only from its author, and it has never
    run for real.
 7. **Toggle a sync kind off and on.** Confirm the one-shot re-offer backfills
    both directions rather than leaving a hole.

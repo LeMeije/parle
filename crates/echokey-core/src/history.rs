@@ -358,7 +358,7 @@ impl Store {
             // origin. A local Clear History is not capped as it is written, so
             // clearing a replicated history larger than the ceiling left the
             // table over it; the very next tombstone to arrive from a peer then
-            // trimmed it back by dropping the OLDEST — which, straight after a
+            // trimmed it back by dropping the OLDEST, which, straight after a
             // Clear, are the user's own deletes, none of which had been
             // delivered yet. Nothing re-creates a tombstone, so those deletes
             // were gone, and the rows walked back in on the next re-offer.
@@ -366,7 +366,7 @@ impl Store {
             // Only a delete WE performed is irreplaceable: it is the sole
             // record anywhere that the user asked for that row to go, and the
             // only thing that will ever tell a peer. A replicated tombstone is
-            // bookkeeping — the peer that sent it still holds it and will offer
+            // bookkeeping: the peer that sent it still holds it and will offer
             // it again. So the cap now evicts replicated entries only.
             //
             // The bound that replaces it: local tombstones are created only by
@@ -387,7 +387,7 @@ impl Store {
             // v6, second half: a row remembers that the USER changed it here.
             //
             // Only the authoring device may change a row's content, so pinning
-            // or correcting a peer's row is local and never travels — and it
+            // or correcting a peer's row is local and never travels, and it
             // must not move `updated_at`, or it swallows the author's own later
             // correction for ever (see `edit_clock`). That leaves the edited row
             // at exactly the author's clock, so the author's next unchanged echo
@@ -674,14 +674,14 @@ impl Store {
     /// ahead of us, so the user's edit wins the conflict it is about to enter.
     /// A row from a peer whose clock runs a little fast carries a clock
     /// `now_ms()` cannot reach, and stamping the bare wall clock meant an edit
-    /// was born losing — the next unchanged echo beat it and silently reverted
+    /// was born losing: the next unchanged echo beat it and silently reverted
     /// it.
     ///
     /// For a row we did NOT author: the clock is left exactly where it is.
     ///
     /// This is the important half, and it is not an optimisation. Only the
     /// authoring device may change a row's content, so pinning or correcting a
-    /// peer's row here is local and never travels — but `updated_at` is the
+    /// peer's row here is local and never travels, but `updated_at` is the
     /// single last-writer-wins clock the AUTHOR's changes are judged against.
     /// Bumping it meant an ordinary pin, made after the author's correction but
     /// before the next exchange, permanently swallowed that correction: the
@@ -693,8 +693,8 @@ impl Store {
     /// correct on A, pin on B, sync.
     ///
     /// What this costs: a local pin no longer outranks an unchanged echo of the
-    /// same row. In practice the echo does not happen — the peer's cursor sits
-    /// at that row's clock, and `serve` offers only what is strictly above it —
+    /// same row. In practice the echo does not happen, because the peer's cursor sits
+    /// at that row's clock, and `serve` offers only what is strictly above it ,
     /// so the exposure is a one-shot re-offer after a kind or retention
     /// widening, where an equal-clock tie could flip the local `pinned` flag
     /// back. A pin that occasionally needs redoing is a far smaller failure
@@ -720,7 +720,7 @@ impl Store {
     }
 
     /// Did this machine write the row? A row with no source (pre-sync legacy)
-    /// is ours, and so is everything when this install has no identity yet —
+    /// is ours, and so is everything when this install has no identity yet ,
     /// there is no peer that could disagree.
     fn authored_here(&self, source: Option<&str>) -> bool {
         match (self.source(), source) {
@@ -771,7 +771,7 @@ impl Store {
     /// minutes in the future; the peer banked that as its cursor for the
     /// source; and the NEXT delete, made normally, carried a lower clock and
     /// fell below the cursor. Nothing lowers a cursor, so that delete was never
-    /// offered again — a delete lost by a plain sequence of two deletes.
+    /// offered again. A delete lost by nothing more than two deletes in a row.
     pub fn delete_item_local(&self, id: i64) -> Result<(), StoreError> {
         let tx = self.conn.unchecked_transaction()?;
         let row: Option<(Option<String>, Option<String>, i64)> = tx
@@ -805,7 +805,7 @@ impl Store {
     /// for that source. A tombstone cursor is a promise never to ask for
     /// anything at or below it again, and the cursor is a bare millisecond, so
     /// a delete stamped in a millisecond we have already delivered sits below
-    /// the peer's mark and is never offered — a lost delete.
+    /// the peer's mark and is never offered. That is a lost delete.
     ///
     /// The max is over EVERY tombstone we hold for that source, not just our
     /// own. A cursor does not care who created the tombstone that moved it: a
@@ -815,7 +815,7 @@ impl Store {
     /// Bounded so the cure cannot become the disease. A tombstone is accepted
     /// only up to `now + MAX_CLOCK_SKEW_MS`, so chaining `+1` off one stamped
     /// at the ceiling would produce a delete the receiving side refuses
-    /// outright — losing the delete this exists to protect. Past halfway to the
+    /// outright, which loses the delete this exists to protect. Past halfway to the
     /// ceiling we stop climbing, take the plain wall clock, and say so: at that
     /// point some machine's clock is more than a minute out, which is a
     /// condition the user is told about separately and should fix.
@@ -857,7 +857,7 @@ impl Store {
             Some(k) => {
                 tx.execute(
                     // Per source, one clock strictly above every tombstone
-                    // already held for it — the same rule as `delete_clock`,
+                    // already held for it, the same rule as `delete_clock`,
                     // expressed in SQL because a Clear writes the whole batch in
                     // one statement, INCLUDING its fallback: past the ceiling we
                     // drop back to the plain wall clock.
@@ -1232,7 +1232,7 @@ impl Store {
         )?;
         // Past the ceiling with nothing evictable left. That is bounded by the
         // rows this machine actually held, which `max_items` already bounds,
-        // and a peer cannot add to it — so it is a state to report, not to
+        // and a peer cannot add to it, so it is a state to report, not to
         // resolve by throwing a delete away.
         let remaining = n - dropped as i64;
         if remaining > MAX_TOMBSTONES_PER_SOURCE {
@@ -1542,7 +1542,7 @@ impl Store {
                 // But a local pin or correction on a peer's row deliberately
                 // does not move `updated_at` (see `edit_stamp`, and the v6
                 // migration for why), so the author's next unchanged echo
-                // arrives as a tie — and the payload order reverted the user's
+                // arrives as a tie, and the payload order reverted the user's
                 // edit on the spot, silently.
                 //
                 // `local_edit` separates the two cases. A row nobody touched
@@ -1550,7 +1550,7 @@ impl Store {
                 // keeps their change against an echo that carries no new
                 // information. An author change that is genuinely newer has a
                 // strictly greater clock, wins on the first clause, and clears
-                // the flag below — the author's word is still final.
+                // the flag below. The author's word is still final.
                 let wins = item.updated_at > local_updated
                     || (item.updated_at == local_updated
                         && !local_edit

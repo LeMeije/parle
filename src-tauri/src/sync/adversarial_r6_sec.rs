@@ -293,14 +293,14 @@ fn r6sec_an_excluded_kind_cannot_be_touched_by_a_relayed_change() {
 //
 // TRIAGE: the finding is real, the remedy it named was not.
 //
-// The reviewer's claim was structural — `docs/SYNC_DESIGN.md` says "A device
+// The reviewer's claim was structural, `docs/SYNC_DESIGN.md` says "A device
 // does not advertise a mark for itself at all", and a peer's ordinary delete of
 // one of our rows makes us advertise exactly that. Both halves are true. But
 // that sentence describes a design in which `serve` offered ITEMS for every
 // source it held, and it does not any more: since content became
 // author-only, a peer never sends us items attributed to our own device.
-// A `(peer, our own id)` mark therefore gates ONE stream — the deletes that
-// peer relays back to us about our own rows — which is precisely the stream a
+// A `(peer, our own id)` mark therefore gates ONE stream, the deletes that
+// peer relays back to us about our own rows, which is precisely the stream a
 // receipt should gate.
 //
 // Removing the mark, as the reviewer proposed, would make that stream ungated:
@@ -319,8 +319,8 @@ fn r6sec_an_excluded_kind_cannot_be_touched_by_a_relayed_change() {
 // `Store::delete_clock` fixes that at the source: a local delete is stamped
 // strictly above every tombstone we already hold for that source, bounded so it
 // can never exceed what a peer will accept. The tests below assert the
-// behaviour that actually matters — no delete of our own rows can be hidden by
-// the mark — rather than the absence of a table row.
+// behaviour that actually matters, no delete of our own rows can be hidden by
+// the mark, rather than the absence of a table row.
 //
 // `docs/SYNC_DESIGN.md` has been corrected to match.
 // ===========================================================================
@@ -414,8 +414,8 @@ fn r6sec_a_relayed_delete_of_our_own_row_is_never_hidden_by_the_mark_it_sets() {
     );
 }
 
-/// The mark a relayed delete sets is a RECEIPT — bounded by what actually
-/// arrived — and not an invitation to park it in the future.
+/// The mark a relayed delete sets is a RECEIPT, bounded by what actually
+/// arrived, and not an invitation to park it in the future.
 #[test]
 fn r6sec_a_peer_cannot_park_the_mark_it_sets_for_our_own_source() {
     let ours = store_for(A);
@@ -754,8 +754,8 @@ fn r6sec_a_device_name_the_ui_accepts_can_disable_sync_entirely() {
 
     // The PRODUCTION path, not a copy of it.
     //
-    // This test used to inline the command's old body — trim, then take 64
-    // CHARACTERS — and assert that the result was unsendable. It was, and that
+    // This test used to inline the command's old body, trim, then take 64
+    // CHARACTERS, and assert that the result was unsendable. It was, and that
     // was the finding: `validate_device_name` counts BYTES and refuses `=`,
     // because the name rides in an mDNS TXT `key=value` pair, so the settings
     // layer happily stored names the wire would not carry. Every `Hello` then
@@ -810,7 +810,7 @@ fn r6sec_a_device_name_the_ui_accepts_can_disable_sync_entirely() {
     }
 
     // A name with nothing usable in it is the one case the caller must report,
-    // and `sync_set_device_name` does — it returns the "give this device a
+    // and `sync_set_device_name` does, it returns the "give this device a
     // name" error rather than storing something the wire will refuse.
     assert!(sanitise_device_name("===").is_none());
     assert!(sanitise_device_name("   ").is_none());

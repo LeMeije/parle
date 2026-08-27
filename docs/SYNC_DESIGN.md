@@ -32,7 +32,7 @@ first real pairing as the remaining acceptance test.
   secret. Device identity is exchanged **inside** that session — see below.
 - **Replication**: rows are identified across machines by
   `(source_machine, origin_id)`, where `origin_id` for a new local row is a
-  random UUID — never the rowid, which restarts at 1 if `history.db` is rebuilt
+  random UUID, never the rowid, which restarts at 1 if `history.db` is rebuilt
   and so hands new rows an identity a peer has already seen. Last-writer-wins on
   `updated_at`, with a total tiebreak on the whole payload
   `(text, pinned, created_at, kind)` so an exact tie cannot leave two machines
@@ -46,7 +46,7 @@ first real pairing as the remaining acceptance test.
   it travel needs a signed per-device edit log, not a loosening of this rule.
 
   A local edit on a peer's row does not move `updated_at` either, because that
-  clock is what the author's own changes are judged against — bumping it made an
+  clock is what the author's own changes are judged against, bumping it made an
   ordinary pin swallow the author's correction permanently. The row is flagged
   `local_edit` instead, and that flag is what wins the tie against an unchanged
   echo. Deletes are exempt from all of this and travel for every source: a
@@ -83,7 +83,7 @@ This section used to end "a device does not advertise a mark for itself at all",
 and that is **no longer the rule**. It was written when `serve` offered items for
 every source it held; now that content is author-only, a peer never sends us
 items attributed to our own device, so a `(peer, our own id)` mark gates exactly
-one stream — the deletes that peer relays back to us about our own rows. That is
+one stream, the deletes that peer relays back to us about our own rows. That is
 a stream a receipt SHOULD gate: without one, every peer re-offers every tombstone
 it holds for our source on every exchange, for the life of the pairing, with
 nothing able to say stop.
@@ -91,7 +91,7 @@ nothing able to say stop.
 What made the self-mark dangerous was not its existence but the ordering it
 relied on. A cursor is a promise never to ask below a clock again, which is only
 sound if the stream is created in clock order, and tombstones were stamped
-`max(now, row.updated_at)` — so deleting a row from a peer inside the accepted
+`max(now, row.updated_at)`, so deleting a row from a peer inside the accepted
 skew produced a tombstone up to two minutes in the FUTURE, the mark went there,
 and the next delete fell below it and was never offered again. `delete_clock`
 fixes that at the source: a local delete is stamped strictly above every
@@ -131,7 +131,7 @@ stamp has not been needed since tombstones became absorbing.
   only** (`tombstones.local = 0`). Evicting indiscriminately destroyed
   undelivered local deletes: a Clear History is written uncapped, so the table
   sits above the ceiling, and the next tombstone from a peer trimmed it by
-  dropping the oldest — which straight after a Clear are the user's own deletes,
+  dropping the oldest, which straight after a Clear are the user's own deletes,
   none of them delivered. A replicated tombstone is safe to drop because the peer
   that sent it still holds it; a local one is the only record anywhere that the
   user asked for that row to go. What bounds the local ones instead is that they
@@ -143,7 +143,7 @@ stamp has not been needed since tombstones became absorbing.
   refusal banks a receipt depends on whether the row could ever arrive: content
   reaches us only from its author, so if the source is neither in our paired
   roster nor one we already hold rows for, the refusal is PERMANENT and the
-  receipt is safe. Without that, the exchange never went quiet — A syncs with C,
+  receipt is safe. Without that, the exchange never went quiet, A syncs with C,
   the user clears history on A, A pairs with B, and every A-B exchange from then
   on carries the same dead tombstones for ever.
 

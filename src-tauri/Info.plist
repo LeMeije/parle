@@ -12,8 +12,8 @@
       NSLocalNetworkUsageDescription the prompt has no explanation to show, and
       without NSBonjourServices the system filters the app's mDNS traffic
       outright: browsing returns nothing and registration is not seen by
-      anyone. The failure is SILENT — discovery reports no error, it simply
-      finds no peers for ever — so sync would have appeared to work and then
+      anyone. The failure is SILENT, discovery reports no error, it simply
+      finds no peers for ever, so sync would have appeared to work and then
       never found the other machine, which is the first thing anyone would try.
 
       NSBonjourServices must list the service type WITHOUT the trailing

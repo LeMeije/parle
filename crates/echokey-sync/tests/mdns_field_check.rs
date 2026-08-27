@@ -5,7 +5,7 @@
 //! ```
 //!
 //! It is `#[ignore]` because it puts real packets on the real network and its
-//! result depends on the machine it runs on — a firewall, a captive network, or
+//! result depends on the machine it runs on, a firewall, a captive network, or
 //! a declined macOS local-network prompt all make it fail correctly. That is
 //! information, not a broken build, so it must not sit in the ordinary suite.
 //!
@@ -13,7 +13,7 @@
 //! and `docs/SYNC_HANDOVER.md` records mDNS on macOS as the biggest unknown.
 //! macOS runs its own mDNSResponder while the `mdns-sd` crate runs its own
 //! stack, and macOS 14+ filters an app's mDNS traffic unless `Info.plist`
-//! declares `NSBonjourServices` — silently, with discovery reporting no error
+//! declares `NSBonjourServices`. The failure is silent: discovery reports no error
 //! and simply never finding anyone. This answers "does the stack work here at
 //! all" before anyone spends an afternoon on "why can the two machines not see
 //! each other".
@@ -80,7 +80,7 @@ fn mdns_two_instances_on_this_machine_can_find_each_other() {
          (one saw two: {one_saw_two}, two saw one: {two_saw_one}).\n\
          On macOS 14+ check, in order:\n\
          1. Info.plist declares NSBonjourServices = [_echokey._tcp] and \
-            NSLocalNetworkUsageDescription — without them the OS filters this \
+            NSLocalNetworkUsageDescription, without them the OS filters this \
             silently and discovery just never finds anyone;\n\
          2. System Settings > Privacy & Security > Local Network has the app \
             (or your terminal, when running this test) switched ON;\n\

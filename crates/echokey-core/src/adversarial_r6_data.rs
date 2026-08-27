@@ -236,7 +236,7 @@ fn seed_v5(path: &Path) {
 //
 // Asserted against `Store::SCHEMA_VERSION_FOR_TEST` rather than a literal. The
 // literal was `5`, so adding the v6 migration failed this test for no reason
-// beyond its own staleness — which is noise that trains you to edit the test
+// beyond its own staleness: which is noise that trains you to edit the test
 // whenever it complains, exactly the reflex that lets a real migration bug
 // through. The property under test is "every path lands where a fresh one
 // does", and that is version-independent.

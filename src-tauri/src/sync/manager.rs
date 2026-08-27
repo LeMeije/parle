@@ -125,7 +125,7 @@ impl Drop for DialGuard {
 ///
 /// A free function so a test can drive the real thing. `SyncManager` holds a
 /// `tauri::AppHandle<Wry>` and cannot be built under `MockRuntime`, so a test
-/// that wants this rule either calls this or hand-copies it — and a hand copy
+/// that wants this rule either calls this or hand-copies it, and a hand copy
 /// keeps asserting the shape it was written against long after the shape
 /// changed, which is exactly what happened to the round-6 concurrency test that
 /// went on failing after the defect it named was fixed.
@@ -133,7 +133,7 @@ impl Drop for DialGuard {
 /// `listen_stop` must be taken HERE, not after the wait that follows in
 /// `stop()`. Leaving it installed across that wait meant a `set_enabled(true)`
 /// landing in the window hit "already running" at the top of `start()`,
-/// returned Ok, and did nothing — for a listener this stop was about to
+/// returned Ok, and did nothing, for a listener this stop was about to
 /// destroy. The `stop_epoch` bump could not catch it, because the epoch is only
 /// read by a `start()` that got PAST that entry test. Sync then read as on
 /// everywhere, including in settings.json, with nothing running and nothing
@@ -157,7 +157,7 @@ fn stop_claim(i: &mut Inner) -> (Option<Discovery>, Option<Arc<AtomicBool>>, u16
 /// without a `SyncManager`, which cannot be built under `MockRuntime`.
 ///
 /// `0` means "keep for ever", so it is the widest window there is rather than
-/// the narrowest — the comparison every naive version of this got backwards.
+/// the narrowest, the comparison every naive version of this got backwards.
 pub(crate) fn retention_widened(previous: u32, next: u32) -> bool {
     match (previous, next) {
         (p, d) if p == d => false,
@@ -496,8 +496,8 @@ impl SyncManager {
                 enabled: s.enabled,
                 device_id: s.device_id.clone(),
                 // Sanitised on the way IN as well as on the way out. A name
-                // that predates the sanitiser — or one hand-edited into
-                // settings.json, or a hostname carrying an '=' — would
+                // that predates the sanitiser, or one hand-edited into
+                // settings.json, or a hostname carrying an '=', would
                 // otherwise make every Hello unsendable and stop discovery
                 // starting, reported to the user as a network fault.
                 device_name: usable_device_name(&s.device_name),
@@ -1317,8 +1317,8 @@ impl SyncManager {
     ///
     /// The settings layer used to keep whatever the UI sent, trimmed to 64
     /// CHARACTERS. `validate_device_name` counts BYTES and refuses `=` and
-    /// control characters, so two ordinary names — `Ben=Work`, or any longish
-    /// name in a non-Latin script — were stored happily and then made every
+    /// control characters, so two ordinary names, `Ben=Work`, or any longish
+    /// name in a non-Latin script, were stored happily and then made every
     /// `Hello` unsendable and stopped discovery from starting. Sync was dead
     /// and the UI blamed the network.
     ///
@@ -1345,13 +1345,13 @@ impl SyncManager {
     /// with "retention only ever gets truer". It does not: `retention_days` is
     /// a user setting and the user may enlarge it, or set 0 for "keep for
     /// ever". So while "keep 7 days" was set, a peer offered rows from last
-    /// month, we refused them — correctly — and banked a cursor past them. The
+    /// month, we refused them, correctly, and banked a cursor past them. The
     /// moment the user asked to keep history for ever, those rows sat strictly
     /// below our cursor, the peer would never offer them again, and the two
     /// machines disagreed permanently with nothing to show why.
     ///
     /// Only the INBOUND half needs repair, unlike a kind widening. Our outbound
-    /// `serve` does not filter on retention at all — retention is the
+    /// `serve` does not filter on retention at all, retention is the
     /// RECEIVER's policy, so we offer everything we hold and let the peer
     /// refuse. Nothing was ever suppressed on the way out, so no re-offer debt
     /// is owed.
@@ -2326,7 +2326,7 @@ mod adversarial_r6_conc {
     /// because it hand-copied the OLD two-critical-section shape of `stop()`
     /// and asserted against the copy. It set `enabled`/`stop_epoch` in one
     /// block, asserted "the listener is still installed", and only took
-    /// `listen_stop` after the wait — which is precisely the shape that was
+    /// `listen_stop` after the wait, which is precisely the shape that was
     /// removed. A test that reimplements the rule it is testing goes on
     /// reporting a fixed defect forever.
     ///
@@ -2395,7 +2395,7 @@ mod adversarial_r6_conc {
         assert!(
             !(i.enabled && i.listen_stop.is_none()),
             "sync reads ON (SyncStatus.enabled = {}) with no listener and no error, \
-             and the command persists user_enabled = {} into settings.json — \
+             and the command persists user_enabled = {} into settings.json, \
              sync is dead for the life of the process",
             i.enabled,
             i.user_enabled
@@ -2408,7 +2408,7 @@ mod adversarial_r6_conc {
     ///
     /// TRIAGE: the finding was real and is fixed; the ASSERTION was wrong. It
     /// demanded exactly one dial across ten announcements, which would mean a
-    /// device that genuinely changed address is never retried promptly — and
+    /// device that genuinely changed address is never retried promptly, and
     /// that prompt retry is a deliberate feature, recorded in `note_peer_record`
     /// and in `a_spent_dial_is_retried_as_soon_as_the_address_changes`. The
     /// achievable contract is one initial dial plus at most one address-change
@@ -2475,7 +2475,7 @@ mod adversarial_r6_conc {
             long <= 2,
             "{long} dials inside one {DIAL_RETRY_AFTER:?} window from a single spoofed id. \
              At most two are legitimate: the initial dial, and ONE address-change retry \
-             per interval — a device that really moved must still be reached promptly, \
+             per interval, a device that really moved must still be reached promptly, \
              which is why the answer is not one."
         );
     }

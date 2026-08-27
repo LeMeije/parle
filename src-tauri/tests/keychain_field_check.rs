@@ -11,7 +11,7 @@
 //!
 //! Why it exists: `docs/SYNC_HANDOVER.md` lists the macOS keychain as an
 //! unknown. On Windows this is Credential Manager and is silent; on macOS it is
-//! Keychain Services, which can prompt — possibly on every access — and ACLs
+//! Keychain Services, which can prompt, possibly on every access, and ACLs
 //! items to the signing identity that wrote them, so a rebuilt unsigned binary
 //! can be refused access to items an earlier build stored. A denied prompt
 //! surfaces in the app as "this device is not paired", which is the most

@@ -11,8 +11,8 @@
 //! Three things here are load-bearing and easy to get wrong:
 //!
 //! - We serve ITEMS only for our own source, and TOMBSTONES for every source we
-//!   hold. This paragraph used to say the opposite — that rows are served for
-//!   every source, so that an edit made here to a Mac row reaches the Mac — and
+//!   hold. This paragraph used to say the opposite, that rows are served for
+//!   every source, so that an edit made here to a Mac row reaches the Mac, and
 //!   that WAS the design until it turned out to be an authority escalation: we
 //!   hand a peer the identity of every row we sync to it, so offering a third
 //!   device's rows was the door through which an edit to them came back and got
@@ -75,7 +75,7 @@ const MAX_EXCHANGE_MESSAGES: usize = 1024;
 /// it. Only tests read this, which made it worse rather than harmless: they
 /// asserted a clock was inside a day when the rule under test is a two-minute
 /// window, so they would have passed against a cursor parked twenty-three hours
-/// in the future — the exact failure the tight window exists to prevent.
+/// in the future, the exact failure the tight window exists to prevent.
 const MAX_SKEW_MS: i64 = echokey_core::history::MAX_CLOCK_SKEW_MS;
 
 fn now_ms() -> i64 {
@@ -643,7 +643,7 @@ fn drain<S: Read + Write>(
     // only if a tombstone actually needs it.
     //
     // The reachability test below started life inline, calling
-    // `known_sources()` per tombstone — a DISTINCT over items UNION tombstones,
+    // `known_sources()` per tombstone, a DISTINCT over items UNION tombstones,
     // under the store mutex the history UI shares, for every entry in the
     // batch. That is precisely backwards: the case it exists to fix is a peer
     // carrying thousands of dead tombstones, so the check would have run a
@@ -651,7 +651,7 @@ fn drain<S: Read + Write>(
     // window while it did.
     //
     // Building it once is safe because the set only ever GROWS during a drain,
-    // and it grows exactly when we accept something for a new source — which is
+    // and it grows exactly when we accept something for a new source, which is
     // handled by inserting into the cache at those points. A source missing
     // from a stale cache would be treated as unreachable and bank a receipt for
     // a delete we might later want; keeping it current is what stops that.
@@ -807,7 +807,7 @@ fn drain<S: Read + Write>(
                     // exit. `serve` offers tombstones for EVERY source it
                     // holds, and a refusal that might one day be reversed
                     // cannot bank a receipt, so the sender never stopped
-                    // offering and the receiver never stopped refusing — on
+                    // offering and the receiver never stopped refusing, on
                     // every exchange, for the life of the pairing. The sequence
                     // is ordinary: A syncs with C, the user clears history on
                     // A, A then pairs with B, and B can never hold C's rows,
@@ -823,7 +823,7 @@ fn drain<S: Read + Write>(
                     //   already hold rows or tombstones for: the row can still
                     //   arrive, so the refusal is TEMPORARY and must bank
                     //   nothing. A cursor parked at this tombstone's clock
-                    //   would make the delete unreachable for good — a password
+                    //   would make the delete unreachable for good, a password
                     //   the user deleted, alive here for ever, because the
                     //   delete happened to arrive before its row.
                     //

@@ -113,7 +113,7 @@ pub fn validate_device_name(name: &str) -> Result<(), IdentityError> {
 /// settings layer had no matching gate: `sync_set_device_name` accepted any
 /// non-empty string truncated to 64 CHARACTERS, while the validator refuses
 /// `=`, refuses control characters, and counts BYTES. Two ordinary names got
-/// through and then disabled sync completely — every `Hello` became unsendable
+/// through and then disabled sync completely: every `Hello` became unsendable
 /// and discovery refused to start, which the UI reported as a network problem:
 ///
 /// - `Ben=Work`, because the name rides in an mDNS TXT `key=value` pair;
@@ -148,8 +148,8 @@ pub fn sanitise_device_name(raw: &str) -> Option<String> {
         out.push(c);
     }
     // A leading multi-byte character can leave the trimmed result empty only if
-    // the budget is smaller than one character, which it is not — but trim
-    // again, because dropping the tail can expose trailing whitespace.
+    // the budget is smaller than one character, which it is not. Trim again
+    // anyway, because dropping the tail can expose trailing whitespace.
     let out = out.trim().to_string();
     if out.is_empty() {
         None

@@ -1,4 +1,4 @@
-//! ADVERSARIAL REVIEW — ROUND 7. The store rules round 6 introduced.
+//! ADVERSARIAL REVIEW, ROUND 7. The store rules round 6 introduced.
 //!
 //! Round 6 added three things to the store: a `local` flag on tombstones so the
 //! per-source cap cannot evict a delete the user made, a `local_edit` flag on
@@ -82,7 +82,7 @@ fn tomb_clock(s: &Store, origin: &str) -> i64 {
 //
 // They are two SQL paths writing one field, and they disagreed: the Rust one
 // dropped back to the wall clock when the monotonic chain would pass the
-// ceiling, while the SQL one clamped to the ceiling itself — a full minute in
+// ceiling, while the SQL one clamped to the ceiling itself, a full minute in
 // the future, on every row of a Clear, for no reason. Two writers of one field
 // that disagree is how a cursor ends up somewhere neither path intended.
 // ---------------------------------------------------------------------------
@@ -168,7 +168,7 @@ fn r7_delete_clocks_for_one_source_never_go_backwards() {
 // The ORDERING here is the whole test and the first version of it got the
 // ordering wrong. It flooded with replicated tombstones dated in the past, so
 // they were the oldest and `ORDER BY deleted_at ASC` evicted them first with or
-// without the `local = 0` filter — the test passed against the unfixed code and
+// without the `local = 0` filter, the test passed against the unfixed code and
 // proved nothing.
 //
 // The real sequence is the reverse, and it is the one that hurts: Clear History
@@ -212,7 +212,7 @@ fn r7_the_tombstone_cap_evicts_replicated_entries_and_never_local_ones() {
         .unwrap();
     }
     // The cap holds the TOTAL at the ceiling, so "still over it" is the wrong
-    // precondition. What must be true is that eviction actually ran — a test
+    // precondition. What must be true is that eviction actually ran: a test
     // that can only ever find nothing is not a test.
     let replicated: i64 = s
         .conn_for_test()
@@ -256,7 +256,7 @@ fn r7_the_tombstone_cap_evicts_replicated_entries_and_never_local_ones() {
 // The TEXTS matter and the first version of this test got them wrong. The tie
 // is broken by the payload order when `local_edit` is clear, so a test whose
 // edited text happens to sort ABOVE the original passes with the protection
-// removed — it was "as recorded" against "as the user fixed it", and 'r' sorts
+// removed: it was "as recorded" against "as the user fixed it", and 'r' sorts
 // below 't', so the echo lost on its own and proved nothing.
 //
 // Here the original sorts ABOVE the edit, so without the flag the echo wins the

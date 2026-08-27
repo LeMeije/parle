@@ -1,4 +1,4 @@
-//! ADVERSARIAL REVIEW — ROUND 7. Scale, and the exchange that would not finish.
+//! ADVERSARIAL REVIEW, ROUND 7. Scale, and the exchange that would not finish.
 //!
 //! Round 6 left one test quarantined with `#[ignore = "HANGS"]`: a Clear
 //! History over a replicated history larger than `MAX_TOMBSTONES_PER_SOURCE`,
@@ -179,7 +179,7 @@ fn seed(store: &Arc<Mutex<Store>>, source: &str, n: usize, base: i64) {
 //
 // B authored a history larger than MAX_TOMBSTONES_PER_SOURCE and A holds all of
 // it. The user clears history on A. One exchange, with B dialling, so A accepts
-// and therefore drains before it serves — the order the round-6 reviewer
+// and therefore drains before it serves, the order the round-6 reviewer
 // believed put the tombstone-cap eviction before the serve.
 //
 // Two separate claims are checked, because the original test conflated them:
@@ -202,13 +202,13 @@ fn r7_clear_history_over_a_large_replicated_history_completes_and_loses_no_delet
     assert_eq!(a.lock().count().unwrap(), 0);
     assert_eq!(a.lock().tombstone_count(B).unwrap(), over as i64);
 
-    // B deletes one of its own rows too — an entirely ordinary thing, and the
+    // B deletes one of its own rows too, an entirely ordinary thing, and the
     // tombstone that used to trigger the eviction on A.
     let b_id: i64 = b.lock().recent(None, 1).unwrap()[0].id;
     b.lock().delete_item_local(b_id).unwrap();
 
     // Bounded: a fixed number of exchanges, each under a wall-clock budget.
-    // One is not enough on purpose — a single exchange is capped at
+    // One is not enough on purpose, a single exchange is capped at
     // MAX_BATCHES * PAGE per source, and demanding that the whole job fit in
     // one round is a different (and wrong) requirement from "no delete is
     // lost".
@@ -249,8 +249,8 @@ fn r7_a_small_clear_history_reaches_the_author_in_one_exchange() {
 // ===========================================================================
 // The round-6 drain rule, attacked.
 //
-// A relayed delete for an identity we do not hold now banks a receipt when — and
-// only when — the row could never arrive. Both halves need pinning, because the
+// A relayed delete for an identity we do not hold now banks a receipt when, and
+// only when, the row could never arrive. Both halves need pinning, because the
 // two failure modes are opposite and each is the other's fix:
 //   - bank too eagerly and a delete that arrives before its row is lost for ever;
 //   - bank too rarely and the exchange never goes quiet.
@@ -402,7 +402,7 @@ fn r7_a_delete_for_a_source_we_might_still_hear_from_is_never_written_off() {
 #[test]
 fn r7_a_peer_still_cannot_invent_a_tombstone_for_a_source_in_our_roster() {
     // The reachability rule decides whether a REFUSAL banks a receipt. It must
-    // not have quietly turned into permission to store the tombstone — that
+    // not have quietly turned into permission to store the tombstone, that
     // would let any paired device pre-emptively delete identities it made up.
     let a = store_for(A);
     let b = store_for(B);

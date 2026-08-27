@@ -53,7 +53,7 @@ fn both() -> Kinds {
 /// silently contradicted the scenarios written above them: R6-1 says in prose
 /// that "B has never met C and never will", and then handed B a roster claiming
 /// it had paired with C. Nothing noticed, because `Attribution::known` was dead
-/// code at the time — no rule read it.
+/// code at the time, no rule read it.
 ///
 /// It is read now: whether a relayed delete for an identity we do not hold is a
 /// TEMPORARY refusal (the row may still arrive from its author) or a PERMANENT
@@ -185,7 +185,7 @@ fn r6_a_tombstone_for_an_unreachable_source_never_stops_being_re_sent() {
     // first round or two"). Offering the tombstone once is not the defect and
     // cannot be removed: A cannot know what B holds without telling it, so the
     // first offer is how B finds out. Demanding zero would have been satisfied
-    // only by never relaying a delete at all, which loses deletes — the failure
+    // only by never relaying a delete at all, which loses deletes, the failure
     // this feature exists to avoid.
     //
     // What criterion C actually requires is that the exchange goes quiet. So:
@@ -430,14 +430,14 @@ fn r6_widening_retention_never_refetches_what_the_narrow_window_refused() {
     assert_eq!(
         a.lock().count().unwrap(),
         1,
-        "precondition: nothing brings the row back on its own — that IS the defect"
+        "precondition: nothing brings the row back on its own, that IS the defect"
     );
 
     // The user now sets retention to "keep for ever". Two things have to be
     // true, and they are asserted separately because they failed separately:
 
     // 1. The manager must RECOGNISE that as a widening. `0` means keep for
-    //    ever, so it is the widest window and not the narrowest — the
+    //    ever, so it is the widest window and not the narrowest, the
     //    comparison every naive version gets backwards. This is the production
     //    rule, not a copy of it; `SyncManager` itself cannot be built under
     //    MockRuntime, which is why the decision is a free function.
@@ -485,8 +485,8 @@ fn r6_widening_retention_never_refetches_what_the_narrow_window_refused() {
 //
 // Stated plainly because it matters for anyone reading this later: I did NOT
 // find the cause of the original hang, and I am not claiming one. What I know
-// is that it blocked at 0% CPU on the pre-round-6 build — blocked on I/O, not
-// slow — and that it now completes deterministically. Three things changed
+// is that it blocked at 0% CPU on the pre-round-6 build, blocked on I/O, not
+// slow, and that it now completes deterministically. Three things changed
 // underneath it in the meantime, any of which could be responsible: the
 // tombstone cap no longer evicts local deletes, `clear` no longer stamps every
 // tombstone from the row's own clock, and relayed tombstones for an unreachable
