@@ -480,8 +480,24 @@ fn r6_widening_retention_never_refetches_what_the_narrow_window_refused() {
 //
 // Bounded: one exchange, and the store work is O(rows).
 // ---------------------------------------------------------------------------
+// UN-QUARANTINED. It passed, five runs, ~4.4s each, alone and in the full
+// suite.
+//
+// Stated plainly because it matters for anyone reading this later: I did NOT
+// find the cause of the original hang, and I am not claiming one. What I know
+// is that it blocked at 0% CPU on the pre-round-6 build — blocked on I/O, not
+// slow — and that it now completes deterministically. Three things changed
+// underneath it in the meantime, any of which could be responsible: the
+// tombstone cap no longer evicts local deletes, `clear` no longer stamps every
+// tombstone from the row's own clock, and relayed tombstones for an unreachable
+// source now bank a receipt instead of being re-offered on every exchange.
+//
+// The durable protection is not this test, which is bounded only by its socket
+// timeouts. It is `adversarial_r7_scale`, which re-derives the same scenario
+// with a wall-clock budget on the exchange and both sides on their own thread,
+// so a stall fails with a message naming the side that never returned instead
+// of parking the suite. If this one ever hangs again, that is where to look.
 #[test]
-#[ignore = "HANGS — not yet verified. Written by a round-6 reviewer that a session             limit cut off before it bounded its loop, so it never terminates and it             blocked the whole suite. The CLAIM (Clear History loses deletes when a             peer tombstone arrives first, via tombstone-cap eviction) is plausible             and UNPROVEN. Re-derive it from scratch with a hard iteration bound and             socket read+write timeouts before trusting it. See docs/SYNC_HANDOVER.md."]
 fn r6_clear_history_loses_deletes_when_a_peer_tombstone_arrives_first() {
     let over = echokey_core::history::MAX_TOMBSTONES_PER_SOURCE as usize + 50;
     let a = store_for(A);

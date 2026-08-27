@@ -27,3 +27,6 @@ mod adversarial_r6;
 
 #[cfg(test)]
 mod adversarial_r6_sec;
+
+#[cfg(test)]
+mod adversarial_r7_scale;

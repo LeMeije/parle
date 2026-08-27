@@ -2428,7 +2428,7 @@ mod adversarial_r6_conc {
         let b = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 67));
 
         // Production function, production gate.
-        let mut run = |rounds: usize,
+        let run = |rounds: usize,
                        peers: &mut HashMap<String, PeerInfo>,
                        last_dial: &mut HashMap<String, Instant>,
                        last_move: &mut HashMap<String, Instant>| {

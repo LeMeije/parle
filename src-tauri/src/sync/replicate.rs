@@ -8,15 +8,26 @@
 //!   3. everything we hold that is above the peer's watermarks, then tombstones
 //!   4. apply whatever the peer sends us
 //!
-//! Two things here are load-bearing and easy to get wrong:
+//! Three things here are load-bearing and easy to get wrong:
 //!
-//! - We serve rows for EVERY source we know about, not just our own. Pinning a
-//!   Mac row on the Windows box bumps that row's clock but leaves its source as
-//!   the Mac; if each side only offered its own rows, that edit would never
-//!   leave the machine.
-//! - Paging is by millisecond, so a page that is entirely one millisecond wide
-//!   would otherwise silently drop the rest of that millisecond. That case is
-//!   detected and re-fetched rather than skipped.
+//! - We serve ITEMS only for our own source, and TOMBSTONES for every source we
+//!   hold. This paragraph used to say the opposite — that rows are served for
+//!   every source, so that an edit made here to a Mac row reaches the Mac — and
+//!   that WAS the design until it turned out to be an authority escalation: we
+//!   hand a peer the identity of every row we sync to it, so offering a third
+//!   device's rows was the door through which an edit to them came back and got
+//!   relayed on. Content now changes only where it was written, and a pin or a
+//!   correction on a peer's row is local. Deletes are exempt and still travel
+//!   for every source, because a delete carries no attacker-chosen content and
+//!   has to reach the machine that recorded the row.
+//! - Paging is on a `(clock, origin_id)` KEYSET, not on the clock alone, and
+//!   every full page is trimmed back to a millisecond boundary. A cursor is a
+//!   bare millisecond, so a run that stops between pages would otherwise park it
+//!   inside one and the rest of that millisecond is below it for ever.
+//! - Turn-taking. Exactly one side writes at any point. Both sides sending
+//!   before either reads works only while everything fits in the socket and
+//!   Noise buffers; a first sync of any real size fills them and both block in
+//!   `write`.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -57,8 +68,15 @@ const MAX_WATERMARK_CHUNKS: usize = 256;
 /// number, used by both, is the only way that stays true as either side
 /// changes.
 const MAX_EXCHANGE_MESSAGES: usize = 1024;
-/// Mirrors the store's own ceiling on how far ahead a peer's clock may be.
-const MAX_SKEW_MS: i64 = 24 * 60 * 60 * 1000;
+/// The store's own ceiling on how far ahead a peer's clock may be.
+///
+/// Taken FROM the store rather than restated here. The local copy said 24 hours
+/// while the store enforced two minutes, and its doc comment claimed to mirror
+/// it. Only tests read this, which made it worse rather than harmless: they
+/// asserted a clock was inside a day when the rule under test is a two-minute
+/// window, so they would have passed against a cursor parked twenty-three hours
+/// in the future — the exact failure the tight window exists to prevent.
+const MAX_SKEW_MS: i64 = echokey_core::history::MAX_CLOCK_SKEW_MS;
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()

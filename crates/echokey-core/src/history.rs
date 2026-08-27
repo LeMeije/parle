@@ -21,7 +21,7 @@ const SCHEMA_VERSION: i64 = 6;
 ///
 /// Still generous next to any real NTP wobble. Timezones do not enter into it:
 /// every clock here is epoch milliseconds.
-const MAX_CLOCK_SKEW_MS: i64 = 2 * 60 * 1000;
+pub const MAX_CLOCK_SKEW_MS: i64 = 2 * 60 * 1000;
 /// Tombstones kept per source device. See `cap_tombstones`.
 pub const MAX_TOMBSTONES_PER_SOURCE: i64 = 10_000;
 /// Distinct source devices we will track a cursor for, per peer.
