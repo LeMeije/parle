@@ -561,7 +561,7 @@ impl Store {
                 app_name,
                 meta,
                 self.source(),
-                self.local_clock()?
+                self.local_clock_at(now)?
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -628,7 +628,7 @@ impl Store {
                 let now = now_ms();
                 self.conn.execute(
                     "UPDATE items SET created_at=?1, updated_at=?2 WHERE id=?3",
-                    params![now, self.local_clock()?, id],
+                    params![now, self.local_clock_at(now)?, id],
                 )?;
                 return Ok(id);
             }
@@ -637,7 +637,7 @@ impl Store {
         self.conn.execute(
             "INSERT INTO items (kind, text, created_at, updated_at, app_id, app_name, source_machine)
              VALUES ('clipboard', ?1, ?2, ?6, ?3, ?4, ?5)",
-            params![text, now, app_id, app_name, self.source(), self.local_clock()?],
+            params![text, now, app_id, app_name, self.source(), self.local_clock_at(now)?],
         )?;
         let id = self.conn.last_insert_rowid();
         self.stamp_origin(id)?;
@@ -839,7 +839,7 @@ impl Store {
             // is the max over every item AND tombstone we hold for the source,
             // so it beats the row and the cursor at once.
             let _ = current;
-            Ok((self.local_clock()?, true))
+            Ok((self.local_clock_at(now_ms())?, true))
         } else {
             Ok((current, false))
         }
@@ -942,10 +942,19 @@ impl Store {
     ///
     /// The same is true after any backwards step of the system clock, which is
     /// the realistic trigger: an NTP correction, a VM or laptop resume.
-    fn local_clock(&self) -> Result<i64, StoreError> {
+    /// The replication clock for a row we are writing NOW, where `now` is the
+    /// same wall-clock reading the caller stamps on `created_at`.
+    ///
+    /// Taking the reading once and passing it in, rather than calling
+    /// `now_ms()` again inside, is what keeps a brand-new row's `created_at`
+    /// and `updated_at` equal in the ordinary case. Two separate readings
+    /// differ whenever the millisecond ticks between them, which made a
+    /// long-standing invariant intermittently false and a test flaky on a
+    /// loaded machine.
+    fn local_clock_at(&self, now: i64) -> Result<i64, StoreError> {
         match self.source() {
-            Some(me) => self.next_clock_for(me),
-            None => Ok(now_ms()),
+            Some(me) => Self::next_clock_at(&self.conn, me, now),
+            None => Ok(now),
         }
     }
 
@@ -977,8 +986,17 @@ impl Store {
         Self::next_clock_in(&self.conn, source)
     }
 
+    /// The same rule against a caller-supplied `now`. See `local_clock_at`.
+    fn next_clock_at(conn: &Connection, source: &str, now: i64) -> Result<i64, StoreError> {
+        Self::next_clock_impl(conn, source, now)
+    }
+
     /// The same rule, usable inside an open transaction.
     fn next_clock_in(conn: &Connection, source: &str) -> Result<i64, StoreError> {
+        Self::next_clock_impl(conn, source, now_ms())
+    }
+
+    fn next_clock_impl(conn: &Connection, source: &str, now: i64) -> Result<i64, StoreError> {
         // TWO index seeks, not one scan.
         //
         // This was a single `MAX` over a `UNION ALL` of both tables. SQLite
@@ -1011,7 +1029,6 @@ impl Store {
             |r| r.get(0),
         )?;
         let newest = newest_item.unwrap_or(0).max(newest_tomb.unwrap_or(0));
-        let now = now_ms();
         let wanted = now.max(newest.saturating_add(1));
         // NEVER below what we already hold, whatever the drift.
         //
@@ -1065,7 +1082,14 @@ impl Store {
             Some(k) => {
                 tx.execute(
                     // ONE aggregate for the whole statement, not a correlated
-                    // subquery per row.
+                    // subquery per row, and MATERIALIZED so it stays that way.
+                    //
+                    // `MATERIALIZED` is not decoration. SQLite is free to inline
+                    // a CTE, and when it does this becomes a correlated
+                    // subquery again: the plain `WITH` form measured 29x the
+                    // time for 8x the rows, which is the quadratic behaviour
+                    // this CTE was written to remove, silently restored. The
+                    // hint pins the plan.
                     //
                     // The per-row form was O(N^2): two correlated subqueries per
                     // row, each scanning `items` for that source on a column no
@@ -1087,7 +1111,7 @@ impl Store {
                     // the wall clock past a ceiling means stamping BELOW what we
                     // already hold, which is the silent permanent loss that
                     // fallback was supposed to prevent.
-                    "WITH newest AS (
+                    "WITH newest AS MATERIALIZED (
                          SELECT src, MAX(c) AS c FROM (
                              SELECT source_machine AS src, MAX(updated_at) AS c FROM items
                               WHERE source_machine IS NOT NULL GROUP BY source_machine
@@ -1113,7 +1137,7 @@ impl Store {
             None => {
                 tx.execute(
                     // Same rule and same CTE as the kind-scoped clear above.
-                    "WITH newest AS (
+                    "WITH newest AS MATERIALIZED (
                          SELECT src, MAX(c) AS c FROM (
                              SELECT source_machine AS src, MAX(updated_at) AS c FROM items
                               WHERE source_machine IS NOT NULL GROUP BY source_machine

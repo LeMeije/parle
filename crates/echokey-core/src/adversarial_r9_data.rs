@@ -608,14 +608,69 @@ fn r9_clear_does_not_cost_the_square_of_the_history() {
         small > 2_000,
         "the small Clear took {small} us, too fast to compare against; raise the sizes"
     );
+    // The PLAN is the assertion. The ratio is only a report.
+    //
+    // A wall-clock ratio is the natural way to express "this must not be
+    // quadratic" and the wrong way to test it: this suite runs in parallel, so
+    // the ratio moves with whatever else is on the machine, and the test failed
+    // roughly one run in four while the code was correct. A guard that cries
+    // wolf gets muted, which is worse than not having it.
+    //
+    // What actually distinguishes the two shapes is the query plan. The
+    // quadratic form appears as a CORRELATED SCALAR SUBQUERY, evaluated per
+    // row; the fixed form materialises one aggregate and joins it once. SQLite
+    // will tell us which it chose, deterministically and in microseconds.
     let ratio = large as f64 / small as f64;
+    println!("r9: clear 1500 rows {small} us, 3000 rows {large} us, ratio {ratio:.1} (linear = 2)");
+
+    let s = Store::open_in_memory().unwrap();
+    let plan: Vec<String> = s
+        .conn_for_test()
+        .prepare(&format!("EXPLAIN QUERY PLAN {}", clear_all_sql()))
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let joined = plan.join(" | ");
+
+    // Control: the plan really is for the statement we mean.
     assert!(
-        ratio < 3.0,
-        "clearing 3000 rows took {large} us against {small} us for 1500: a ratio of \
-         {ratio:.1} where linear is 2. Clear evaluates a correlated MAX over items \
-         UNION tombstones twice per row, while holding the store mutex the history \
-         window shares"
+        joined.contains("items"),
+        "the plan does not mention `items`, so it is not the clear statement: {joined}"
     );
+    assert!(
+        !joined.contains("CORRELATED"),
+        "Clear History evaluates a correlated subquery per row, which is quadratic in the \
+         history and runs on the main thread under the store mutex: {joined}"
+    );
+}
+
+/// The `clear(None)` statement, kept beside the test that plans it.
+///
+/// Duplicated from `history.rs` deliberately: this test exists to notice when
+/// that statement changes shape, and reaching into the private module to share
+/// the string would defeat the point.
+fn clear_all_sql() -> &'static str {
+    "WITH newest AS MATERIALIZED (
+         SELECT src, MAX(c) AS c FROM (
+             SELECT source_machine AS src, MAX(updated_at) AS c FROM items
+              WHERE source_machine IS NOT NULL GROUP BY source_machine
+             UNION ALL
+             SELECT source_machine AS src, MAX(deleted_at) AS c FROM tombstones
+              GROUP BY source_machine
+         ) GROUP BY src
+     )
+     INSERT INTO tombstones (source_machine, origin_id, deleted_at, local)
+     SELECT i.source_machine, i.origin_id,
+            max(1, COALESCE(n.c, 0) + 1), 1
+       FROM items i
+       LEFT JOIN newest n ON n.src = i.source_machine
+      WHERE i.pinned=0
+        AND i.source_machine IS NOT NULL AND i.origin_id IS NOT NULL
+     ON CONFLICT(source_machine, origin_id)
+     DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at),
+                   local = 1"
 }
 
 // ---------------------------------------------------------------------------

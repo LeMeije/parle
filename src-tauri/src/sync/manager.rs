@@ -67,9 +67,9 @@ const MAX_INBOUND_HARD: usize = 32;
 const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
 /// Concurrent outbound dials. A flapping (or spoofed) mDNS record would
 /// otherwise spawn a thread per sighting, without bound.
-const MAX_DIALS: usize = 4;
+pub(crate) const MAX_DIALS: usize = 4;
 /// How long before a peer we have already tried is dialled again.
-const DIAL_RETRY_AFTER: Duration = Duration::from_secs(60);
+pub(crate) const DIAL_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// Distinct peers we will track. mDNS is unsigned, so anyone on the LAN can
 /// advertise unlimited records; without a cap both the map and the JSON we push
 /// to the webview grow without bound.
@@ -90,7 +90,7 @@ impl Drop for StartGuard {
 /// actually be tested: `SyncManager` holds a `tauri::AppHandle<Wry>`, which
 /// cannot be constructed in a unit test, and a test that reproduces the shape
 /// with its own HashSet proves nothing about this code.
-trait ReleasesDial: Send + Sync {
+pub(crate) trait ReleasesDial: Send + Sync {
     fn release_dial(&self, id: &str);
 }
 
@@ -101,7 +101,7 @@ impl ReleasesDial for SyncManager {
 }
 
 /// Releases an outbound dial slot on drop, including on unwind.
-struct DialGuard {
+pub(crate) struct DialGuard {
     owner: Arc<dyn ReleasesDial>,
     id: String,
 }
@@ -119,6 +119,62 @@ impl Drop for DialGuard {
     fn drop(&mut self) {
         self.owner.release_dial(&self.id);
     }
+}
+
+/// Record a sighting and decide, under the lock, whether to dial.
+///
+/// Returns the peer id to dial, and CLAIMS the slot before returning it: the
+/// count test and the `dialing.insert` are one critical section, so the budget
+/// cannot be double-spent and one peer cannot be dialled twice.
+///
+/// Extracted, and `pub(crate)`, because it is the function round 8's deadlock
+/// fix actually created and it had no test of its own. Two consecutive
+/// concurrency reviewers reported that everything this decision touches is
+/// private to `manager`, so the fix could only be exercised from inside this
+/// file's own `mod tests` — which is the one place a reviewer is not allowed to
+/// edit. A rule nobody outside can test is a rule that drifts.
+///
+/// The CALLER must drop the lock before spawning. `DialGuard` is built before
+/// the spawn so a failed spawn still frees the slot, and on failure std drops
+/// the closure on the calling thread: with the lock still held that is a
+/// re-entrant `parking_lot` acquisition, which parks the discovery thread for
+/// ever holding `inner` and freezes the whole app through the synchronous
+/// `sync_status` command.
+pub(crate) fn decide_dial(i: &mut Inner, p: PeerInfo) -> Option<String> {
+    let id = p.id.as_str().to_string();
+    let known = i.paired.iter().any(|d| d.id == id);
+    let paired = i.paired.clone();
+    if !make_room_for_peer(&mut i.peers, &paired, &id, known) {
+        return None;
+    }
+    let Inner { peers, last_dial, last_move, .. } = &mut *i;
+    note_peer_record(peers, last_dial, last_move, &id, p, known);
+    // Dial on first sight, and again once DIAL_RETRY_AFTER has passed since the
+    // last attempt.
+    //
+    // First sight ALONE was a trap: if the dial failed for any reason (the
+    // peer's inbound slots were full, it was briefly down, an unsigned mDNS
+    // record from someone else got there first) we never tried that device
+    // again until its record disappeared and came back. A transient refusal
+    // became a permanent one.
+    //
+    // "First sight" deliberately does NOT gate this either. mDNS is unsigned
+    // and a goodbye removes the peer entry, so an attacker flapping
+    // goodbye/announce made every cycle read as first sight and started a dial
+    // each time: ten threads, ten credential-store reads and ten 20s connects
+    // inside one retry window, filling MAX_DIALS so the real device never got a
+    // slot. `last_dial` outlives the peer entry, so it is the only honest clock.
+    let due = i
+        .last_dial
+        .get(&id)
+        .map(|t: &Instant| t.elapsed() >= DIAL_RETRY_AFTER)
+        .unwrap_or(true);
+    let room = i.dialing.len() < MAX_DIALS;
+    if known && due && room && i.dialing.insert(id.clone()) {
+        i.last_dial.insert(id.clone(), Instant::now());
+        return Some(id);
+    }
+    None
 }
 
 /// Everything a `stop()` owns, taken in ONE critical section.
@@ -143,7 +199,7 @@ impl Drop for DialGuard {
 /// `DialGuard`s; clearing it here let a new generation insert the same peer and
 /// then have the OLD guard's drop remove it, so two concurrent dials to one
 /// device were possible and the set under-counted against `MAX_DIALS`.
-fn stop_claim(i: &mut Inner) -> (Option<Discovery>, Option<Arc<AtomicBool>>, u16) {
+pub(crate) fn stop_claim(i: &mut Inner) -> (Option<Discovery>, Option<Arc<AtomicBool>>, u16) {
     i.enabled = false;
     i.stop_epoch = i.stop_epoch.wrapping_add(1);
     i.peers.clear();
@@ -201,7 +257,7 @@ fn fallback_device_name() -> String {
 /// means the next genuine announcement is dialled at once rather than being held
 /// off for `DIAL_RETRY_AFTER`, so re-announcing on a timer no longer keeps us
 /// pointed at the attacker — the real device wins the next round either way.
-fn note_peer_record(
+pub(crate) fn note_peer_record(
     peers: &mut HashMap<String, PeerInfo>,
     last_dial: &mut HashMap<String, Instant>,
     last_move: &mut HashMap<String, Instant>,
@@ -257,7 +313,7 @@ fn note_peer_record(
 /// exhaustion vector. Same shape as the pairing guard's reserved first guess,
 /// and for the same reason: the user's own device is precisely the address we
 /// have not heard from.
-fn admit_inbound(in_flight: usize, already_here: bool) -> bool {
+pub(crate) fn admit_inbound(in_flight: usize, already_here: bool) -> bool {
     if in_flight >= MAX_INBOUND_HARD {
         return false;
     }
@@ -272,7 +328,7 @@ fn admit_inbound(in_flight: usize, already_here: bool) -> bool {
 /// `MAX_PEERS` unsigned mDNS records evicted the user's real device — and
 /// `dial` returns immediately for anything absent from this map, which is the
 /// very mitigation that makes inbound saturation survivable.
-fn make_room_for_peer(
+pub(crate) fn make_room_for_peer(
     peers: &mut HashMap<String, PeerInfo>,
     paired: &[UiPaired],
     id: &str,
@@ -429,7 +485,7 @@ pub struct SyncStatus {
 
 // -- internals ----------------------------------------------------------------
 
-struct Inner {
+pub(crate) struct Inner {
     enabled: bool,
     device_id: String,
     device_name: String,
@@ -714,65 +770,14 @@ impl SyncManager {
                             // quit. The `tracing::warn!` written for a failed
                             // spawn sits on the far side of the deadlock and
                             // never runs.
-                            let mut to_dial: Option<String> = None;
                             let mut i = me.inner.lock();
-                            match ev {
-                                DiscoveryEvent::PeerFound(p) => {
-                                    let id = p.id.as_str().to_string();
-                                    let known = i.paired.iter().any(|d| d.id == id);
-                                    let paired = i.paired.clone();
-                                    if !make_room_for_peer(&mut i.peers, &paired, &id, known) {
-                                        continue;
-                                    }
-                                    let had = i.peers.contains_key(&id);
-                                    let Inner { peers, last_dial, last_move, .. } = &mut *i;
-                                    note_peer_record(peers, last_dial, last_move, &id, p, known);
-                                    let fresh = !had;
-                                    // Dial on first sight, and again once
-                                    // DIAL_RETRY_AFTER has passed since the
-                                    // last attempt.
-                                    //
-                                    // First sight ALONE was a trap: if the
-                                    // dial failed for any reason — the peer's
-                                    // inbound slots were full, it was briefly
-                                    // down, an unsigned mDNS record from
-                                    // someone else got there first and took the
-                                    // entry — we never tried that device again
-                                    // until its record disappeared and came
-                                    // back. A transient refusal became a
-                                    // permanent one.
-                                    //
-                                    // The retry interval is what keeps a record
-                                    // refresh from starting an exchange every
-                                    // few seconds, and keeps a spoofed record
-                                    // flapping between goodbye and announce
-                                    // from spawning threads without bound.
-                                    let due = i
-                                        .last_dial
-                                        .get(&id)
-                                        .map(|t: &Instant| t.elapsed() >= DIAL_RETRY_AFTER)
-                                        .unwrap_or(true);
-                                    // `fresh` deliberately does NOT gate this.
-                                    // mDNS is unsigned and a goodbye removes the
-                                    // peer entry, so an attacker flapping
-                                    // goodbye/announce made every cycle "first
-                                    // sight" and started a dial each time: ten
-                                    // threads, ten credential-store reads and
-                                    // ten 20s connects inside one retry window,
-                                    // filling MAX_DIALS so the real device never
-                                    // got a slot. `last_dial` outlives the peer
-                                    // entry, so it is the only honest clock.
-                                    let _ = fresh;
-                                    let room = i.dialing.len() < MAX_DIALS;
-                                    if known && due && room && i.dialing.insert(id.clone()) {
-                                        i.last_dial.insert(id.clone(), Instant::now());
-                                        to_dial = Some(id.clone());
-                                    }
-                                }
+                            let to_dial = match ev {
+                                DiscoveryEvent::PeerFound(p) => decide_dial(&mut i, p),
                                 DiscoveryEvent::PeerLost(id) => {
                                     i.peers.remove(id.as_str());
+                                    None
                                 }
-                            }
+                            };
                             drop(i);
                             // The lock is released, so a failed spawn dropping
                             // the guard on this thread is now an ordinary

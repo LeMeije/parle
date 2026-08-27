@@ -51,3 +51,6 @@ mod adversarial_r9_conc;
 
 #[cfg(test)]
 mod adversarial_r9_data;
+
+#[cfg(test)]
+mod adversarial_r10_sec;
