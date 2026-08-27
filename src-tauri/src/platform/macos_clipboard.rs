@@ -48,32 +48,50 @@ impl ClipboardMonitor {
                     // additions, which carry no marker at all.
                     let mut prev_app = macos::frontmost_app();
                     while !stop.load(Ordering::SeqCst) {
-                        // 150ms rather than 400ms: this is two cheap reads, and
-                        // it cuts the misattribution window by nearly two
-                        // thirds as well as making a copy appear sooner.
+                        // Every iteration inside an autorelease pool.
+                        //
+                        // This runs on a bare `std::thread`, which has no pool
+                        // of its own, so the autoreleased NSString and
+                        // NSRunningApplication values these calls produce had
+                        // nowhere to be drained from. Measured on this machine:
+                        // about 82 bytes per sample, growing linearly. At the
+                        // 150ms poll that is roughly 1.9 MB an hour in a
+                        // menu-bar app meant to stay running for weeks, and
+                        // tightening the poll from 400ms tripled the rate while
+                        // also adding a `frontmost_app()` call on every
+                        // iteration rather than only on a change.
+                        // The sleep is OUTSIDE the pool: holding one across
+                        // 150ms of sleep defeats the point of draining it.
                         std::thread::sleep(std::time::Duration::from_millis(150));
-                        if !enabled.load(Ordering::SeqCst) {
-                            last = macos::pasteboard_change_count();
-                            prev_app = macos::frontmost_app();
-                            continue;
-                        }
-                        let now = macos::pasteboard_change_count();
-                        if now != last {
+                        // Every ObjC call inside one. `continue` cannot cross a
+                        // closure boundary, so the body returns the next
+                        // `prev_app` and an optional event instead of jumping.
+                        let (next_app, event) = objc2::rc::autoreleasepool(|_| {
+                            if !enabled.load(Ordering::SeqCst) {
+                                last = macos::pasteboard_change_count();
+                                return (macos::frontmost_app(), None);
+                            }
+                            let now = macos::pasteboard_change_count();
+                            if now == last {
+                                return (macos::frontmost_app(), None);
+                            }
                             last = now;
                             if macos::clipboard_is_concealed() {
-                                prev_app = macos::frontmost_app();
-                                continue;
+                                return (macos::frontmost_app(), None);
                             }
-                            if let Some(text) = macos::read_clipboard() {
-                                if text.trim().is_empty() {
-                                    prev_app = macos::frontmost_app();
-                                    continue;
+                            let event = match macos::read_clipboard() {
+                                Some(text) if !text.trim().is_empty() => {
+                                    let (app_id, app_name) = prev_app.clone();
+                                    Some(PlatformEvent::ClipboardChanged { text, app_id, app_name })
                                 }
-                                let (app_id, app_name) = prev_app.clone();
-                                let _ = tx.send(PlatformEvent::ClipboardChanged { text, app_id, app_name });
-                            }
+                                _ => None,
+                            };
+                            (macos::frontmost_app(), event)
+                        });
+                        if let Some(ev) = event {
+                            let _ = tx.send(ev);
                         }
-                        prev_app = macos::frontmost_app();
+                        prev_app = next_app;
                     }
                 })
                 .expect("spawn clipboard monitor");

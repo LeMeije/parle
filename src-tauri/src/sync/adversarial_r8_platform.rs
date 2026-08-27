@@ -529,7 +529,11 @@ fn r8_the_default_exclusion_list_protects_a_password_manager_on_only_one_of_the_
     assert!(!mac.is_empty() && !win.is_empty(), "both halves are populated: {list:?}");
     assert!(mac.len() >= 5 && win.len() >= 5, "both halves are real: {list:?}");
 
-    // Every product must appear on BOTH sides.
+    // Every CROSS-PLATFORM product must appear on both sides.
+    //
+    // The list is generated from one table now, so this holds by construction
+    // for any row that names both. What this defends is a row growing one half
+    // and not the other, which is how the halves drifted the first time.
     for product in ["1password", "bitwarden", "lastpass", "keepassxc", "dashlane", "enpass"] {
         assert!(
             mac.iter().any(|e| e.contains(product)),
@@ -542,14 +546,36 @@ fn r8_the_default_exclusion_list_protects_a_password_manager_on_only_one_of_the_
         );
     }
 
-    // KeePass 2.x is a different product and a different executable from
-    // KeePassXC, and was absent from both halves.
-    let keepass_classic = |v: &[String]| {
-        v.iter().any(|e| e.contains("keepass") && !e.contains("keepassxc"))
-    };
+    // Single-platform products are listed on the platform they EXIST on, and
+    // nowhere else.
+    //
+    // This assertion used to demand KeePass 2.x on both sides, and the fix for
+    // it invented `com.kee.keepass` to satisfy the shape. KeePass 2.x is a
+    // Windows .NET application with no macOS build, so that identifier
+    // protected nothing while reading as coverage. A fabricated entry is worse
+    // than an absent one, and a test that demands symmetry a product does not
+    // have is what produces them.
     assert!(
-        keepass_classic(&mac) && keepass_classic(&win),
-        "KeePass 2.x is covered on neither platform: mac {mac:?}, win {win:?}"
+        win.iter().any(|e| e.contains("keepass.exe")),
+        "KeePass 2.x is a real Windows product and must be covered there: {win:?}"
+    );
+    assert!(
+        !mac.iter().any(|e| e.contains("com.kee.")),
+        "a macOS identifier has been invented for a Windows-only product: {mac:?}"
+    );
+
+    // The system password manager on macOS 15 and later, which is the one most
+    // likely to be in use on a Mac, and it was missing entirely.
+    assert!(
+        mac.iter().any(|e| e == "com.apple.passwords"),
+        "macOS's own Passwords app is not excluded: {mac:?}"
+    );
+
+    // The stated threat is "passwords, tokens and 2FA codes", and there was not
+    // one authenticator in the list.
+    assert!(
+        mac.iter().chain(win.iter()).any(|e| e.contains("authy") || e.contains("aegis")),
+        "no authenticator app is excluded, though 2FA codes are named in the threat: {list:?}"
     );
 }
 

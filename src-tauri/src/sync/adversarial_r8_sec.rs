@@ -396,12 +396,12 @@ fn r8_h3_windows_honours_every_exclusion_format_it_writes() {
         .and_then(|s| s.split("\npub fn ").next())
         .expect("write_clipboard is in the file");
     let reader = src
-        .split("fn clipboard_is_excluded()")
+        .split("fn read_clipboard_unless_excluded()")
         .nth(1)
         .and_then(|s| s.split("\nfn ").next())
-        .expect("clipboard_is_excluded is in the file");
+        .expect("read_clipboard_unless_excluded is in the file");
 
-    for (what, body) in [("write_clipboard", writer), ("clipboard_is_excluded", reader)] {
+    for (what, body) in [("write_clipboard", writer), ("read_clipboard_unless_excluded", reader)] {
         for konst in ["EXCLUDE_MARKER_FORMATS", "EXCLUDE_DWORD_FORMATS"] {
             assert!(
                 body.contains(konst),
@@ -414,7 +414,7 @@ fn r8_h3_windows_honours_every_exclusion_format_it_writes() {
     // app explicitly opted IN, so presence alone is the wrong test for them.
     assert!(
         reader.contains("GetClipboardData"),
-        "clipboard_is_excluded must READ the DWORD value, not just check the format is present: \
+        "the capture gate must READ the DWORD value, not just check the format is present: \
          an app that writes 1 is explicitly allowing capture"
     );
 }

@@ -96,10 +96,26 @@ impl From<DeviceId> for String {
 /// TXT `key=value` pair, and rejects empty/oversized names so a peer cannot
 /// push an unbounded string into our UI.
 pub fn validate_device_name(name: &str) -> Result<(), IdentityError> {
+    // The invisible and direction-changing check lives HERE, not only in
+    // `sanitise_device_name`.
+    //
+    // It was in the sanitiser alone, and every call site of the sanitiser
+    // passes OUR OWN name: what the user typed, or the local hostname. A peer's
+    // name never met it. But a peer's name is the one that is hostile: it
+    // arrives in an UNSIGNED mDNS record, and it is what the user reads when
+    // deciding which machine to type a 6-digit pairing code into. The filter
+    // was protecting the only name that was never the threat.
+    //
+    // `validate_device_name` is the gate both inbound doors already use
+    // (`discovery::peer_from_service` and `wire::SyncMessage::validate`), so
+    // putting it here refuses such a name rather than displaying it. A device
+    // announcing "Ben\u{202E}koobcaM sneB" renders as a plausible reading of
+    // the user's own laptop; it does not get to appear in the list at all.
     let ok = !name.is_empty()
         && name.len() <= MAX_DEVICE_NAME_BYTES
         && !name.contains('=')
-        && !name.chars().any(char::is_control);
+        && !name.chars().any(char::is_control)
+        && !name.chars().any(is_invisible_or_bidi);
     if ok {
         Ok(())
     } else {
@@ -120,15 +136,31 @@ pub fn validate_device_name(name: &str) -> Result<(), IdentityError> {
 /// indistinguishable on screen and different on the wire.
 fn is_invisible_or_bidi(c: char) -> bool {
     matches!(c,
-        // Zero-width and soft hyphen.
-        '\u{00AD}' | '\u{200B}' | '\u{FEFF}'
-        // Zero-width joiners and non-joiners.
-        | '\u{200C}' | '\u{200D}'
-        // Bidirectional marks, embeddings, overrides and isolates.
+        // Soft hyphen and the zero-width space family.
+        '\u{00AD}' | '\u{200B}' | '\u{2060}' | '\u{FEFF}' | '\u{180E}'
+        // Bidirectional marks, embeddings, overrides and isolates. U+061C is
+        // ARABIC LETTER MARK, which IS a Bidi_Control and was missing.
+        | '\u{061C}'
         | '\u{200E}'..='\u{200F}'
         | '\u{202A}'..='\u{202E}'
         | '\u{2066}'..='\u{2069}'
+        // Line and paragraph separators. Zl and Zp, so `char::is_control` is
+        // FALSE for both, and they render as a line break in the pairing list.
+        | '\u{2028}' | '\u{2029}'
+        // Invisible "letters" used to make a label look blank or padded.
+        | '\u{3164}' | '\u{FFA0}'
+        // Variation selectors and the TAG block, the ASCII-smuggling set.
+        | '\u{FE00}'..='\u{FE0F}'
+        | '\u{E0000}'..='\u{E007F}'
     )
+    // U+200C ZWNJ and U+200D ZWJ are deliberately NOT here.
+    //
+    // They were, and stripping them is wrong in the other direction: both are
+    // orthographically required. "کتاب\u{200C}های بن" became a different and
+    // incorrect spelling, and "Ben 👨\u{200D}💻" became a man and a laptop.
+    // Neither is an invisible-label vector in the way the set above is, so the
+    // filter would have been silently corrupting correct names to close a hole
+    // they do not open.
 }
 
 /// Make a user-chosen name safe to put on the wire, or say it cannot be.

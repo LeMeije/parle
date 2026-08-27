@@ -560,8 +560,22 @@ pub fn read_clipboard() -> Option<String> {
     }
 }
 
+/// Write text to the clipboard, marked TRANSIENT so our own monitor skips it.
+///
+/// The marking is not decoration: on Windows the equivalent call declares all
+/// four exclusion formats, so Parle never re-captures its own writes there,
+/// and macOS wrote unmarked. That asymmetry laundered excluded content back
+/// onto the wire. `commands::copy_item` is bound to Enter and double-click in
+/// the history palette, so pressing Copy on a row from an app in the user's
+/// exclusion list re-captured that text 150ms later under Parle's OWN app id,
+/// where the outbound exclusion filter no longer matched it, and replicated it
+/// to every paired device. The user pressed Copy in Parle's own history and
+/// their password crossed to the other machine.
+///
+/// `write_clipboard_marked` remains for the concealed case, which is a
+/// stronger claim about the CONTENT rather than about who wrote it.
 pub fn write_clipboard(text: &str) {
-    write_clipboard_impl(text, false, false);
+    write_clipboard_impl(text, true, false);
 }
 
 /// Injection writes are marked org.nspasteboard.TransientType so clipboard

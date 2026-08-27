@@ -340,30 +340,46 @@ pub struct HistorySettings {
     pub max_items: u32,
 }
 
-/// Password managers excluded from clipboard capture, BOTH identifiers for
-/// every product.
+/// Password managers and authenticators excluded from clipboard capture.
 ///
 /// Generated from one table rather than two hand-kept lists, because the two
-/// lists had drifted and the drift crosses machines. LastPass carried a macOS
+/// lists had drifted and the drift crosses machines: LastPass carried a macOS
 /// bundle id and no Windows exe name, so copying a password out of LastPass on
 /// the PC was captured there and then replicated to the Mac, whose own list
-/// would have refused it. The exclusion rule is applied once, at capture, on
-/// the capturing machine, so an entry missing from one half is not a smaller
-/// hole on that platform: it is a hole in the pair.
+/// would have refused it. The exclusion rule is applied at capture, on the
+/// capturing machine, so an entry missing from one half is not a smaller hole
+/// on that platform: it is a hole in the pair.
 ///
-/// KeePass 2.x is a different product from KeePassXC and was in neither half.
+/// A product may legitimately exist on only ONE platform, and the table says so
+/// with an empty slice. An earlier version of this table required both halves
+/// for every row and I filled a gap by inventing `com.kee.keepass` for KeePass
+/// 2.x, which is a Windows .NET application with no macOS build at all. A
+/// fabricated identifier is worse than an absent one: it protects nothing and
+/// it reads as coverage. The macOS products in that space are separate
+/// applications with their own identifiers, and they are listed as such.
 fn default_excluded_apps() -> Vec<String> {
     // (macOS bundle ids, Windows executable names)
-    const PASSWORD_MANAGERS: [(&[&str], &[&str]); 7] = [
+    const EXCLUDED: [(&[&str], &[&str]); 12] = [
         (&["com.1password.1password", "com.agilebits.onepassword7"], &["1Password.exe"]),
         (&["com.bitwarden.desktop"], &["Bitwarden.exe"]),
         (&["com.lastpass.LastPass"], &["LastPass.exe"]),
         (&["org.keepassxc.keepassxc"], &["KeePassXC.exe"]),
         (&["com.dashlane.Dashlane"], &["Dashlane.exe"]),
-        (&["com.kee.keepass"], &["KeePass.exe"]),
         (&["in.sinew.Enpass-Desktop"], &["Enpass.exe"]),
+        // The SYSTEM password manager on macOS 15 and later, and the one most
+        // likely to be in use on a Mac. It was missing entirely.
+        (&["com.apple.Passwords"], &[]),
+        (&["com.apple.keychainaccess"], &[]),
+        // KeePass 2.x is Windows-only. Its macOS counterparts are different
+        // applications, so they get their own rows rather than a made-up id.
+        (&[], &["KeePass.exe"]),
+        (&["com.mstc.macpass"], &[]),
+        (&["com.markmcguill.strongbox.mac"], &[]),
+        // Authenticators. The threat this feature names is "passwords, tokens
+        // and 2FA codes", and there was not one authenticator in the list.
+        (&["com.authy.authy-mac", "com.beemdevelopment.Aegis"], &["Authy Desktop.exe"]),
     ];
-    PASSWORD_MANAGERS
+    EXCLUDED
         .iter()
         .flat_map(|(mac, win)| mac.iter().chain(win.iter()))
         .map(|s| (*s).to_string())

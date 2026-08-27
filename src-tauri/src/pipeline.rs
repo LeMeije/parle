@@ -62,6 +62,27 @@ pub struct Pipeline {
     start_app: Mutex<(Option<String>, Option<String>)>,
 }
 
+/// Is this dictation going into a password field?
+///
+/// Asked of the MACHINE, not of a paste preference, and asked on every
+/// dictation path.
+///
+/// The first version of this check read `manual_paste_required` off the
+/// `InjectionOutcome`, which fails twice. It was applied to only one of the two
+/// paths that finish a dictation, so a recording containing a mark stored the
+/// password anyway. And the outcome is `None` whenever "insert at cursor" is
+/// switched off, a shipped user-facing setting, so the check silently did
+/// nothing there — and that branch also calls the UNMARKED `write_clipboard`,
+/// so with secure input active the app both stored the password and stopped
+/// telling other clipboard managers not to. That was worse than having no check
+/// at all.
+///
+/// `secure_input_active()` exists on both platforms and answers the real
+/// question directly.
+fn into_secure_field() -> bool {
+    platform::imp::secure_input_active()
+}
+
 impl Pipeline {
     pub fn new(
         engine: Arc<Mutex<EngineManager>>,
@@ -413,7 +434,12 @@ impl Pipeline {
                 settings.paste.press_enter,
             ))
         } else if settings.paste.copy_to_clipboard {
-            platform::imp::write_clipboard(&text);
+            // CONCEALED when this is a password field. The unmarked call here
+            // meant that with "insert at cursor" switched off, a dictation into
+            // a secure field was put on the clipboard with no marking at all,
+            // so every other clipboard manager on the machine kept it. The
+            // injection path had always marked it; this branch never did.
+            platform::imp::write_clipboard_marked(&text, into_secure_field());
             None
         } else {
             None
@@ -446,11 +472,7 @@ impl Pipeline {
         // password typed into a password field belongs in a history that syncs.
         // The text is still on the clipboard for the user to paste, which is
         // the whole point of that branch.
-        let into_secure_field = injection
-            .as_ref()
-            .map(|o| o.manual_paste_required)
-            .unwrap_or(false);
-        let item_id = if into_secure_field {
+        let item_id = if into_secure_field() {
             tracing::info!("dictation went to a secure field; not storing it in history");
             -1
         } else {
@@ -619,7 +641,12 @@ impl Pipeline {
                 settings.paste.press_enter,
             ))
         } else if settings.paste.copy_to_clipboard {
-            platform::imp::write_clipboard(&text);
+            // CONCEALED when this is a password field. The unmarked call here
+            // meant that with "insert at cursor" switched off, a dictation into
+            // a secure field was put on the clipboard with no marking at all,
+            // so every other clipboard manager on the machine kept it. The
+            // injection path had always marked it; this branch never did.
+            platform::imp::write_clipboard_marked(&text, into_secure_field());
             None
         } else {
             None
@@ -639,11 +666,18 @@ impl Pipeline {
             low_confidence: vec![],
             cleanup_tier: if settings.cleanup.enabled { 1 } else { 0 },
         };
-        let item_id = self
-            .store
-            .lock()
-            .insert_transcription(&tr, app_id.as_deref(), app_name.as_deref())
-            .unwrap_or(-1);
+        // The SAME secure-field gate as the plain path. This one was missed,
+        // so a dictation into a password field that happened to contain a mark
+        // was stored and replicated while the other path correctly dropped it.
+        let item_id = if into_secure_field() {
+            tracing::info!("dictation went to a secure field; not storing it in history");
+            -1
+        } else {
+            self.store
+                .lock()
+                .insert_transcription(&tr, app_id.as_deref(), app_name.as_deref())
+                .unwrap_or(-1)
+        };
 
         (self.sink)(PipelineEvent::Completed {
             item_id,

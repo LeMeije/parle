@@ -42,3 +42,12 @@ mod adversarial_r8_platform;
 
 #[cfg(test)]
 mod adversarial_r8_data;
+
+#[cfg(test)]
+mod adversarial_r9_sec;
+
+#[cfg(test)]
+mod adversarial_r9_conc;
+
+#[cfg(test)]
+mod adversarial_r9_data;

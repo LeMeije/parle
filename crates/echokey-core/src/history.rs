@@ -491,7 +491,23 @@ impl Store {
     /// the very next exchange. The user's reading of that setting is "stop
     /// holding this app's clipboard", and the rows were already held.
     pub fn set_excluded_apps(&mut self, apps: Vec<String>) {
-        self.excluded_apps = apps.into_iter().map(|a| a.to_lowercase()).collect();
+        // ASCII folding, to match the two places that compare against it.
+        //
+        // This used Rust's full-Unicode `to_lowercase`, while `items_from`
+        // compares with SQLite's `LOWER()` (ASCII only) and the capture-time
+        // gate in `state.rs` uses `eq_ignore_ascii_case`. Two of the three
+        // agreed and the list was the odd one out, so any app whose name or
+        // bundle id carried a non-ASCII capital could never match in SQL: the
+        // user watched it blocked at capture, added it to the list, and every
+        // row captured BEFORE that moment replicated anyway. That is exactly
+        // the hole the outbound filter exists to close.
+        //
+        // The residual is stated rather than hidden: "Éditeur" still will not
+        // match "ÉDITEUR" anywhere, on any of the three paths. One consistent
+        // folding that is sometimes too strict beats three foldings that
+        // disagree, because a disagreement is a silent leak and this is merely
+        // an entry the user must type as it appears.
+        self.excluded_apps = apps.into_iter().map(|a| a.to_ascii_lowercase()).collect();
     }
 
     /// Assign this install's identity. Call once, after settings load.
@@ -963,26 +979,73 @@ impl Store {
 
     /// The same rule, usable inside an open transaction.
     fn next_clock_in(conn: &Connection, source: &str) -> Result<i64, StoreError> {
-        let newest: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(c), 0) FROM (
-                 SELECT COALESCE(updated_at, created_at) AS c FROM items
-                  WHERE source_machine = ?1
-                 UNION ALL
-                 SELECT deleted_at AS c FROM tombstones WHERE source_machine = ?1
-             )",
+        // TWO index seeks, not one scan.
+        //
+        // This was a single `MAX` over a `UNION ALL` of both tables. SQLite
+        // plans that as a co-routine feeding an aggregate, so it VISITS every
+        // row for the source even though it uses the index to find them; the
+        // `COALESCE(updated_at, created_at)` also puts an expression where the
+        // index has a column. Split into two plain `MAX` queries, each becomes
+        // a covering-index seek to the last entry.
+        //
+        // It matters because this is the hottest path in the app: every local
+        // dictation, every edit and every delete calls it, holding the store
+        // mutex the history window shares. Measured at the shipped 10,000-row
+        // cap it cost about 1.2 ms per insert against 60 µs, and the set it
+        // scanned was UNBOUNDED — items are capped by `max_items`, but
+        // tombstones are never pruned by age and local ones are exempt from the
+        // per-source ceiling, so every delete the user ever made was another
+        // row that every future write had to walk.
+        //
+        // `COALESCE` is safe to drop: the v3 migration backfills
+        // `updated_at = created_at` for every row that had none, and every
+        // insert since has set it explicitly.
+        let newest_item: Option<i64> = conn.query_row(
+            "SELECT MAX(updated_at) FROM items WHERE source_machine = ?1",
             params![source],
             |r| r.get(0),
         )?;
+        let newest_tomb: Option<i64> = conn.query_row(
+            "SELECT MAX(deleted_at) FROM tombstones WHERE source_machine = ?1",
+            params![source],
+            |r| r.get(0),
+        )?;
+        let newest = newest_item.unwrap_or(0).max(newest_tomb.unwrap_or(0));
         let now = now_ms();
-        let ceiling = now + MAX_CLOCK_SKEW_MS / 2;
         let wanted = now.max(newest.saturating_add(1));
-        if wanted > ceiling {
+        // NEVER below what we already hold, whatever the drift.
+        //
+        // This used to fall back to the plain wall clock past a ceiling of
+        // `now + MAX_CLOCK_SKEW_MS / 2`, and that fallback reproduced the exact
+        // defect the function exists to prevent. The clock that pushes us over
+        // the ceiling is, by definition, ABOVE the wall clock, so returning
+        // `now` stamps BELOW what the store already holds.
+        //
+        // It needs no hostility to reach. A peer whose clock is 90 seconds fast
+        // is inside the two minutes the design accepts, and ordinary after an
+        // NTP correction or a resume. It deletes one of our rows, we accept the
+        // tombstone at `now + 90s`, and it is served straight back so that
+        // peer's cursor for us sits there. Every row and every delete we then
+        // make for the next 90 seconds was stamped at `now`, below that cursor,
+        // and was never offered again. Clear History became a silent no-op on
+        // the other machine.
+        //
+        // Being one millisecond above a clock the receiving peer MINTED is safe
+        // for that peer: it accepts up to its own `now + MAX_CLOCK_SKEW_MS`, and
+        // it is the machine whose clock is ahead. A third device with a correct
+        // clock may refuse it, but it would equally have refused `newest`, and a
+        // refusal banks no receipt so it is re-offered once the clocks agree.
+        //
+        // So the trade is: certain, permanent, silent loss on one side, against
+        // a recoverable refusal on the other. We take the recoverable one, and
+        // say so loudly, because a clock this far out is the user's to fix.
+        if wanted > now + MAX_CLOCK_SKEW_MS {
             tracing::warn!(
-                "sync: the newest clock held for {source} is {} ms ahead of this machine's; \
-                 stamping at the wall clock instead. Check the clocks on your devices.",
+                "sync: the newest clock held for {source} is {} ms ahead of this machine's own. \
+                 Stamping above it anyway so nothing is lost, but a peer with a correct clock may \
+                 refuse these until the clocks agree. Check the time on your devices.",
                 newest.saturating_sub(now)
             );
-            return Ok(now);
         }
         Ok(wanted)
     }
@@ -998,74 +1061,78 @@ impl Store {
     pub fn clear(&self, kind: Option<HistoryKind>) -> Result<usize, StoreError> {
         let tx = self.conn.unchecked_transaction()?;
         let now = now_ms();
-        // The same ceiling `delete_clock` applies: never stamp a delete the
-        // receiving side would refuse as too far ahead.
-        let ceiling = now + MAX_CLOCK_SKEW_MS / 2;
         let n = match kind {
             Some(k) => {
                 tx.execute(
-                    // Per source, one clock strictly above every tombstone
-                    // already held for it, the same rule as `delete_clock`,
-                    // expressed in SQL because a Clear writes the whole batch in
-                    // one statement, INCLUDING its fallback: past the ceiling we
-                    // drop back to the plain wall clock.
+                    // ONE aggregate for the whole statement, not a correlated
+                    // subquery per row.
                     //
-                    // This used to `min(ceiling, ...)`, which is not the same
-                    // thing: it stamped every delete a full minute in the future
-                    // where `delete_clock` stamps `now`. Two paths that write
-                    // the same field must agree, or a Clear and a single delete
-                    // produce different clocks from the same state.
-                    "INSERT INTO tombstones (source_machine, origin_id, deleted_at, local)
+                    // The per-row form was O(N^2): two correlated subqueries per
+                    // row, each scanning `items` for that source on a column no
+                    // index covers, and the CASE evaluated both. Measured in
+                    // release: 73ms for 1,000 rows, 1.3s for 4,000, 4.9s for
+                    // 8,000. The default `max_items` is 10,000, so a Clear on a
+                    // full default history froze the app for the better part of
+                    // ten seconds, inside one unbounded transaction, holding the
+                    // store mutex the history window shares. Clear History is
+                    // the product's panic button; it is the last place a freeze
+                    // is acceptable.
+                    //
+                    // The CTE also preserves the property the old form had by
+                    // accident and that replication depends on: the aggregate
+                    // does not observe the rows this statement inserts, so a
+                    // Clear stamps ONE clock per source rather than a chain.
+                    //
+                    // No ceiling fallback, matching `next_clock_in`: stamping
+                    // the wall clock past a ceiling means stamping BELOW what we
+                    // already hold, which is the silent permanent loss that
+                    // fallback was supposed to prevent.
+                    "WITH newest AS (
+                         SELECT src, MAX(c) AS c FROM (
+                             SELECT source_machine AS src, MAX(updated_at) AS c FROM items
+                              WHERE source_machine IS NOT NULL GROUP BY source_machine
+                             UNION ALL
+                             SELECT source_machine AS src, MAX(deleted_at) AS c FROM tombstones
+                              GROUP BY source_machine
+                         ) GROUP BY src
+                     )
+                     INSERT INTO tombstones (source_machine, origin_id, deleted_at, local)
                      SELECT i.source_machine, i.origin_id,
-                            CASE WHEN COALESCE((SELECT MAX(c) FROM (
-                                        SELECT COALESCE(updated_at, created_at) AS c FROM items
-                                         WHERE source_machine = i.source_machine
-                                        UNION ALL
-                                        SELECT deleted_at AS c FROM tombstones
-                                         WHERE source_machine = i.source_machine)), 0) + 1 > ?3
-                                 THEN ?2
-                                 ELSE max(?2, COALESCE((SELECT MAX(c) FROM (
-                                        SELECT COALESCE(updated_at, created_at) AS c FROM items
-                                         WHERE source_machine = i.source_machine
-                                        UNION ALL
-                                        SELECT deleted_at AS c FROM tombstones
-                                         WHERE source_machine = i.source_machine)), 0) + 1)
-                            END, 1
+                            max(?2, COALESCE(n.c, 0) + 1), 1
                        FROM items i
+                       LEFT JOIN newest n ON n.src = i.source_machine
                       WHERE i.kind=?1 AND i.pinned=0
                         AND i.source_machine IS NOT NULL AND i.origin_id IS NOT NULL
                      ON CONFLICT(source_machine, origin_id)
                      DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at),
                                    local = 1",
-                    params![kind_str(k), now, ceiling],
+                    params![kind_str(k), now],
                 )?;
                 tx.execute("DELETE FROM items WHERE kind=?1 AND pinned=0", params![kind_str(k)])?
             }
             None => {
                 tx.execute(
-                    "INSERT INTO tombstones (source_machine, origin_id, deleted_at, local)
+                    // Same rule and same CTE as the kind-scoped clear above.
+                    "WITH newest AS (
+                         SELECT src, MAX(c) AS c FROM (
+                             SELECT source_machine AS src, MAX(updated_at) AS c FROM items
+                              WHERE source_machine IS NOT NULL GROUP BY source_machine
+                             UNION ALL
+                             SELECT source_machine AS src, MAX(deleted_at) AS c FROM tombstones
+                              GROUP BY source_machine
+                         ) GROUP BY src
+                     )
+                     INSERT INTO tombstones (source_machine, origin_id, deleted_at, local)
                      SELECT i.source_machine, i.origin_id,
-                            CASE WHEN COALESCE((SELECT MAX(c) FROM (
-                                        SELECT COALESCE(updated_at, created_at) AS c FROM items
-                                         WHERE source_machine = i.source_machine
-                                        UNION ALL
-                                        SELECT deleted_at AS c FROM tombstones
-                                         WHERE source_machine = i.source_machine)), 0) + 1 > ?2
-                                 THEN ?1
-                                 ELSE max(?1, COALESCE((SELECT MAX(c) FROM (
-                                        SELECT COALESCE(updated_at, created_at) AS c FROM items
-                                         WHERE source_machine = i.source_machine
-                                        UNION ALL
-                                        SELECT deleted_at AS c FROM tombstones
-                                         WHERE source_machine = i.source_machine)), 0) + 1)
-                            END, 1
+                            max(?1, COALESCE(n.c, 0) + 1), 1
                        FROM items i
+                       LEFT JOIN newest n ON n.src = i.source_machine
                       WHERE i.pinned=0
                         AND i.source_machine IS NOT NULL AND i.origin_id IS NOT NULL
                      ON CONFLICT(source_machine, origin_id)
                      DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at),
                                    local = 1",
-                    params![now, ceiling],
+                    params![now],
                 )?;
                 tx.execute("DELETE FROM items WHERE pinned=0", [])?
             }

@@ -549,8 +549,23 @@ fn r8_a_clear_climbs_above_a_held_tombstone_but_gives_up_past_half_the_skew() {
         );
     }
 
-    // (b) past the climb zone: the documented fallback, and it DOES lose the
-    //     delete to any peer whose cursor already sits at the held tombstone.
+    // (b) past what USED TO BE the climb zone. There is no fallback any more,
+    //     and this is the half that changed.
+    //
+    //     Round 8 stopped climbing past `now + MAX_CLOCK_SKEW_MS / 2` and
+    //     dropped back to the plain wall clock. Round 9 showed that fallback
+    //     reproduced the exact defect the climb exists to prevent: the clock
+    //     that pushes us over the ceiling is BY DEFINITION above the wall
+    //     clock, so falling back stamps BELOW what the store already holds, and
+    //     a peer sitting at that cursor never hears about the delete. It took
+    //     one peer 90 seconds fast, inside the window the design accepts, and
+    //     one delete.
+    //
+    //     So the rule is now unconditional: never stamp below what we hold. A
+    //     clock one millisecond above one the receiving peer MINTED is safe for
+    //     that peer, and a third device with a correct clock would have refused
+    //     the original too, banks no receipt, and re-offers once the clocks
+    //     agree. A recoverable refusal beats a certain silent loss.
     {
         let s = store();
         let now = now_ms();
@@ -571,14 +586,16 @@ fn r8_a_clear_climbs_above_a_held_tombstone_but_gives_up_past_half_the_skew() {
         s.clear(None).unwrap();
         let lowest = min_clear_clock(&s);
         assert!(
-            lowest < held,
-            "the fallback is no longer taken; if `clear` now climbs past half \
-             the skew window it may be stamping deletes the peer will refuse"
+            lowest > held,
+            "Clear History stamped {lowest}, at or below the {held} already held for that source. \
+             A peer whose cursor sits at {held} never hears about these deletes, and nothing \
+             lowers a cursor: the user cleared a password and it stays on the other machine."
         );
-        // And this is what it costs: unreachable to a cursor at `held`.
-        assert!(
-            s.tombstones_since(PEER, held, 100).unwrap().is_empty(),
-            "the cleared deletes are below the cursor and will never be offered"
+        // And they are reachable to a peer sitting at that cursor.
+        assert_eq!(
+            s.tombstones_since(PEER, held, 100).unwrap().len(),
+            5,
+            "every cleared delete must be above the cursor and therefore offerable"
         );
     }
 }

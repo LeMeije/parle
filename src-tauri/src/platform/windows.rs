@@ -47,7 +47,7 @@ use windows::Win32::System::JobObjects::{
     JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
     PIPE_TYPE_BYTE, PIPE_WAIT,
@@ -637,6 +637,13 @@ fn register_format(name: &str) -> u32 {
     unsafe { RegisterClipboardFormatW(windows::core::PCWSTR(wide.as_ptr())) }
 }
 
+/// Windows marks every write it makes, so the concealed variant is the same
+/// call. Kept as a separate name so `pipeline` can express the intent on both
+/// platforms without a `cfg`.
+pub fn write_clipboard_marked(text: &str, _concealed: bool) {
+    write_clipboard(text);
+}
+
 /// Write text, marked so Win+V history / cloud sync / other monitors skip it.
 pub fn write_clipboard(text: &str) {
     unsafe {
@@ -750,10 +757,7 @@ impl ClipboardMonitor {
                         let now = unsafe { GetClipboardSequenceNumber() };
                         if now != last {
                             last = now;
-                            if clipboard_is_excluded() {
-                                continue;
-                            }
-                            if let Some(text) = read_clipboard() {
+                            if let Some(text) = read_clipboard_unless_excluded() {
                                 if text.trim().is_empty() {
                                     continue;
                                 }
@@ -785,50 +789,87 @@ impl Drop for ClipboardMonitor {
 
 /// Does the current clipboard carry any "do not capture this" marker?
 ///
-/// Honours every format `write_clipboard` declares, which it did not before:
-/// `CanIncludeInClipboardHistory` was written and then ignored on the way in.
+/// Reads the markers, the DWORD values AND the text in ONE clipboard session.
 ///
-/// The caller must NOT hold the clipboard open: this opens it itself.
-fn clipboard_is_excluded() -> bool {
+/// The previous version opened the clipboard up to twice for the DWORD formats
+/// and then `read_clipboard` opened it a third time, with nothing carrying the
+/// decision and the payload across. Between the check and the read any process
+/// can `EmptyClipboard` and write new content, so a password manager copying in
+/// that window had its secret read under a decision made about somebody else's
+/// data. `open_clipboard_retry` is ten attempts at 10ms, so the window was
+/// bounded at roughly 300ms of contention rather than the microseconds it was
+/// before the DWORD formats were honoured.
+///
+/// Returns `None` when the capture must be skipped, `Some(text)` otherwise.
+fn read_clipboard_unless_excluded() -> Option<String> {
     unsafe {
-        for name in EXCLUDE_MARKER_FORMATS {
-            let fmt = register_format(name);
-            if fmt != 0 && IsClipboardFormatAvailable(fmt).is_ok() {
-                return true;
-            }
+        // The sequence number before and after. If it moves, the content we
+        // judged is not the content we read, so the capture is discarded.
+        let before = GetClipboardSequenceNumber();
+        if !open_clipboard_retry() {
+            return None;
         }
-        // For these the VALUE is the signal, so presence is not enough and
-        // absence is not a refusal: an app that never writes them has simply
-        // not expressed a preference.
-        for name in EXCLUDE_DWORD_FORMATS {
-            let fmt = register_format(name);
-            if fmt == 0 || IsClipboardFormatAvailable(fmt).is_err() {
-                continue;
+        let out = (|| -> Option<String> {
+            for name in EXCLUDE_MARKER_FORMATS {
+                let fmt = register_format(name);
+                if fmt != 0 && IsClipboardFormatAvailable(fmt).is_ok() {
+                    return None;
+                }
             }
-            if !open_clipboard_retry() {
-                // Cannot read the value. Refuse to capture rather than guess:
-                // the format is present, so somebody expressed a preference,
-                // and the only safe reading of an unreadable preference is no.
-                return true;
-            }
-            let allowed = (|| {
-                let handle = GetClipboardData(fmt).ok()?;
-                let ptr = GlobalLock(windows::Win32::Foundation::HGLOBAL(handle.0 as _)) as *const u32;
+            // These carry a DWORD where the VALUE decides: 0 means no,
+            // non-zero means the app explicitly opted in. Absence is not a
+            // refusal, it is an app that never expressed a preference.
+            for name in EXCLUDE_DWORD_FORMATS {
+                let fmt = register_format(name);
+                if fmt == 0 || IsClipboardFormatAvailable(fmt).is_err() {
+                    continue;
+                }
+                let Ok(handle) = GetClipboardData(fmt) else {
+                    // Present but unreadable: somebody expressed a preference
+                    // we cannot read, and the only safe reading of that is no.
+                    return None;
+                };
+                let h = windows::Win32::Foundation::HGLOBAL(handle.0 as _);
+                // The allocation is written by ANOTHER process. Reading four
+                // bytes without asking how many there are is an unchecked
+                // cross-process dereference; `GlobalAlloc` granularity makes a
+                // fault unlikely, which is not the same as correct.
+                if GlobalSize(h) < 4 {
+                    return None;
+                }
+                let ptr = GlobalLock(h) as *const u32;
                 if ptr.is_null() {
                     return None;
                 }
                 let v = *ptr;
-                let _ = GlobalUnlock(windows::Win32::Foundation::HGLOBAL(handle.0 as _));
-                Some(v != 0)
-            })();
-            let _ = CloseClipboard();
-            match allowed {
-                Some(true) => continue,   // explicitly allowed
-                Some(false) => return true, // explicitly excluded
-                None => return true,      // present but unreadable: assume no
+                let _ = GlobalUnlock(h);
+                if v == 0 {
+                    return None;
+                }
             }
+            if IsClipboardFormatAvailable(CF_UNICODETEXT).is_err() {
+                return None;
+            }
+            let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
+            let ptr = GlobalLock(windows::Win32::Foundation::HGLOBAL(handle.0 as _)) as *const u16;
+            if ptr.is_null() {
+                return None;
+            }
+            let mut len = 0usize;
+            while *ptr.add(len) != 0 {
+                len += 1;
+            }
+            let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+            let _ = GlobalUnlock(windows::Win32::Foundation::HGLOBAL(handle.0 as _));
+            Some(text)
+        })();
+        let _ = CloseClipboard();
+        if GetClipboardSequenceNumber() != before {
+            // The clipboard changed under us, so the marker check and the text
+            // may not describe the same content. The next poll will see it.
+            return None;
         }
-        false
+        out
     }
 }
 
