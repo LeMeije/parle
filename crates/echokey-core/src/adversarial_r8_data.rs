@@ -446,8 +446,24 @@ fn r8_a_v6_interrupted_between_its_two_alters_still_opens() {
         // Undo the second half of v6 and the stamp, keeping the first half.
         // SQLite cannot DROP COLUMN before 3.35; rusqlite's bundled build can,
         // and if it cannot the test says so rather than passing vacuously.
-        c.execute_batch("ALTER TABLE items DROP COLUMN local_edit;")
-            .expect("bundled SQLite must support DROP COLUMN for this test to mean anything");
+        // EVERY column added after the interruption point comes off, not just
+        // v6's second one.
+        //
+        // A database interrupted inside v6 predates v8, so it cannot have
+        // `local_only` either. Dropping only `local_edit` left `local_only` in
+        // place and re-added `local_edit` after it, so the migrated store
+        // matched a fresh one in content and not in column ORDER, and the
+        // schema-identity assertion failed for a reason that had nothing to do
+        // with the interruption being handled.
+        //
+        // Winding back a stamp means reconstructing the schema of that era,
+        // which means dropping everything the later steps add. Any future
+        // migration that adds a column to `items` has to be listed here too.
+        c.execute_batch(
+            "ALTER TABLE items DROP COLUMN local_only;
+             ALTER TABLE items DROP COLUMN local_edit;",
+        )
+        .expect("bundled SQLite must support DROP COLUMN for this test to mean anything");
         c.pragma_update(None, "user_version", 5i64).unwrap();
     }
 

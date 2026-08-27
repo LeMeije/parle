@@ -232,23 +232,43 @@ fn r10_b2_the_gate_has_no_escape_hatch_and_fails_silently() {
         .collect::<Vec<_>>()
         .join("\n");
 
+    // Round 11 replaced the free function with a three-state `FieldSecrecy`,
+    // because a boolean could not tell "this is a password field" apart from
+    // "secure input is on and I cannot see the field", and the two deserve
+    // different treatment. The premise below tracks the decision, not its shape.
     assert!(
-        code.contains("fn into_secure_field() -> bool"),
-        "premise: the free function round 9 introduced is still here"
+        code.contains("enum FieldSecrecy") && code.contains("fn sample_field_secrecy()"),
+        "premise: the secure-field decision is still made in pipeline.rs"
     );
-    // Both drop sites report through `tracing::info!` only.
-    let drops = code.matches("into_secure_field()").count();
-    assert!(drops >= 3, "premise: both dictation paths plus both clipboard writes use it");
     assert!(
-        code.contains("PipelineEvent::SecureFieldSkipped")
-            || code.contains("secure_field_skipped")
-            || code.contains("warn!(")
-            && code.contains("secure field"),
-        "R10-B2: when `secure_input_active()` is stuck on — which one crashed app, \
-         or Terminal's Secure Keyboard Entry, does system-wide and process-globally \
-         on macOS — EVERY dictation is silently dropped from history and written to \
-         the clipboard CONCEALED. The only report is a `tracing::info!` the user \
-         never sees. There is no event, no warning and no way to notice."
+        code.contains("fn store_transcription("),
+        "premise: both dictation paths still route storage through one helper"
+    );
+
+    // R10-B2's finding: when the decision withholds a dictation from History,
+    // the user must be TOLD. `secure_input_active()` is process-global and
+    // system-wide on macOS, and one crashed app or Terminal's Secure Keyboard
+    // Entry can leave it stuck on. While it is stuck, every dictation is
+    // withheld. The only report used to be a `tracing::info!` the user never
+    // sees, so the failure was indistinguishable from the app being broken.
+    let helper = code
+        .split("fn store_transcription(")
+        .nth(1)
+        .and_then(|s| s.split("\n}").next())
+        .expect("store_transcription is in the file");
+    let withholds =
+        helper.matches("drop_entirely()").count() + helper.matches("keep_local_only()").count();
+    assert!(withholds >= 2, "premise: both withholding branches are in the helper");
+    assert_eq!(
+        helper.matches("Some(").count(),
+        withholds,
+        "R10-B2: a branch that withholds a dictation from History returns no message for the \
+         user. When `secure_input_active()` is stuck on, EVERY dictation is withheld and the \
+         only report is a `tracing::info!` nobody sees: no event, no warning, no way to notice."
+    );
+    assert!(
+        code.contains("PipelineEvent::Empty { reason }"),
+        "R10-B2: the message the helper returns is never emitted, so it reaches nobody"
     );
 }
 

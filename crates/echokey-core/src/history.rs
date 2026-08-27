@@ -8,7 +8,7 @@ use crate::types::{HistoryItem, HistoryKind, TranscriptionResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 /// How far ahead of us a peer's clock may be before we stop believing it.
 ///
 /// Two minutes, not a day. The cursor we keep for a peer is that peer's own
@@ -483,6 +483,35 @@ impl Store {
             }
             version = 7;
         }
+
+        if version < 8 {
+            // v8: a row can be kept LOCALLY and never replicated.
+            //
+            // The secure-field question has three answers, not two, and the
+            // code only had somewhere to put two of them. The accessibility
+            // probe says yes, says no, or CANNOT TELL, and "cannot tell" is not
+            // rare: Chromium and Electron applications do not expose their
+            // accessibility tree until a client sets `AXManualAccessibility`,
+            // so the probe returns nothing for a web password field even with
+            // permission granted. Terminal `sudo` has no secure text field at
+            // all. Mapping that to "not secure" stored the password and synced
+            // it; mapping it to "secure" would discard ordinary dictation,
+            // which is the failure that broke the product two rounds ago.
+            //
+            // The middle answer is: keep it, do not send it. The user still has
+            // their dictation, and nothing that might be a password crosses to
+            // another machine on the strength of a probe that could not answer.
+            //
+            // `items_from` is the single outbound door, so excluding on this
+            // column is enough to make it stick.
+            if !has_col("items", "local_only")? {
+                conn.execute(
+                    "ALTER TABLE items ADD COLUMN local_only INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+            }
+            version = 8;
+        }
         // Every step leaves `version` at its own level so the next one can read
         // it. The last assignment has no reader yet, and will the moment a v5
         // step is added; dropping it would make that addition a silent bug.
@@ -492,6 +521,23 @@ impl Store {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         Ok(Self { conn, device_id: None, excluded_apps: Vec::new() })
+    }
+
+    /// Store a dictation that must never leave this machine.
+    ///
+    /// For the case where we cannot tell whether the user was typing into a
+    /// password field. See the v8 migration for why that is a third answer
+    /// rather than a bad guess at one of the other two.
+    pub fn insert_transcription_local_only(
+        &self,
+        r: &TranscriptionResult,
+        app_id: Option<&str>,
+        app_name: Option<&str>,
+    ) -> Result<i64, StoreError> {
+        let id = self.insert_transcription(r, app_id, app_name)?;
+        self.conn
+            .execute("UPDATE items SET local_only = 1 WHERE id = ?1", params![id])?;
+        Ok(id)
     }
 
     /// Apps whose rows must never be handed to replication.
@@ -1697,7 +1743,7 @@ impl Store {
         // would silently end the pass with rows still to come.
         let mut sql = String::from(
             "SELECT source_machine, origin_id, kind, text, created_at, updated_at, pinned FROM items
-             WHERE source_machine = ?1 AND origin_id IS NOT NULL
+             WHERE source_machine = ?1 AND origin_id IS NOT NULL AND local_only = 0
                AND (updated_at > ?2 OR (updated_at = ?2 AND origin_id > ?3))",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![

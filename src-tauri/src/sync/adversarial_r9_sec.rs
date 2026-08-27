@@ -264,12 +264,18 @@ fn r9_h3_the_marked_dictation_path_has_no_secure_field_drop() {
     assert!(stores.len() >= 2, "both dictation paths should store; found {}", stores.len());
 
     // Every `insert_transcription` in this file must sit behind the gate.
-    let guards = code.matches("into_secure_field()").count();
+    // Both paths go through ONE helper now, which is a stronger guarantee than
+    // counting guards: they cannot drift, which is how the drop came to be on
+    // one path and not the other in the first place.
+    let calls = code.matches("store_transcription(&self.store").count();
     assert!(
-        guards >= stores.len(),
-        "{} store site(s) but only {guards} secure-field guard(s): a dictation into a password \
-         field is stored and replicated on the unguarded path",
-        stores.len()
+        calls >= 2,
+        "the two dictation paths do not share a storage helper, so a guard added to one can be \
+         missed on the other, which is exactly what happened"
+    );
+    assert!(
+        code.contains("fn store_transcription(") && code.contains("secrecy.drop_entirely()"),
+        "the shared helper must be the thing that applies the secure-field decision"
     );
 }
 
@@ -337,7 +343,7 @@ fn r9_h4_the_secure_field_drop_depends_on_a_paste_setting() {
     );
     // And that branch marks the clipboard when the field is secure.
     assert!(
-        code.contains("write_clipboard_marked(&text, should_conceal_clipboard())"),
+        code.contains("write_clipboard_marked(&text, secrecy.conceal_clipboard())"),
         "the injection-disabled branch writes the clipboard unmarked, so with secure input on \
          every other clipboard manager on the machine keeps the password"
     );

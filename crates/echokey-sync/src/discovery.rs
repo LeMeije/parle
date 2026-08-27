@@ -463,9 +463,17 @@ mod adversarial_round4 {
         // Guard against a false pass: if the synthesised records were not
         // recognised at all, nothing would ever be inserted and `lost` would be
         // zero for the wrong reason.
-        assert_eq!(
-            found, RECORDS,
-            "precondition: every synthesised announcement must be a well-formed              EchoKey record that translate actually accepts"
+        // A floor, not an equality. The output channel is bounded and
+        // `translate` uses `try_send`, so under load a handful of PeerFounds are
+        // legitimately dropped; demanding all 100,000 made this test fail in a
+        // busy suite and pass on its own. The floor still cannot be met if the
+        // synthesised records were not recognised at all, which is the false
+        // pass it is here to prevent: that case yields zero.
+        assert!(
+            found > RECORDS / 2,
+            "precondition: every synthesised announcement must be a well-formed \
+             EchoKey record that translate actually accepts, but only {found} of \
+             {RECORDS} were"
         );
 
         // A cap of any sane size (MAX_PEERS, the equivalent one layer up, is 64)
@@ -473,8 +481,11 @@ mod adversarial_round4 {
         // held to lose. A tenth is a generous threshold; the observed figure is
         // essentially all of them, the handful missing being `try_send` drops on
         // the bounded channel.
+        // Measured against `found`, not `RECORDS`. A dropped `try_send` lowers
+        // both counts together, so the ratio survives it; a cap crushes `lost`
+        // alone, which is the thing being asserted.
         assert!(
-            lost < RECORDS / 10,
+            lost < found / 10,
             "{lost} of {RECORDS} attacker-chosen mDNS instance names were still \
              being held when their goodbyes arrived, so nothing is ever evicted: \
              `known` in discovery.rs:181 has no cap. At roughly {PER_ENTRY} bytes \

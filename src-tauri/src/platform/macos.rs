@@ -429,9 +429,9 @@ pub fn inject_text(
     restore: bool,
     press_enter: bool,
 ) -> InjectionOutcome {
-    if secure_input_active() {
-        // Concealed: other clipboard managers must not capture what may be a
-        // password-field dictation.
+    // A genuinely SECURE FIELD: hand it over on the clipboard, concealed, and
+    // let the user paste. We should not be typing into a password field.
+    if focused_field_is_secure() == Some(true) {
         write_clipboard_marked(text, true);
         return InjectionOutcome {
             method: InjectionMethod::ClipboardOnly,
@@ -439,7 +439,26 @@ pub fn inject_text(
         };
     }
 
-    if prefer_ax && ax_insert_text(text) {
+    // SECURE EVENT INPUT is a different question, and conflating the two cost
+    // the product its core feature.
+    //
+    // This branch used to be `if secure_input_active()`, which is a
+    // process-global flag: any application may raise it and it stays raised
+    // until that application lowers it or exits. Measured on the development
+    // machine it reads TRUE with a password manager merely RUNNING and an
+    // ordinary app frontmost. So "insert at cursor", the shipped default, never
+    // fired: every dictation came back "copied, paste it yourself".
+    //
+    // What the flag genuinely means is that the OS will suppress SYNTHETIC
+    // KEYSTROKES, so the Cmd-V path below cannot work. It says nothing about
+    // whether this is a password field, which is what the check above is for.
+    //
+    // Accessibility insertion is not a synthetic keystroke and is not
+    // suppressed, so it is tried FIRST when the flag is up, regardless of the
+    // user's `prefer_ax_insert` preference: the alternative on that path is not
+    // "paste normally", it is "do nothing and make the user paste".
+    let keystrokes_blocked = secure_input_active();
+    if (prefer_ax || keystrokes_blocked) && ax_insert_text(text) {
         if keep_on_clipboard {
             write_clipboard_marked(text, false);
         }
@@ -447,6 +466,16 @@ pub fn inject_text(
             synth_return();
         }
         return InjectionOutcome { method: InjectionMethod::AxInsert, manual_paste_required: false };
+    }
+
+    // Accessibility insertion did not take, and the OS will swallow a synthetic
+    // Cmd-V, so there is nothing left but to hand it over and say so.
+    if keystrokes_blocked {
+        write_clipboard_marked(text, false);
+        return InjectionOutcome {
+            method: InjectionMethod::ClipboardOnly,
+            manual_paste_required: true,
+        };
     }
 
     // Clipboard + Cmd-V.
@@ -678,8 +707,22 @@ pub fn write_clipboard(text: &str) {
 /// Injection writes are marked org.nspasteboard.TransientType so clipboard
 /// managers (including our own monitor) skip them; `concealed` adds
 /// ConcealedType for possibly-sensitive content (secure-input path).
+/// Write text with a claim about the CONTENT, not about who wrote it.
+///
+/// `transient` is false. It used to be hard-coded true for every caller, which
+/// meant the transcript the user asked to keep (`copy_to_clipboard`, a shipped
+/// default) arrived marked "nobody should keep this" and every other clipboard
+/// manager on the machine binned it. The reason given for the marker was so
+/// that "clipboard managers, including our own monitor, skip them", and our own
+/// monitor stopped needing it the moment self-capture moved to `we_wrote_change`.
+///
+/// The restore path made it worse than a one-off: `clipboard_is_concealed()`
+/// counts TransientType, so restoring the user's ordinary clipboard marked
+/// Transient made the NEXT dictation read it back as concealed and restore it
+/// marked ConcealedType. Two dictations laundered an ordinary clipboard entry
+/// into "the OS says this is a secret".
 pub fn write_clipboard_marked(text: &str, concealed: bool) {
-    write_clipboard_impl(text, true, concealed);
+    write_clipboard_impl(text, false, concealed);
 }
 
 /// The pasteboard change count of the last write PARLE made.
@@ -723,6 +766,14 @@ fn write_clipboard_impl(text: &str, transient: bool, concealed: bool) {
         }
         let ns_types = objc2_foundation::NSArray::from_slice(&types);
         pb.declareTypes_owner(&ns_types, None);
+        // Stored HERE, not after the payload. `declareTypes_owner` is the call
+        // that advances `changeCount`; `setString_forType` does not. Storing it
+        // afterwards left a window in which the pasteboard had already changed
+        // and the atomic still held the previous value, so a monitor poll
+        // landing in it saw `we_wrote_change` as false and captured Parle's own
+        // write. For `write_clipboard`, which is deliberately unmarked, nothing
+        // else would have caught it.
+        OUR_LAST_WRITE.store(pb.changeCount() as i64, std::sync::atomic::Ordering::SeqCst);
         let value = NSString::from_str(text);
         pb.setString_forType(&value, &plain);
         if transient {
@@ -731,7 +782,6 @@ fn write_clipboard_impl(text: &str, transient: bool, concealed: bool) {
         if concealed {
             pb.setString_forType(&NSString::from_str(""), &concealed_ty);
         }
-        OUR_LAST_WRITE.store(pb.changeCount() as i64, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

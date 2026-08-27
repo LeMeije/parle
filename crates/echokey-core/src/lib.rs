@@ -9,6 +9,7 @@ mod adversarial_r7_store;
 mod adversarial_r8_data;
 mod adversarial_r9_data;
 mod adversarial_r10_data;
+mod adversarial_r11_data;
 
 pub mod dictionary;
 pub mod formatter;

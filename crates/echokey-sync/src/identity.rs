@@ -148,7 +148,12 @@ fn is_invisible_or_bidi(c: char) -> bool {
         // for both, and they render as a line break in the pairing list.
         | '\u{2028}' | '\u{2029}'
         // Invisible "letters" used to make a label look blank or padded.
-        | '\u{3164}' | '\u{FFA0}'
+        // U+115F and U+1160 are the jamo counterparts of U+3164, so listing
+        // one without the others was banning a construct by example.
+        | '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}'
+        // Blank-rendering characters that are not spaces by category:
+        // OGHAM SPACE MARK, BRAILLE PATTERN BLANK, COMBINING GRAPHEME JOINER.
+        | '\u{1680}' | '\u{2800}' | '\u{034F}'
         // The TAG block: the ASCII-smuggling set.
         | '\u{E0000}'..='\u{E007F}'
         // NON-BREAKING AND EXOTIC SPACES.
@@ -203,12 +208,26 @@ fn is_invisible_or_bidi(c: char) -> bool {
 /// Returns `None` only when nothing usable survives, which is the one case the
 /// caller must report.
 pub fn sanitise_device_name(raw: &str) -> Option<String> {
+    // Internal whitespace runs are COLLAPSED, not merely trimmed.
+    //
+    // Round 10 banned U+00A0 and the exotic spaces because "Ben's<NBSP>MacBook"
+    // renders exactly like "Ben's MacBook" and is a different string on the
+    // wire. An ordinary second ASCII space achieves the identical render: the
+    // pairing list is HTML, so the browser collapses the run, and the UI's
+    // duplicate check is exact string equality, so the two rows are
+    // pixel-identical AND no device id is shown to tell them apart. The
+    // deny-list was closing one door in a wall.
+    //
+    // Collapsing makes the stored name match what the user actually sees, so
+    // two names that render the same ARE the same string, and the collision
+    // disclosure fires.
     let cleaned: String = raw
         .chars()
         .filter(|c| !c.is_control() && *c != '=' && !is_invisible_or_bidi(*c))
         .collect::<String>()
-        .trim()
-        .to_string();
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if cleaned.is_empty() {
         return None;
     }

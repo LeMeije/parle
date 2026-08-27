@@ -62,43 +62,108 @@ pub struct Pipeline {
     start_app: Mutex<(Option<String>, Option<String>)>,
 }
 
-/// Is this dictation going into a password field?
+/// What the accessibility tree says about the field the user is typing into.
 ///
-/// The FOCUSED ELEMENT decides, not the system-wide secure-input flag.
+/// THREE answers, and the third is the important one.
 ///
-/// Round 9 asked `secure_input_active()` and nothing else. That flag is
-/// process-global: any application may raise it and it stays raised until that
-/// application lowers it or exits. Measured on the development machine, it
-/// reads TRUE continuously with a password manager merely RUNNING and no
-/// password field focused anywhere. So the gate matched every dictation, and
-/// the app silently threw all of them away while reporting nothing but a log
-/// line. That is a worse failure than the leak it was closing: the leak needed
-/// a password field, and this needed only a password manager to be open.
+/// `Some(true)` is a password field. `Some(false)` is an ordinary one.
+/// `None` means the probe could not tell, and that is not rare: Chromium and
+/// Electron applications do not expose their accessibility tree until a client
+/// sets `AXManualAccessibility`, so a web password field answers nothing even
+/// with permission granted, and a `sudo` prompt in Terminal has no secure text
+/// field at all.
 ///
-/// `focused_field_is_secure()` asks the accessibility tree what the user is
-/// actually typing into, which is the question. It returns `None` when it
-/// cannot tell (no Accessibility permission, or the element does not answer),
-/// and `None` is deliberately NOT treated as secure: falling back to the global
-/// flag there would restore exactly the behaviour above.
-///
-/// The residual is stated so it is not mistaken for coverage: with
-/// Accessibility permission denied, a dictation into a password field IS
-/// stored. Parle needs that permission for paste-at-cursor anyway and says so
-/// in onboarding, and the clipboard write is still marked concealed on that
-/// path regardless.
-fn into_secure_field() -> bool {
-    platform::imp::focused_field_is_secure().unwrap_or(false)
+/// Both previous rounds collapsed this into a boolean and each picked a
+/// different wrong side. Round 9 treated the process-global secure-input flag
+/// as the answer and discarded every dictation on a machine with a password
+/// manager running. Round 10 mapped "cannot tell" to "not secure" and stored a
+/// web password field's contents in a history that replicates.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FieldSecrecy {
+    Secure,
+    Ordinary,
+    Unknown,
 }
 
-/// Whether to mark the clipboard write concealed.
+/// Sampled ONCE, before anything is injected.
 ///
-/// Wider than `into_secure_field`, deliberately, because the cost is asymmetric:
-/// marking an ordinary transcript concealed loses the user nothing they can see,
-/// while failing to mark a password tells every other clipboard manager on the
-/// machine to keep it. So the global flag counts here even though it must not
-/// count for dropping the row.
-fn should_conceal_clipboard() -> bool {
-    into_secure_field() || platform::imp::secure_input_active()
+/// It has to be taken before the paste, because `inject_text` pastes, waits,
+/// and then posts Return when "press enter after paste" is on, and submitting a
+/// login is precisely what moves focus off the password field. Asking
+/// afterwards got an ordinary element back and stored the password. The
+/// frontmost app is already latched at recording start for the same reason.
+fn sample_field_secrecy() -> FieldSecrecy {
+    match platform::imp::focused_field_is_secure() {
+        Some(true) => FieldSecrecy::Secure,
+        Some(false) => FieldSecrecy::Ordinary,
+        // The global flag is a hint here and nothing more: it says some
+        // application has raised secure input, which is evidence that a
+        // password is somewhere on screen, but not that it is under THIS
+        // caret. Combined with a probe that could not answer, it is enough to
+        // keep the row off the wire and not enough to throw it away.
+        None => FieldSecrecy::Unknown,
+    }
+}
+
+impl FieldSecrecy {
+    /// Never store it: this is a password field and we know it.
+    fn drop_entirely(self) -> bool {
+        self == FieldSecrecy::Secure
+    }
+
+    /// Keep it, but never let it leave this machine.
+    fn keep_local_only(self) -> bool {
+        self == FieldSecrecy::Unknown && platform::imp::secure_input_active()
+    }
+
+    /// Mark the clipboard write concealed.
+    ///
+    /// Wider than the other two, deliberately: marking an ordinary transcript
+    /// concealed loses the user nothing they can see, while failing to mark a
+    /// password tells every other clipboard manager on the machine to keep it.
+    fn conceal_clipboard(self) -> bool {
+        self != FieldSecrecy::Ordinary && platform::imp::secure_input_active()
+            || self == FieldSecrecy::Secure
+    }
+}
+
+/// Store a finished dictation according to what we could learn about the field.
+///
+/// One place, so the two dictation paths cannot drift: the secure-field drop
+/// was added to one of them and missed on the other once already.
+fn store_transcription(
+    store: &std::sync::Arc<parking_lot::Mutex<echokey_core::history::Store>>,
+    tr: &echokey_core::types::TranscriptionResult,
+    app_id: &Option<String>,
+    app_name: &Option<String>,
+    secrecy: FieldSecrecy,
+) -> (i64, Option<String>) {
+    // The second half of the pair is what the USER is told.
+    //
+    // Both of these outcomes are surprising and both used to be a
+    // `tracing::info!` and nothing else: the dictation is not in History and
+    // the user has no way to know why, or that it happened at all. A silent
+    // drop is the failure mode that made a stuck secure-input flag invisible
+    // for a whole round.
+    if secrecy.drop_entirely() {
+        tracing::info!("dictation went to a password field; not storing it");
+        return (-1, Some("Password field: copied, not saved to History".into()));
+    }
+    let g = store.lock();
+    if secrecy.keep_local_only() {
+        tracing::info!(
+            "could not tell whether this went to a password field and secure input is on; \
+             keeping it on this device only"
+        );
+        let id = g
+            .insert_transcription_local_only(tr, app_id.as_deref(), app_name.as_deref())
+            .unwrap_or(-1);
+        return (id, Some("Saved on this device only: this may be a password field".into()));
+    }
+    (
+        g.insert_transcription(tr, app_id.as_deref(), app_name.as_deref()).unwrap_or(-1),
+        None,
+    )
 }
 
 impl Pipeline {
@@ -442,6 +507,8 @@ impl Pipeline {
         let low_confidence = collect_low_confidence(&asr, &text);
 
         // Output: inject + clipboard + history, simultaneously in intent.
+        // Sampled BEFORE `inject_text`, which pastes and may post Return.
+        let secrecy = sample_field_secrecy();
         let injection = if settings.paste.inject && !frontmost_is_self() {
             Some(platform::imp::inject_text(
                 &text,
@@ -457,7 +524,7 @@ impl Pipeline {
             // a secure field was put on the clipboard with no marking at all,
             // so every other clipboard manager on the machine kept it. The
             // injection path had always marked it; this branch never did.
-            platform::imp::write_clipboard_marked(&text, should_conceal_clipboard());
+            platform::imp::write_clipboard_marked(&text, secrecy.conceal_clipboard());
             None
         } else {
             None
@@ -490,15 +557,10 @@ impl Pipeline {
         // password typed into a password field belongs in a history that syncs.
         // The text is still on the clipboard for the user to paste, which is
         // the whole point of that branch.
-        let item_id = if into_secure_field() {
-            tracing::info!("dictation went to a secure field; not storing it in history");
-            -1
-        } else {
-            self.store
-                .lock()
-                .insert_transcription(&tr, app_id.as_deref(), app_name.as_deref())
-                .unwrap_or(-1)
-        };
+        let (item_id, notice) = store_transcription(&self.store, &tr, &app_id, &app_name, secrecy);
+        if let Some(reason) = notice {
+            (self.sink)(PipelineEvent::Empty { reason });
+        }
 
         (self.sink)(PipelineEvent::Completed {
             item_id,
@@ -649,6 +711,8 @@ impl Pipeline {
             return;
         }
 
+        // Sampled BEFORE `inject_text`, which pastes and may post Return.
+        let secrecy = sample_field_secrecy();
         let injection = if settings.paste.inject && !frontmost_is_self() {
             Some(platform::imp::inject_text(
                 &text,
@@ -664,7 +728,7 @@ impl Pipeline {
             // a secure field was put on the clipboard with no marking at all,
             // so every other clipboard manager on the machine kept it. The
             // injection path had always marked it; this branch never did.
-            platform::imp::write_clipboard_marked(&text, should_conceal_clipboard());
+            platform::imp::write_clipboard_marked(&text, secrecy.conceal_clipboard());
             None
         } else {
             None
@@ -687,15 +751,10 @@ impl Pipeline {
         // The SAME secure-field gate as the plain path. This one was missed,
         // so a dictation into a password field that happened to contain a mark
         // was stored and replicated while the other path correctly dropped it.
-        let item_id = if into_secure_field() {
-            tracing::info!("dictation went to a secure field; not storing it in history");
-            -1
-        } else {
-            self.store
-                .lock()
-                .insert_transcription(&tr, app_id.as_deref(), app_name.as_deref())
-                .unwrap_or(-1)
-        };
+        let (item_id, notice) = store_transcription(&self.store, &tr, &app_id, &app_name, secrecy);
+        if let Some(reason) = notice {
+            (self.sink)(PipelineEvent::Empty { reason });
+        }
 
         (self.sink)(PipelineEvent::Completed {
             item_id,

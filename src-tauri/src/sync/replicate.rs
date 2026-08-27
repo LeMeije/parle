@@ -413,6 +413,33 @@ fn serve<S: Read + Write>(
             .collect();
         (sources, ours)
     };
+    // A cursor we could never reach is a cursor we must not trust.
+    //
+    // A cursor is only meaningful while our clock moves forwards. If ours steps
+    // BACK past the skew window, the high clocks in our history were stamped
+    // while the clocks agreed, so the peer accepted those rows and its cursor
+    // legitimately sits above anything we can stamp now. `next_clock_impl`
+    // clamps at `now + skew` deliberately, because that is what lets a machine
+    // recover from a clock that ran FAST; the price is that after a backwards
+    // step everything we write lands below the peer's cursor, and `serve` would
+    // never offer it. Nothing lowers a cursor and nothing restamps a tombstone,
+    // so a password deleted in that window would never reach the other machine.
+    //
+    // The peer's OWN ADVERTISED MARK is the evidence, and it is the only piece
+    // that survives. I first detected this by looking for a high clock in our
+    // own history, which fails on precisely the case that matters: deleting the
+    // row removes it, so the evidence is destroyed by the very delete we are
+    // trying to propagate. The mark the peer sends us every exchange cannot be
+    // destroyed that way.
+    //
+    // Judged per source, because a delete we make of a row another device wrote
+    // carries OUR clamped clock while being served under THAT device's source.
+    //
+    // A hostile peer can advertise an absurd mark to make us re-offer in full.
+    // That costs us bandwidth to a device we have already paired with and told
+    // our whole history to, so it buys an attacker nothing it did not have.
+    let unreachable_cursor = |floor: i64| floor > now_ms() + MAX_SKEW_MS;
+
     for source in sources.iter() {
         let source = source.as_str();
         // A device's OWN rows are served back to it too, and deliberately.
@@ -435,10 +462,38 @@ fn serve<S: Read + Write>(
         //
         // With the peer's own (clock, origin) we resume exactly where the last
         // run stopped, whether it stopped between pages or mid-millisecond.
+        // Offered from the beginning when this machine's clock is behind its
+        // own history. See `clock_behind`, computed once above.
+        //
+        // A cursor is only meaningful while our clock moves forwards. If it
+        // steps BACK past the skew window, the high clocks in our history were
+        // stamped while the clocks agreed, so the peer accepted those rows and
+        // its cursor legitimately sits above anything we can stamp now.
+        // `next_clock_impl` clamps at `now + skew`, deliberately, because that
+        // is what lets a machine recover from a clock that ran FAST; the price
+        // is that after a backwards step everything we write lands below the
+        // peer's cursor and `serve` would never offer it. Nothing lowers a
+        // cursor and nothing restamps a tombstone, so the delete of a password
+        // made in that window would never reach the other machine.
+        //
+        // The two cases cannot be told apart from the stamp, which is why three
+        // rounds of clock rules each fixed one and broke the other. They are
+        // trivially told apart here: if our own history holds a clock our wall
+        // clock cannot reach, stop trusting the cursor for our own source and
+        // offer everything. Re-applying is idempotent, it costs one full pass
+        // per exchange, and it self-clears when the wall clock catches up.
+        let floor = floor_for(source, peer_marks);
         let (mut after, mut after_origin) = if resend_all {
             (resend_from, String::new())
+        } else if unreachable_cursor(floor.0) {
+            tracing::warn!(
+                "sync: {peer_id} holds a mark for {source} at {} which this machine's clock \
+                 cannot reach; offering in full until the clocks agree",
+                floor.0
+            );
+            (0, String::new())
         } else {
-            floor_for(source, peer_marks)
+            floor
         };
         let mut served = 0usize;
         let mut truncated_here = false;
@@ -591,11 +646,16 @@ fn serve<S: Read + Write>(
         // stopping point; the rest follows next exchange.
         let tomb_ceiling = if truncated_here { Some(after) } else { None };
 
-        // Tombstones for the same source, resumed from the same pair.
+        // Tombstones for the same source, resumed from the same pair, and
+        // ignoring the cursor under the same condition: a delete made after a
+        // backwards clock step is exactly what must not be stranded.
+        let floor = floor_for(source, peer_marks);
         let (mut after, mut after_origin) = if resend_all {
             (resend_from, String::new())
+        } else if unreachable_cursor(floor.0) {
+            (0, String::new())
         } else {
-            floor_for(source, peer_marks)
+            floor
         };
         let mut tomb_served = 0usize;
         for _ in 0..MAX_BATCHES {

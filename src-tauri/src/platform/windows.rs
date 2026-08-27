@@ -643,15 +643,46 @@ fn register_format(name: &str) -> u32 {
     unsafe { RegisterClipboardFormatW(windows::core::PCWSTR(wide.as_ptr())) }
 }
 
-/// Windows marks every write it makes, so the concealed variant is the same
-/// call. Kept as a separate name so `pipeline` can express the intent on both
-/// platforms without a `cfg`.
-pub fn write_clipboard_marked(text: &str, _concealed: bool) {
-    write_clipboard(text);
+/// Write text with a claim about the CONTENT.
+///
+/// Only a concealed write declares the exclusion formats. The unconditional
+/// version told Win+V and Cloud Clipboard to discard the row the user had just
+/// deliberately pressed Copy on in Parle's own palette, which is the same
+/// defect the macOS side fixed and this one did not mirror. Self-capture is
+/// suppressed by sequence number, not by relabelling the user's data.
+pub fn write_clipboard_marked(text: &str, concealed: bool) {
+    if concealed {
+        write_clipboard_excluded(text);
+    } else {
+        write_clipboard(text);
+    }
 }
 
-/// Write text, marked so Win+V history / cloud sync / other monitors skip it.
+/// The clipboard sequence number of the last write PARLE made.
+///
+/// Self-capture is suppressed by identity, matching macOS. Marking every write
+/// with the exclusion formats also worked and told Win+V and Cloud Clipboard to
+/// discard the row the user had just deliberately pressed Copy on.
+static OUR_LAST_WRITE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Did WE write the clipboard's current contents?
+pub fn we_wrote_change(seq: u32) -> bool {
+    OUR_LAST_WRITE.load(std::sync::atomic::Ordering::SeqCst) == seq
+}
+
+/// Write text as the USER's own copy: no exclusion markers.
 pub fn write_clipboard(text: &str) {
+    write_clipboard_inner(text, false);
+}
+
+/// Write text marked so Win+V history, Cloud Clipboard and other monitors skip
+/// it. For content we have reason to believe is a secret, not merely for our
+/// own writes.
+pub fn write_clipboard_excluded(text: &str) {
+    write_clipboard_inner(text, true);
+}
+
+fn write_clipboard_inner(text: &str, exclude: bool) {
     unsafe {
         if !open_clipboard_retry() {
             return;
@@ -670,26 +701,29 @@ pub fn write_clipboard(text: &str) {
                 );
             }
         }
-        // Every format we would HONOUR on the way in, we also declare on the
-        // way out. Same two lists, so they cannot drift apart again.
-        for name in EXCLUDE_MARKER_FORMATS.iter().chain(EXCLUDE_DWORD_FORMATS.iter()) {
-            let fmt = register_format(name);
-            if fmt != 0 {
-                // A DWORD zero payload (0 = exclude for CanIncludeInClipboardHistory).
-                if let Ok(hmem) = GlobalAlloc(GMEM_MOVEABLE, 4) {
-                    let ptr = GlobalLock(hmem) as *mut u32;
-                    if !ptr.is_null() {
-                        *ptr = 0;
-                        let _ = GlobalUnlock(hmem);
-                        let _ = SetClipboardData(
-                            fmt,
-                            windows::Win32::Foundation::HANDLE(hmem.0 as _),
-                        );
+        if exclude {
+            // Every format we would HONOUR on the way in, we also declare on
+            // the way out. Same two lists, so they cannot drift apart again.
+            for name in EXCLUDE_MARKER_FORMATS.iter().chain(EXCLUDE_DWORD_FORMATS.iter()) {
+                let fmt = register_format(name);
+                if fmt != 0 {
+                    // A DWORD zero payload (0 = exclude).
+                    if let Ok(hmem) = GlobalAlloc(GMEM_MOVEABLE, 4) {
+                        let ptr = GlobalLock(hmem) as *mut u32;
+                        if !ptr.is_null() {
+                            *ptr = 0;
+                            let _ = GlobalUnlock(hmem);
+                            let _ = SetClipboardData(
+                                fmt,
+                                windows::Win32::Foundation::HANDLE(hmem.0 as _),
+                            );
+                        }
                     }
                 }
             }
         }
         let _ = CloseClipboard();
+        OUR_LAST_WRITE.store(GetClipboardSequenceNumber(), std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -763,6 +797,11 @@ impl ClipboardMonitor {
                         let now = unsafe { GetClipboardSequenceNumber() };
                         if now != last {
                             last = now;
+                            // Our OWN write, by identity rather than by
+                            // relabelling the user's data. See OUR_LAST_WRITE.
+                            if we_wrote_change(now) {
+                                continue;
+                            }
                             if let Some(text) = read_clipboard_unless_excluded() {
                                 if text.trim().is_empty() {
                                     continue;
@@ -1014,10 +1053,27 @@ pub fn secure_input_active() -> bool {
 /// "this is definitely not a password field".
 pub fn focused_field_is_secure() -> Option<bool> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetGUIThreadInfo, GetWindowLongW, GetWindowThreadProcessId,
-        GUITHREADINFO, GWL_STYLE,
+        GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, SendMessageTimeoutW,
+        GUITHREADINFO, SMTO_ABORTIFHUNG,
     };
-    const ES_PASSWORD: i32 = 0x0020;
+    // EM_GETPASSWORDCHAR, not the ES_PASSWORD style bit.
+    //
+    // The style-bit version was wrong in the dangerous direction. 0x0020 is
+    // only ES_PASSWORD for windows of the EDIT class; every common control
+    // class gives bit 5 its own meaning, and the class was never checked. A
+    // focused tree view, owner-draw list or left-text checkbox therefore
+    // reported SECURE, and the dictation was silently dropped with nothing but
+    // a log line: round 9's headline failure reached through a different
+    // mechanism, on the platform the branch is named after.
+    //
+    // EM_GETPASSWORDCHAR is meaningless outside an edit control, so a window
+    // that is not one simply does not answer, and a style bit cannot spoof it.
+    // A non-zero result is the masking character, which is what a password
+    // field has and an ordinary edit does not.
+    //
+    // SMTO_ABORTIFHUNG with a short timeout, because this runs on the dictation
+    // path and a hung foreground application must not stall it.
+    const EM_GETPASSWORDCHAR: u32 = 0x00D2;
     unsafe {
         let fg = GetForegroundWindow();
         if fg.0.is_null() {
@@ -1037,11 +1093,24 @@ pub fn focused_field_is_secure() -> Option<bool> {
         if gti.hwndFocus.0.is_null() {
             return None;
         }
-        let style = GetWindowLongW(gti.hwndFocus, GWL_STYLE);
-        if style == 0 {
+        let mut out: usize = 0;
+        let rc = SendMessageTimeoutW(
+            gti.hwndFocus,
+            EM_GETPASSWORDCHAR,
+            None,
+            None,
+            SMTO_ABORTIFHUNG,
+            100,
+            Some(&mut out as *mut usize),
+        );
+        if rc.0 == 0 {
+            // Timed out, or the window does not handle the message. Either way
+            // we could not tell, which is a THIRD answer and not a `false`:
+            // the caller keeps such a dictation locally rather than dropping it
+            // or replicating it.
             return None;
         }
-        Some(style & ES_PASSWORD != 0)
+        Some(out != 0)
     }
 }
 

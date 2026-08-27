@@ -390,11 +390,14 @@ fn r8_h3_windows_honours_every_exclusion_format_it_writes() {
     }
 
     // And both paths must consume both constants.
+    // The declaring writer is `write_clipboard_inner` now: `write_clipboard`
+    // and `write_clipboard_excluded` are thin callers of it, so that the user's
+    // own Copy is no longer told to exclude itself from Win+V.
     let writer = src
-        .split("pub fn write_clipboard(")
+        .split("fn write_clipboard_inner(")
         .nth(1)
-        .and_then(|s| s.split("\npub fn ").next())
-        .expect("write_clipboard is in the file");
+        .and_then(|s| s.split("\nfn ").next())
+        .expect("write_clipboard_inner is in the file");
     let reader = src
         .split("fn read_clipboard_unless_excluded()")
         .nth(1)
