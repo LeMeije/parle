@@ -289,57 +289,159 @@ fn r6sec_an_excluded_kind_cannot_be_touched_by_a_relayed_change() {
 }
 
 // ===========================================================================
-// R6S-4. THE SELF-WATERMARK. `docs/SYNC_DESIGN.md`: "A device does not
-// advertise a mark for itself at all."
+// R6S-4. THE SELF-WATERMARK.
 //
-// `history.rs::mark_received_in` deliberately drops the "not our own source"
-// guard, and the drain tombstone arm banks a receipt for whatever source the
-// tombstone names once `held` is true — which is true for every row of ours a
-// peer has ever received. So a peer's ordinary delete of one of our rows makes
-// us start advertising a mark for our OWN device id to that peer.
+// TRIAGE: the finding is real, the remedy it named was not.
 //
-// The existing test that claims to pin this invariant
-// (`history.rs::we_never_advertise_a_watermark_for_ourselves`) probes with
-// `note_received(me, me, i64::MAX)`; i64::MAX is refused by the range check
-// for an unrelated reason, so the assertion passes vacuously.
+// The reviewer's claim was structural — `docs/SYNC_DESIGN.md` says "A device
+// does not advertise a mark for itself at all", and a peer's ordinary delete of
+// one of our rows makes us advertise exactly that. Both halves are true. But
+// that sentence describes a design in which `serve` offered ITEMS for every
+// source it held, and it does not any more: since content became
+// author-only, a peer never sends us items attributed to our own device.
+// A `(peer, our own id)` mark therefore gates ONE stream — the deletes that
+// peer relays back to us about our own rows — which is precisely the stream a
+// receipt should gate.
+//
+// Removing the mark, as the reviewer proposed, would make that stream ungated:
+// every peer would re-offer every tombstone it holds for our source on every
+// exchange for the life of the pairing, with nothing able to say "stop". That
+// is a criterion C failure traded for a doc sentence.
+//
+// What was genuinely broken was the ORDERING the mark relies on. A cursor is a
+// promise never to ask below a clock again, which is only sound if the stream
+// is created in clock order. Tombstones were stamped `max(now, row.updated_at)`,
+// so deleting a row from a peer inside the accepted skew produced a tombstone
+// up to two minutes in the FUTURE; the mark went there; and the next delete,
+// stamped normally, fell below it and was never offered again. A delete lost by
+// nothing more exotic than deleting two synced rows in a row.
+//
+// `Store::delete_clock` fixes that at the source: a local delete is stamped
+// strictly above every tombstone we already hold for that source, bounded so it
+// can never exceed what a peer will accept. The tests below assert the
+// behaviour that actually matters — no delete of our own rows can be hidden by
+// the mark — rather than the absence of a table row.
+//
+// `docs/SYNC_DESIGN.md` has been corrected to match.
 // ===========================================================================
 #[test]
-fn r6sec_a_peer_can_make_us_advertise_a_watermark_for_our_own_device() {
+fn r6sec_a_relayed_delete_of_our_own_row_is_never_hidden_by_the_mark_it_sets() {
     let ours = store_for(A);
-    let t = now_ms() - 100_000;
-    plant(&ours, A, A, "ours-1", "transcription", "our row", t);
+    // A row of ours that came back from a peer whose clock runs fast, well
+    // inside the accepted skew. This is what used to poison the mark.
+    let fast = now_ms() + 90_000;
+    plant(&ours, A, A, "ours-fast", "transcription", "recorded here", fast);
+    plant(&ours, A, A, "ours-normal", "transcription", "also recorded here", now_ms() - 1_000);
 
-    // First: the store-level primitive, with a clock inside the accepted range.
-    {
-        let g = ours.lock();
-        g.note_received(B, A, now_ms() - 1_000).unwrap();
-        let marks = g.watermarks(B).unwrap();
-        assert!(
-            marks.iter().all(|(src, _)| src != A),
-            "note_received recorded a mark for OUR OWN source: {marks:?}"
-        );
+    // The peer deletes BOTH, in the order that used to lose the second one:
+    // the future-stamped row first.
+    let peer = store_for(B);
+    for (origin, clock) in [("ours-fast", fast), ("ours-normal", now_ms() - 1_000)] {
+        plant(&peer, A, A, origin, "transcription", "copy", clock);
     }
-}
-
-#[test]
-fn r6sec_an_ordinary_relayed_delete_makes_us_advertise_a_mark_for_ourselves() {
-    let ours = store_for(A);
-    let t = now_ms() - 100_000;
-    plant(&ours, A, A, "ours-1", "transcription", "our row", t);
-
-    let deleted_at = now_ms() - 1_000;
+    let first = {
+        let g = peer.lock();
+        let id = g
+            .conn_for_test()
+            .query_row(
+                "SELECT id FROM items WHERE origin_id='ours-fast'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        g.delete_item_local(id).unwrap();
+        g.conn_for_test()
+            .query_row(
+                "SELECT deleted_at FROM tombstones WHERE origin_id='ours-fast'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    // Deliver that one, which is what sets our mark for our own source.
+    let t1 = first;
     against_scripted_peer(&ours, both(), Retention { oldest_allowed: None }, move |s| {
-        // Exactly what an honest peer sends when the user deletes, on THAT
-        // machine, a row this machine wrote.
-        s.send(&SyncMessage::Tombstones { entries: vec![wire_tomb(A, "ours-1", deleted_at)], more: false })
+        s.send(&SyncMessage::Tombstones { entries: vec![wire_tomb(A, "ours-fast", t1)], more: false })
             .unwrap();
     });
+    assert!(text_of(&ours, A, "ours-fast").is_none(), "precondition: the first delete landed");
 
-    let marks = ours.lock().watermarks(B).unwrap();
+    // The SECOND delete, made afterwards on the peer, must carry a clock the
+    // mark cannot hide. That is `delete_clock`'s whole job.
+    let second = {
+        let g = peer.lock();
+        let id = g
+            .conn_for_test()
+            .query_row("SELECT id FROM items WHERE origin_id='ours-normal'", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+        g.delete_item_local(id).unwrap();
+        g.conn_for_test()
+            .query_row(
+                "SELECT deleted_at FROM tombstones WHERE origin_id='ours-normal'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    let mark = ours
+        .lock()
+        .watermarks(B)
+        .unwrap()
+        .into_iter()
+        .find(|(src, _)| src == A)
+        .map(|(_, c)| c)
+        .unwrap_or(0);
     assert!(
-        marks.iter().all(|(src, _)| src != A),
-        "after one relayed delete we advertise a mark for our own device id to the peer: {marks:?}. \
-         The peer then uses it as the floor for everything it would relay about our rows."
+        second > mark,
+        "the second delete is stamped {second}, at or below the mark {mark} the first one set, \
+         so the peer will never offer it: a delete lost by deleting two synced rows in a row"
+    );
+
+    // And it does in fact land.
+    let t2 = second;
+    against_scripted_peer(&ours, both(), Retention { oldest_allowed: None }, move |s| {
+        s.send(&SyncMessage::Tombstones {
+            entries: vec![wire_tomb(A, "ours-normal", t2)],
+            more: false,
+        })
+        .unwrap();
+    });
+    assert!(
+        text_of(&ours, A, "ours-normal").is_none(),
+        "the second delete of one of our own rows never landed"
+    );
+}
+
+/// The mark a relayed delete sets is a RECEIPT — bounded by what actually
+/// arrived — and not an invitation to park it in the future.
+#[test]
+fn r6sec_a_peer_cannot_park_the_mark_it_sets_for_our_own_source() {
+    let ours = store_for(A);
+    plant(&ours, A, A, "ours-1", "transcription", "our row", now_ms() - 100_000);
+
+    // Far beyond the skew window: refused outright, and nothing banked.
+    let absurd = i64::MAX;
+    against_scripted_peer(&ours, both(), Retention { oldest_allowed: None }, move |s| {
+        s.send(&SyncMessage::Tombstones { entries: vec![wire_tomb(A, "ours-1", absurd)], more: false })
+            .unwrap();
+    });
+    let mark = ours
+        .lock()
+        .watermarks(B)
+        .unwrap()
+        .into_iter()
+        .find(|(src, _)| src == A)
+        .map(|(_, c)| c);
+    assert!(
+        mark.map(|c| c < now_ms() + 200_000).unwrap_or(true),
+        "a peer parked the mark we keep for our own source at {mark:?}; \
+         everything it later relays about our rows falls below it"
+    );
+    assert!(
+        text_of(&ours, A, "ours-1").is_some(),
+        "an out-of-range tombstone must be refused, not applied"
     );
 }
 
@@ -648,45 +750,54 @@ fn r6sec_a_real_pairing_leaves_no_key_material_anywhere_persisted() {
 // ===========================================================================
 #[test]
 fn r6sec_a_device_name_the_ui_accepts_can_disable_sync_entirely() {
-    use echokey_sync::{Discovery, DiscoveryConfig};
+    use echokey_sync::{sanitise_device_name, validate_device_name, Discovery, DiscoveryConfig};
 
-    // Exactly what `sync_set_device_name` stores for these inputs.
-    let accepted_by_the_ui = |raw: &str| -> String {
-        let t = raw.trim().to_string();
-        assert!(!t.is_empty(), "the only check the command makes");
-        t.chars().take(64).collect()
-    };
-
+    // The PRODUCTION path, not a copy of it.
+    //
+    // This test used to inline the command's old body — trim, then take 64
+    // CHARACTERS — and assert that the result was unsendable. It was, and that
+    // was the finding: `validate_device_name` counts BYTES and refuses `=`,
+    // because the name rides in an mDNS TXT `key=value` pair, so the settings
+    // layer happily stored names the wire would not carry. Every `Hello` then
+    // failed to encode and discovery refused to start, which the UI showed as
+    // "no usable network".
+    //
+    // `sync_set_device_name` now runs `sanitise_device_name`, so the test calls
+    // that instead of restating it. Pointing at the real function is the whole
+    // point: an inlined copy would keep passing after the next change to the
+    // rule, whichever way that change went.
     for raw in [
-        "Ben=Work",                                   // '=' is legal in the UI
-        "デスクトップ・パソコン・書斎の机の上のやつです", // 64 chars, >64 bytes
+        "Ben=Work",                                     // '=' is legal in the UI
+        "デスクトップ・パソコン・書斎の机の上のやつです",   // 64 chars, >64 bytes
+        "  Ben's G14  ",                                // ordinary, just untrimmed
+        "line\nbreak",                                  // a control character
     ] {
-        let name = accepted_by_the_ui(raw);
-        assert!(name.chars().count() <= 64, "the command's own limit is satisfied");
+        let name = sanitise_device_name(raw)
+            .unwrap_or_else(|| panic!("{raw:?} has usable characters and must survive"));
 
-        // 1. Every exchange dies on its first message.
+        validate_device_name(&name).unwrap_or_else(|e| {
+            panic!("sanitise_device_name returned {name:?}, which the wire refuses: {e}")
+        });
+
+        // 1. Every exchange starts with this message. It must encode.
         let hello = SyncMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
             device_id: DeviceId::parse(A).unwrap(),
             device_name: name.clone(),
         };
-        assert!(
-            hello.encode().is_ok(),
-            "a name the settings layer accepted ({name:?}) makes every Hello unsendable, \
-             so exchange() fails on its first message and sync never works"
-        );
+        hello.encode().unwrap_or_else(|e| {
+            panic!("a stored name ({name:?}) makes every Hello unsendable: {e}")
+        });
 
-        // 2. And discovery refuses to start, which the UI reports as a network
-        //    problem rather than a bad name.
+        // 2. And discovery must not refuse it, or the UI reports a bad name as
+        //    a network problem.
         let cfg = DiscoveryConfig {
             device_id: DeviceId::parse(A).unwrap(),
             device_name: name.clone(),
             port: 0,
         };
         match Discovery::start(&cfg) {
-            Ok((d, _rx)) => {
-                drop(d);
-            }
+            Ok((d, _rx)) => drop(d),
             Err(e) => {
                 let msg = e.to_string();
                 assert!(
@@ -697,4 +808,11 @@ fn r6sec_a_device_name_the_ui_accepts_can_disable_sync_entirely() {
             }
         }
     }
+
+    // A name with nothing usable in it is the one case the caller must report,
+    // and `sync_set_device_name` does — it returns the "give this device a
+    // name" error rather than storing something the wire will refuse.
+    assert!(sanitise_device_name("===").is_none());
+    assert!(sanitise_device_name("   ").is_none());
+    assert!(sanitise_device_name("").is_none());
 }

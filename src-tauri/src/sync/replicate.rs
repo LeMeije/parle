@@ -762,13 +762,68 @@ fn drain<S: Read + Write>(
                         .lock()
                         .holds_identity(t.source_device.as_str(), &t.origin_id)
                         .map_err(|e| ReplicateError::Store(e.to_string()))?;
+                    // A relayed delete for an identity we do not hold.
+                    //
+                    // Refusing it and banking nothing closed a loop with no
+                    // exit. `serve` offers tombstones for EVERY source it
+                    // holds, and a refusal that might one day be reversed
+                    // cannot bank a receipt, so the sender never stopped
+                    // offering and the receiver never stopped refusing — on
+                    // every exchange, for the life of the pairing. The sequence
+                    // is ordinary: A syncs with C, the user clears history on
+                    // A, A then pairs with B, and B can never hold C's rows,
+                    // because a device serves only rows it authored. Clear
+                    // History over a retired device's rows puts up to
+                    // MAX_TOMBSTONES_PER_SOURCE of them on every exchange.
+                    //
+                    // What decides it is whether we could EVER acquire the
+                    // identity, and we can answer that, because content reaches
+                    // us only from its author:
+                    //
+                    // - The source is a device we have paired with, or one we
+                    //   already hold rows or tombstones for: the row can still
+                    //   arrive, so the refusal is TEMPORARY and must bank
+                    //   nothing. A cursor parked at this tombstone's clock
+                    //   would make the delete unreachable for good — a password
+                    //   the user deleted, alive here for ever, because the
+                    //   delete happened to arrive before its row.
+                    //
+                    // - Anything else: nothing will ever hand us that row, so
+                    //   the refusal is PERMANENT and the receipt is safe to
+                    //   bank. That is what makes the exchange go quiet.
+                    //
+                    // Storing the tombstone instead was tried and is wrong: it
+                    // lets a paired device pre-emptively tombstone identities it
+                    // invented, which is the whole reason this gate exists.
+                    //
+                    // Residual, deliberate: a device still in the paired roster
+                    // that never comes back leaves its relayed tombstones being
+                    // re-offered once per exchange, because we cannot prove the
+                    // row will not arrive tomorrow. It is bounded by what the
+                    // peer holds for that source, and unpairing the dead device
+                    // makes the refusal permanent and stops it.
+                    let may_still_arrive = attribution
+                        .known
+                        .iter()
+                        .any(|d| d == t.source_device.as_str())
+                        || store
+                            .lock()
+                            .known_sources()
+                            .map_err(|e| ReplicateError::Store(e.to_string()))?
+                            .iter()
+                            .any(|src| src == t.source_device.as_str());
                     if !authored && !held {
-                        // TEMPORARY refusal, and the receipt is deliberately NOT
-                        // banked. We may acquire this row from its author later,
-                        // and a cursor parked at this tombstone's clock would
-                        // make the delete unreachable for good — a password the
-                        // user deleted, alive on this machine forever, because
-                        // the delete happened to arrive first.
+                        if !may_still_arrive {
+                            // Range-checked inside `note_received`.
+                            store
+                                .lock()
+                                .note_received(
+                                    attribution.peer_id,
+                                    t.source_device.as_str(),
+                                    t.deleted_at,
+                                )
+                                .map_err(|e| ReplicateError::Store(e.to_string()))?;
+                        }
                         stats.refused += 1;
                         continue;
                     }

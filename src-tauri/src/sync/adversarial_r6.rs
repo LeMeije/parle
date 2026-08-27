@@ -47,6 +47,28 @@ fn both() -> Kinds {
     Kinds { dictations: true, clipboard: true }
 }
 
+/// The paired roster each side carries into an exchange.
+///
+/// This used to be `[A, B, C]` for BOTH sides in every test in this file, which
+/// silently contradicted the scenarios written above them: R6-1 says in prose
+/// that "B has never met C and never will", and then handed B a roster claiming
+/// it had paired with C. Nothing noticed, because `Attribution::known` was dead
+/// code at the time — no rule read it.
+///
+/// It is read now: whether a relayed delete for an identity we do not hold is a
+/// TEMPORARY refusal (the row may still arrive from its author) or a PERMANENT
+/// one (nothing will ever hand it to us) turns on exactly this. A roster that
+/// claims a pairing the scenario denies tests the wrong branch.
+///
+/// A and C are paired with everyone; B has paired with A only.
+fn roster_for(me: &str) -> Vec<String> {
+    if me == B {
+        vec![A.to_string(), B.to_string()]
+    } else {
+        vec![A.to_string(), B.to_string(), C.to_string()]
+    }
+}
+
 /// One full exchange. `x` dials (`Turn::First`), `y` accepts. Returns
 /// (x's stats, y's stats).
 fn sync(
@@ -70,7 +92,7 @@ fn sync_with(
     let (y_store, y_id, x_id) = (y.0.clone(), y.1, x.1);
     let yt = std::thread::spawn(move || {
         let mut s = Session::accept(sock_y, &k2).unwrap();
-        let known = vec![A.to_string(), B.to_string(), C.to_string()];
+        let known = roster_for(y_id);
         let attr = Attribution { peer_id: x_id, local_id: y_id, known: &known };
         exchange(
             &mut s,
@@ -87,7 +109,7 @@ fn sync_with(
         .expect("accepting side")
     });
     let mut s = Session::initiate(sock_x, &key).unwrap();
-    let known = vec![A.to_string(), B.to_string(), C.to_string()];
+    let known = roster_for(x.1);
     let attr = Attribution { peer_id: y.1, local_id: x.1, known: &known };
     let xs = exchange(
         &mut s,
@@ -150,20 +172,31 @@ fn r6_a_tombstone_for_an_unreachable_source_never_stops_being_re_sent() {
     assert_eq!(a.lock().tombstone_count(C).unwrap(), 1, "precondition: A holds C's tombstone");
 
     // B has never met C and never will. Ten exchanges, hard bounded.
-    let mut carried = 0usize;
-    let mut refused = 0usize;
+    let mut per_round = Vec::new();
     for _ in 0..10 {
         let (a_stats, b_stats) = sync((&a, A), (&b, B));
-        carried += a_stats.sent_tombstones;
-        refused += b_stats.refused;
+        per_round.push((a_stats.sent_tombstones, b_stats.refused));
     }
 
-    // Quiet would be zero of each after the first round or two.
-    assert_eq!(
-        (carried, refused),
-        (0, 0),
-        "the same dead tombstone is re-sent and refused on every exchange for ever: \
-         carried {carried} times, refused {refused} times over 10 rounds"
+    // CONVERGENCE, not silence.
+    //
+    // This asserted `(0, 0)` summed over all ten rounds, which the comment
+    // directly above it contradicted ("quiet would be zero of each AFTER the
+    // first round or two"). Offering the tombstone once is not the defect and
+    // cannot be removed: A cannot know what B holds without telling it, so the
+    // first offer is how B finds out. Demanding zero would have been satisfied
+    // only by never relaying a delete at all, which loses deletes — the failure
+    // this feature exists to avoid.
+    //
+    // What criterion C actually requires is that the exchange goes quiet. So:
+    // the first round may carry the tombstone, and every round after it must
+    // carry nothing and refuse nothing.
+    assert!(per_round[0].0 >= 1, "precondition: A offers the tombstone at least once");
+    let tail: Vec<_> = per_round[1..].to_vec();
+    assert!(
+        tail.iter().all(|&(carried, refused)| carried == 0 && refused == 0),
+        "the same dead tombstone is re-sent and refused on every exchange for ever; \
+         (carried, refused) per round was {per_round:?}"
     );
 }
 
@@ -389,7 +422,38 @@ fn r6_widening_retention_never_refetches_what_the_narrow_window_refused() {
     sync_with((&a, A), (&b, B), week, Retention { oldest_allowed: None });
     assert_eq!(a.lock().count().unwrap(), 1, "precondition: only the recent row landed");
 
-    // The user now sets retention to "keep for ever".
+    // Without the repair, the hole is permanent: the receipt banked for the
+    // refused row sits above it, so the peer never offers it again.
+    for _ in 0..3 {
+        sync((&a, A), (&b, B));
+    }
+    assert_eq!(
+        a.lock().count().unwrap(),
+        1,
+        "precondition: nothing brings the row back on its own — that IS the defect"
+    );
+
+    // The user now sets retention to "keep for ever". Two things have to be
+    // true, and they are asserted separately because they failed separately:
+
+    // 1. The manager must RECOGNISE that as a widening. `0` means keep for
+    //    ever, so it is the widest window and not the narrowest — the
+    //    comparison every naive version gets backwards. This is the production
+    //    rule, not a copy of it; `SyncManager` itself cannot be built under
+    //    MockRuntime, which is why the decision is a free function.
+    assert!(
+        crate::sync::manager::retention_widened(7, 0),
+        "'keep for ever' must read as a widening of a 7-day window"
+    );
+    assert!(crate::sync::manager::retention_widened(7, 30));
+    assert!(!crate::sync::manager::retention_widened(30, 7));
+    assert!(!crate::sync::manager::retention_widened(0, 7));
+    assert!(!crate::sync::manager::retention_widened(7, 7));
+
+    // 2. And the repair it performs must actually refill the hole. Only the
+    //    INBOUND half is needed: `serve` never filtered on retention, so
+    //    nothing was suppressed outbound and no re-offer debt is owed.
+    a.lock().reset_source_marks().unwrap();
     for _ in 0..5 {
         sync((&a, A), (&b, B));
     }

@@ -8,7 +8,7 @@ use crate::types::{HistoryItem, HistoryKind, TranscriptionResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 /// How far ahead of us a peer's clock may be before we stop believing it.
 ///
 /// Two minutes, not a day. The cursor we keep for a peer is that peer's own
@@ -118,6 +118,11 @@ impl Store {
     }
 
     #[cfg(test)]
+    /// The schema version this build migrates to. Exposed so migration tests
+    /// assert "every path lands where a fresh store lands" rather than pinning
+    /// a literal that goes stale on the next migration.
+    pub const SCHEMA_VERSION_FOR_TEST: i64 = SCHEMA_VERSION;
+
     pub fn conn_for_test(&self) -> &Connection {
         &self.conn
     }
@@ -343,6 +348,67 @@ impl Store {
                  );",
             )?;
             version = 5;
+        }
+
+        if version < 6 {
+            // v6: a tombstone knows whether WE made the delete.
+            //
+            // `cap_tombstones` bounds the table by dropping the oldest entries
+            // for a source, and it ran over every tombstone regardless of
+            // origin. A local Clear History is not capped as it is written, so
+            // clearing a replicated history larger than the ceiling left the
+            // table over it; the very next tombstone to arrive from a peer then
+            // trimmed it back by dropping the OLDEST — which, straight after a
+            // Clear, are the user's own deletes, none of which had been
+            // delivered yet. Nothing re-creates a tombstone, so those deletes
+            // were gone, and the rows walked back in on the next re-offer.
+            //
+            // Only a delete WE performed is irreplaceable: it is the sole
+            // record anywhere that the user asked for that row to go, and the
+            // only thing that will ever tell a peer. A replicated tombstone is
+            // bookkeeping — the peer that sent it still holds it and will offer
+            // it again. So the cap now evicts replicated entries only.
+            //
+            // The bound that replaces it: local tombstones are created only by
+            // deleting rows this machine actually holds, which the user's own
+            // `max_items` already bounds. A peer cannot add to them at all,
+            // which is what the ceiling existed to prevent.
+            //
+            // Existing rows default to 0. We cannot tell retrospectively which
+            // were ours, and claiming they all were would make an existing
+            // table permanently un-evictable. Treating them as replicated is
+            // exactly today's behaviour, so no store gets worse on upgrade.
+            if !has_col("tombstones", "local")? {
+                conn.execute(
+                    "ALTER TABLE tombstones ADD COLUMN local INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+            }
+            // v6, second half: a row remembers that the USER changed it here.
+            //
+            // Only the authoring device may change a row's content, so pinning
+            // or correcting a peer's row is local and never travels — and it
+            // must not move `updated_at`, or it swallows the author's own later
+            // correction for ever (see `edit_clock`). That leaves the edited row
+            // at exactly the author's clock, so the author's next unchanged echo
+            // arrives as a TIE, and the payload tiebreak reverted the user's
+            // edit on the spot.
+            //
+            // Neither half can be given up. The tiebreak has to stay total, or
+            // two devices settle on different rows for one identity and neither
+            // ever updates. The edit has to survive an echo, or the user watches
+            // their correction undo itself. The flag separates them: a tie is
+            // decided by the payload as before, EXCEPT on a row this machine
+            // deliberately edited, where ours stands. A genuinely newer change
+            // from the author still carries a greater clock, still wins, and
+            // clears the flag.
+            if !has_col("items", "local_edit")? {
+                conn.execute(
+                    "ALTER TABLE items ADD COLUMN local_edit INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+            }
+            version = 6;
         }
         // Every step leaves `version` at its own level so the next one can read
         // it. The last assignment has no reader yet, and will the moment a v5
@@ -594,37 +660,74 @@ impl Store {
     // -- mutations ----------------------------------------------------------
 
     pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<(), StoreError> {
+        let (clock, mine) = self.edit_stamp(id)?;
         self.conn.execute(
-            "UPDATE items SET pinned=?1, updated_at=?2 WHERE id=?3",
-            params![pinned as i64, self.edit_clock(id)?, id],
+            "UPDATE items SET pinned=?1, updated_at=?2, local_edit=?3 WHERE id=?4",
+            params![pinned as i64, clock, (!mine) as i64, id],
         )?;
         Ok(())
     }
 
     /// The clock to stamp on a local edit of `id`.
     ///
-    /// One past the row's current clock when that is already ahead of us, so a
-    /// user's edit always wins the conflict it is about to enter.
+    /// For a row WE authored: one past its current clock when that is already
+    /// ahead of us, so the user's edit wins the conflict it is about to enter.
+    /// A row from a peer whose clock runs a little fast carries a clock
+    /// `now_ms()` cannot reach, and stamping the bare wall clock meant an edit
+    /// was born losing — the next unchanged echo beat it and silently reverted
+    /// it.
     ///
-    /// A row from a peer whose clock runs a little fast — anything inside the
-    /// accepted skew — carries a clock we cannot reach with `now_ms()`. Stamping
-    /// the bare wall clock meant a pin or a text correction was born LOSING:
-    /// the next unchanged echo of that row from the peer beat it and silently
-    /// reverted it, with nothing to show the user why. `delete_item_local`
-    /// already did this; the other two edits did not.
-    fn edit_clock(&self, id: i64) -> Result<i64, StoreError> {
-        let current: Option<i64> = self
+    /// For a row we did NOT author: the clock is left exactly where it is.
+    ///
+    /// This is the important half, and it is not an optimisation. Only the
+    /// authoring device may change a row's content, so pinning or correcting a
+    /// peer's row here is local and never travels — but `updated_at` is the
+    /// single last-writer-wins clock the AUTHOR's changes are judged against.
+    /// Bumping it meant an ordinary pin, made after the author's correction but
+    /// before the next exchange, permanently swallowed that correction: the
+    /// author's row lost on last-writer-wins, the receipt was banked anyway,
+    /// and `serve` never offered it again. Two machines then disagreed about
+    /// the text of a dictation for ever, with nothing to show the user why.
+    ///
+    /// The sequence needs no hostility and no clock skew: dictate on A, sync,
+    /// correct on A, pin on B, sync.
+    ///
+    /// What this costs: a local pin no longer outranks an unchanged echo of the
+    /// same row. In practice the echo does not happen — the peer's cursor sits
+    /// at that row's clock, and `serve` offers only what is strictly above it —
+    /// so the exposure is a one-shot re-offer after a kind or retention
+    /// widening, where an equal-clock tie could flip the local `pinned` flag
+    /// back. A pin that occasionally needs redoing is a far smaller failure
+    /// than two machines silently holding different text for ever.
+    ///
+    /// `delete_item_local` deliberately does NOT use this: deletes travel for
+    /// every source, so a delete must still stamp a winning clock.
+    fn edit_stamp(&self, id: i64) -> Result<(i64, bool), StoreError> {
+        let row: Option<(i64, Option<String>)> = self
             .conn
             .query_row(
-                "SELECT COALESCE(updated_at, created_at) FROM items WHERE id=?1",
+                "SELECT COALESCE(updated_at, created_at), source_machine FROM items WHERE id=?1",
                 params![id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        Ok(match current {
-            Some(c) => now_ms().max(c.saturating_add(1)),
-            None => now_ms(),
-        })
+        let Some((current, source)) = row else { return Ok((now_ms(), true)) };
+        if self.authored_here(source.as_deref()) {
+            Ok((now_ms().max(current.saturating_add(1)), true))
+        } else {
+            Ok((current, false))
+        }
+    }
+
+    /// Did this machine write the row? A row with no source (pre-sync legacy)
+    /// is ours, and so is everything when this install has no identity yet —
+    /// there is no peer that could disagree.
+    fn authored_here(&self, source: Option<&str>) -> bool {
+        match (self.source(), source) {
+            (_, None) => true,
+            (None, _) => true,
+            (Some(me), Some(src)) => me == src,
+        }
     }
 
     /// User edited an item's text. Returns (old, new) so the caller can feed
@@ -635,9 +738,10 @@ impl Store {
             .query_row("SELECT text FROM items WHERE id=?1", params![id], |r| r.get(0))
             .optional()?;
         let Some(old) = old else { return Ok(None) };
+        let (clock, mine) = self.edit_stamp(id)?;
         self.conn.execute(
-            "UPDATE items SET text=?1, updated_at=?2 WHERE id=?3",
-            params![new_text, self.edit_clock(id)?, id],
+            "UPDATE items SET text=?1, updated_at=?2, local_edit=?3 WHERE id=?4",
+            params![new_text, clock, (!mine) as i64, id],
         )?;
         Ok(Some((old, new_text.to_string())))
     }
@@ -653,10 +757,21 @@ impl Store {
     /// pre-sync legacy rows — are simply deleted: there is nothing a peer
     /// could match a tombstone against.
     ///
-    /// The tombstone is stamped `max(now, row.updated_at)`. Taking the wall
-    /// clock alone would lose to the row itself if that row arrived from a
-    /// machine whose clock runs ahead of ours, and the delete would be undone
-    /// on the next round trip.
+    /// The tombstone is stamped by [`Store::delete_clock`], NOT by
+    /// `max(now, row.updated_at)`.
+    ///
+    /// That older stamp existed so a delete could not lose to a row from a
+    /// machine whose clock ran ahead. It has not been needed since tombstones
+    /// became absorbing: `apply_remote_tombstone` removes the row
+    /// unconditionally and `apply_remote_item` refuses any identity that has a
+    /// tombstone, neither of which compares clocks at all.
+    ///
+    /// What it still cost was real. A row inside the accepted skew carries a
+    /// clock up to two minutes ahead, so deleting it stamped a tombstone two
+    /// minutes in the future; the peer banked that as its cursor for the
+    /// source; and the NEXT delete, made normally, carried a lower clock and
+    /// fell below the cursor. Nothing lowers a cursor, so that delete was never
+    /// offered again — a delete lost by a plain sequence of two deletes.
     pub fn delete_item_local(&self, id: i64) -> Result<(), StoreError> {
         let tx = self.conn.unchecked_transaction()?;
         let row: Option<(Option<String>, Option<String>, i64)> = tx
@@ -666,18 +781,62 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        if let Some((Some(source), Some(origin), updated_at)) = row {
-            let deleted_at = now_ms().max(updated_at);
+        if let Some((Some(source), Some(origin), _updated_at)) = row {
+            let deleted_at = Self::delete_clock(&tx, &source)?;
+            // local = 1: WE made this delete, so it is the only record of it
+            // anywhere and the cap must never evict it. See the v6 migration.
             tx.execute(
-                "INSERT INTO tombstones (source_machine, origin_id, deleted_at) VALUES (?1, ?2, ?3)
+                "INSERT INTO tombstones (source_machine, origin_id, deleted_at, local)
+                 VALUES (?1, ?2, ?3, 1)
                  ON CONFLICT(source_machine, origin_id)
-                 DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at)",
+                 DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at),
+                               local = 1",
                 params![source, origin, deleted_at],
             )?;
         }
         tx.execute("DELETE FROM items WHERE id=?1", params![id])?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// The clock for a delete WE are making, for rows of `source`.
+    ///
+    /// The wall clock, but never at or below the newest LOCAL tombstone we hold
+    /// for that source. A tombstone cursor is a promise never to ask for
+    /// anything at or below it again, and the cursor is a bare millisecond, so
+    /// a delete stamped in a millisecond we have already delivered sits below
+    /// the peer's mark and is never offered — a lost delete.
+    ///
+    /// The max is over EVERY tombstone we hold for that source, not just our
+    /// own. A cursor does not care who created the tombstone that moved it: a
+    /// delete we relayed onward from a third device raises the peer's mark just
+    /// as effectively, and our next local delete then has to clear that.
+    ///
+    /// Bounded so the cure cannot become the disease. A tombstone is accepted
+    /// only up to `now + MAX_CLOCK_SKEW_MS`, so chaining `+1` off one stamped
+    /// at the ceiling would produce a delete the receiving side refuses
+    /// outright — losing the delete this exists to protect. Past halfway to the
+    /// ceiling we stop climbing, take the plain wall clock, and say so: at that
+    /// point some machine's clock is more than a minute out, which is a
+    /// condition the user is told about separately and should fix.
+    fn delete_clock(tx: &Connection, source: &str) -> Result<i64, StoreError> {
+        let newest: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(deleted_at), 0) FROM tombstones WHERE source_machine = ?1",
+            params![source],
+            |r| r.get(0),
+        )?;
+        let now = now_ms();
+        let ceiling = now + MAX_CLOCK_SKEW_MS / 2;
+        let wanted = now.max(newest.saturating_add(1));
+        if wanted > ceiling {
+            tracing::warn!(
+                "sync: the newest tombstone for {source} is stamped {} ms ahead of this clock; \
+                 stamping this delete at the wall clock instead. Check the clocks on your devices.",
+                newest.saturating_sub(now)
+            );
+            return Ok(now);
+        }
+        Ok(wanted)
     }
 
     /// Delete unpinned history, writing tombstones so the deletes propagate.
@@ -691,30 +850,43 @@ impl Store {
     pub fn clear(&self, kind: Option<HistoryKind>) -> Result<usize, StoreError> {
         let tx = self.conn.unchecked_transaction()?;
         let now = now_ms();
+        // The same ceiling `delete_clock` applies: never stamp a delete the
+        // receiving side would refuse as too far ahead.
+        let ceiling = now + MAX_CLOCK_SKEW_MS / 2;
         let n = match kind {
             Some(k) => {
                 tx.execute(
-                    "INSERT INTO tombstones (source_machine, origin_id, deleted_at)
-                     SELECT source_machine, origin_id, max(?2, COALESCE(updated_at, created_at))
-                       FROM items
-                      WHERE kind=?1 AND pinned=0
-                        AND source_machine IS NOT NULL AND origin_id IS NOT NULL
+                    // Per source, one clock strictly above every tombstone
+                    // already held for it, bounded by ?3 — the same rule as
+                    // `delete_clock`, expressed in SQL because a Clear writes
+                    // the whole batch in one statement.
+                    "INSERT INTO tombstones (source_machine, origin_id, deleted_at, local)
+                     SELECT i.source_machine, i.origin_id,
+                            min(?3, max(?2, COALESCE((SELECT MAX(t.deleted_at) FROM tombstones t
+                                               WHERE t.source_machine = i.source_machine), 0) + 1)), 1
+                       FROM items i
+                      WHERE i.kind=?1 AND i.pinned=0
+                        AND i.source_machine IS NOT NULL AND i.origin_id IS NOT NULL
                      ON CONFLICT(source_machine, origin_id)
-                     DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at)",
-                    params![kind_str(k), now],
+                     DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at),
+                                   local = 1",
+                    params![kind_str(k), now, ceiling],
                 )?;
                 tx.execute("DELETE FROM items WHERE kind=?1 AND pinned=0", params![kind_str(k)])?
             }
             None => {
                 tx.execute(
-                    "INSERT INTO tombstones (source_machine, origin_id, deleted_at)
-                     SELECT source_machine, origin_id, max(?1, COALESCE(updated_at, created_at))
-                       FROM items
-                      WHERE pinned=0
-                        AND source_machine IS NOT NULL AND origin_id IS NOT NULL
+                    "INSERT INTO tombstones (source_machine, origin_id, deleted_at, local)
+                     SELECT i.source_machine, i.origin_id,
+                            min(?2, max(?1, COALESCE((SELECT MAX(t.deleted_at) FROM tombstones t
+                                               WHERE t.source_machine = i.source_machine), 0) + 1)), 1
+                       FROM items i
+                      WHERE i.pinned=0
+                        AND i.source_machine IS NOT NULL AND i.origin_id IS NOT NULL
                      ON CONFLICT(source_machine, origin_id)
-                     DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at)",
-                    params![now],
+                     DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at),
+                                   local = 1",
+                    params![now, ceiling],
                 )?;
                 tx.execute("DELETE FROM items WHERE pinned=0", [])?
             }
@@ -1018,20 +1190,46 @@ impl Store {
         if n <= MAX_TOMBSTONES_PER_SOURCE {
             return Ok(());
         }
+        // ONLY replicated entries are evictable (`local = 0`).
+        //
+        // Evicting indiscriminately destroyed undelivered local deletes. A
+        // Clear History over a replicated history bigger than the ceiling is
+        // written uncapped, so the table sits above it; the next tombstone from
+        // a peer then trimmed by `deleted_at ASC`, and a Clear stamps every one
+        // of its tombstones with the same clock, so the rows dropped were an
+        // arbitrary slice of the user's own deletes. Nothing re-creates a
+        // tombstone, and `holds_identity` then reads false, so the author's
+        // next re-offer walked the deleted rows straight back in.
+        //
+        // A replicated tombstone is safe to drop because the peer that sent it
+        // still holds it and will offer it again. A local one is not: it is the
+        // only record that the user asked for that row to go.
         let dropped = tx.execute(
             "DELETE FROM tombstones
               WHERE source_machine = ?1
                 AND rowid IN (
                     SELECT rowid FROM tombstones
-                     WHERE source_machine = ?1
+                     WHERE source_machine = ?1 AND local = 0
                      ORDER BY deleted_at ASC
                      LIMIT ?2
                 )",
             params![source, n - MAX_TOMBSTONES_PER_SOURCE],
         )?;
-        tracing::warn!(
-            "sync: {source} is past {MAX_TOMBSTONES_PER_SOURCE} tombstones; dropped the {dropped} oldest"
-        );
+        // Past the ceiling with nothing evictable left. That is bounded by the
+        // rows this machine actually held, which `max_items` already bounds,
+        // and a peer cannot add to it — so it is a state to report, not to
+        // resolve by throwing a delete away.
+        let remaining = n - dropped as i64;
+        if remaining > MAX_TOMBSTONES_PER_SOURCE {
+            tracing::warn!(
+                "sync: {source} holds {remaining} tombstones, past {MAX_TOMBSTONES_PER_SOURCE},                  and {} of them are local deletes that must not be dropped",
+                remaining
+            );
+        } else {
+            tracing::warn!(
+                "sync: {source} is past {MAX_TOMBSTONES_PER_SOURCE} tombstones;                  dropped the {dropped} oldest replicated"
+            );
+        }
         Ok(())
     }
 
@@ -1276,12 +1474,14 @@ impl Store {
             }
         }
 
-        let existing: Option<(i64, i64, String, i64, i64, String)> = tx
+        let existing: Option<(i64, i64, String, i64, i64, String, i64)> = tx
             .query_row(
-                "SELECT id, COALESCE(updated_at, created_at), text, pinned, created_at, kind
+                "SELECT id, COALESCE(updated_at, created_at), text, pinned, created_at, kind, local_edit
                    FROM items WHERE source_machine=?1 AND origin_id=?2",
                 params![item.source_machine, item.origin_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+                },
             )
             .optional()?;
 
@@ -1302,15 +1502,43 @@ impl Store {
                 )?;
                 ApplyOutcome::Inserted
             }
-            Some((id, local_updated, local_text, local_pinned, local_created, local_kind)) => {
+            Some((
+                id,
+                local_updated,
+                local_text,
+                local_pinned,
+                local_created,
+                local_kind,
+                local_edit,
+            )) => {
                 let local_pinned = local_pinned != 0;
+                let local_edit = local_edit != 0;
                 // The tiebreak has to order the WHOLE payload, or it is not
                 // total and two machines settle on different rows for the same
                 // identity with neither ever updating. `created_at` drives
                 // display order and retention, and `kind` decides which filter
                 // a row falls under, so leaving them out was a real divergence.
+                //
+                // A TIE goes to the payload order, EXCEPT on a row the user
+                // edited here.
+                //
+                // The payload order must stay total, or two devices settle on
+                // different rows for one identity and neither ever updates.
+                // But a local pin or correction on a peer's row deliberately
+                // does not move `updated_at` (see `edit_stamp`, and the v6
+                // migration for why), so the author's next unchanged echo
+                // arrives as a tie — and the payload order reverted the user's
+                // edit on the spot, silently.
+                //
+                // `local_edit` separates the two cases. A row nobody touched
+                // here converges exactly as before. A row the user changed
+                // keeps their change against an echo that carries no new
+                // information. An author change that is genuinely newer has a
+                // strictly greater clock, wins on the first clause, and clears
+                // the flag below — the author's word is still final.
                 let wins = item.updated_at > local_updated
                     || (item.updated_at == local_updated
+                        && !local_edit
                         && (
                             item.text.as_str(),
                             item.pinned,
@@ -1331,7 +1559,12 @@ impl Store {
                         // new kind: a permanent, user-visible disagreement that
                         // also defeated the receiver-side kind filter, which
                         // tests the wire kind while the store kept the stale one.
-                        "UPDATE items SET kind=?1, text=?2, created_at=?3, updated_at=?4, pinned=?5
+                        // `local_edit` is cleared: the author has spoken more
+                        // recently than the user's local change, so there is no
+                        // longer a local edit to protect. Leaving it set would
+                        // make this row permanently immune to ties.
+                        "UPDATE items SET kind=?1, text=?2, created_at=?3, updated_at=?4, pinned=?5,
+                                local_edit=0
                            WHERE id=?6",
                         params![
                             item.kind,

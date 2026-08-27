@@ -121,6 +121,75 @@ impl Drop for DialGuard {
     }
 }
 
+/// Everything a `stop()` owns, taken in ONE critical section.
+///
+/// A free function so a test can drive the real thing. `SyncManager` holds a
+/// `tauri::AppHandle<Wry>` and cannot be built under `MockRuntime`, so a test
+/// that wants this rule either calls this or hand-copies it — and a hand copy
+/// keeps asserting the shape it was written against long after the shape
+/// changed, which is exactly what happened to the round-6 concurrency test that
+/// went on failing after the defect it named was fixed.
+///
+/// `listen_stop` must be taken HERE, not after the wait that follows in
+/// `stop()`. Leaving it installed across that wait meant a `set_enabled(true)`
+/// landing in the window hit "already running" at the top of `start()`,
+/// returned Ok, and did nothing — for a listener this stop was about to
+/// destroy. The `stop_epoch` bump could not catch it, because the epoch is only
+/// read by a `start()` that got PAST that entry test. Sync then read as on
+/// everywhere, including in settings.json, with nothing running and nothing
+/// left to call `start()` again.
+///
+/// `dialing` is deliberately NOT cleared. Its entries are owned by live
+/// `DialGuard`s; clearing it here let a new generation insert the same peer and
+/// then have the OLD guard's drop remove it, so two concurrent dials to one
+/// device were possible and the set under-counted against `MAX_DIALS`.
+fn stop_claim(i: &mut Inner) -> (Option<Discovery>, Option<Arc<AtomicBool>>, u16) {
+    i.enabled = false;
+    i.stop_epoch = i.stop_epoch.wrapping_add(1);
+    i.peers.clear();
+    i.guard.cancel();
+    let port = i.port;
+    i.port = 0;
+    (i.discovery.take(), i.listen_stop.take(), port)
+}
+
+/// Did the retention window get WIDER? A pure function so the rule is testable
+/// without a `SyncManager`, which cannot be built under `MockRuntime`.
+///
+/// `0` means "keep for ever", so it is the widest window there is rather than
+/// the narrowest — the comparison every naive version of this got backwards.
+pub(crate) fn retention_widened(previous: u32, next: u32) -> bool {
+    match (previous, next) {
+        (p, d) if p == d => false,
+        (0, _) => false, // was "keep for ever"; anything else narrows
+        (_, 0) => true,  // to "keep for ever"; the widest there is
+        (p, d) => d > p,
+    }
+}
+
+/// The stored device name, made safe for the wire, with a usable fallback.
+///
+/// Never returns something `validate_device_name` would refuse, because every
+/// caller of it treats a refusal as a hard failure of the whole feature.
+fn usable_device_name(stored: &str) -> String {
+    if let Some(safe) = echokey_sync::sanitise_device_name(stored) {
+        return safe;
+    }
+    tracing::warn!("sync: the stored device name is unusable on the wire; falling back");
+    echokey_sync::sanitise_device_name(&fallback_device_name())
+        .unwrap_or_else(|| "This device".to_string())
+}
+
+fn fallback_device_name() -> String {
+    if cfg!(target_os = "macos") {
+        "Mac".to_string()
+    } else if cfg!(target_os = "windows") {
+        "Windows PC".to_string()
+    } else {
+        "This device".to_string()
+    }
+}
+
 /// Record an announcement for `id`, and say whether its dial must be retried.
 ///
 /// mDNS is unsigned and device ids travel in the clear, so anyone on the LAN can
@@ -426,7 +495,12 @@ impl SyncManager {
             inner: Mutex::new(Inner {
                 enabled: s.enabled,
                 device_id: s.device_id.clone(),
-                device_name: s.device_name.clone(),
+                // Sanitised on the way IN as well as on the way out. A name
+                // that predates the sanitiser — or one hand-edited into
+                // settings.json, or a hostname carrying an '=' — would
+                // otherwise make every Hello unsendable and stop discovery
+                // starting, reported to the user as a network fault.
+                device_name: usable_device_name(&s.device_name),
                 dictations: s.sync_dictations,
                 clipboard: s.sync_clipboard,
                 peers: HashMap::new(),
@@ -875,22 +949,7 @@ impl SyncManager {
         // Taken first, a concurrent start() sees no listener, proceeds, and
         // either keeps what it installs (its epoch matches, because the bump
         // happened before it looked) or undoes itself.
-        let (discovery, gen_stop, port) = {
-            let mut i = self.inner.lock();
-            i.enabled = false;
-            i.stop_epoch = i.stop_epoch.wrapping_add(1);
-            i.peers.clear();
-            i.guard.cancel();
-            // `dialing` is deliberately NOT cleared. Its entries are owned by
-            // live DialGuards; clearing it here let a new generation insert the
-            // same peer and then have the OLD guard's drop remove it, so two
-            // concurrent dials to one device were possible and the set
-            // under-counted against MAX_DIALS. The guards clean up by
-            // themselves as their threads unwind.
-            let port = i.port;
-            i.port = 0;
-            (i.discovery.take(), i.listen_stop.take(), port)
-        };
+        let (discovery, gen_stop, port) = stop_claim(&mut self.inner.lock());
         // Wait for an in-flight start() to finish installing itself.
         //
         // start() claims `starting` and then releases the lock for the slow
@@ -1254,14 +1313,63 @@ impl SyncManager {
         Ok(())
     }
 
+    /// Store a device name the wire will actually accept.
+    ///
+    /// The settings layer used to keep whatever the UI sent, trimmed to 64
+    /// CHARACTERS. `validate_device_name` counts BYTES and refuses `=` and
+    /// control characters, so two ordinary names — `Ben=Work`, or any longish
+    /// name in a non-Latin script — were stored happily and then made every
+    /// `Hello` unsendable and stopped discovery from starting. Sync was dead
+    /// and the UI blamed the network.
+    ///
+    /// Rejecting the name outright is the caller's job (`sync_set_device_name`
+    /// tells the user); by the time it reaches here it must be storable, so an
+    /// unusable one keeps the existing name rather than bricking sync.
     pub fn set_device_name(&self, name: &str) {
-        self.inner.lock().device_name = name.to_string();
-        self.publish();
+        match echokey_sync::sanitise_device_name(name) {
+            Some(safe) => {
+                self.inner.lock().device_name = safe;
+                self.publish();
+            }
+            None => {
+                tracing::warn!("sync: refused an unusable device name; keeping the current one");
+            }
+        }
     }
 
     /// Kept in step with history.retention_days by apply_settings.
+    ///
+    /// Widening the window has to refetch what the narrow one refused.
+    ///
+    /// `drain` banks a receipt BEFORE the retention check, and justified it
+    /// with "retention only ever gets truer". It does not: `retention_days` is
+    /// a user setting and the user may enlarge it, or set 0 for "keep for
+    /// ever". So while "keep 7 days" was set, a peer offered rows from last
+    /// month, we refused them — correctly — and banked a cursor past them. The
+    /// moment the user asked to keep history for ever, those rows sat strictly
+    /// below our cursor, the peer would never offer them again, and the two
+    /// machines disagreed permanently with nothing to show why.
+    ///
+    /// Only the INBOUND half needs repair, unlike a kind widening. Our outbound
+    /// `serve` does not filter on retention at all — retention is the
+    /// RECEIVER's policy, so we offer everything we hold and let the peer
+    /// refuse. Nothing was ever suppressed on the way out, so no re-offer debt
+    /// is owed.
+    ///
+    /// `days == 0` means keep for ever, so it is the widest window there is and
+    /// compares as greater than any finite one.
     pub fn set_retention_days(&self, days: u32) {
-        self.retention_days.store(days as usize, Ordering::SeqCst);
+        let previous = self.retention_days.swap(days as usize, Ordering::SeqCst) as u32;
+        if !retention_widened(previous, days) {
+            return;
+        }
+        if let Err(e) = self.store.lock().reset_source_marks() {
+            tracing::warn!("sync: could not reset receipts after widening retention: {e}");
+        } else {
+            tracing::info!(
+                "sync: retention widened from {previous} to {days} days;                  the next exchange refetches what the narrower window refused"
+            );
+        }
     }
 
     pub fn set_max_items(&self, max: u32) {
@@ -2211,134 +2319,105 @@ mod adversarial_r6_conc {
         }
     }
 
-    /// R6-1. A `set_enabled(true)` that lands inside `stop()` leaves sync
-    /// reading ON, in the UI and in settings.json, with nothing running.
+    /// R6-1. A `set_enabled(true)` landing inside `stop()` must never leave
+    /// sync reading ON with nothing running.
     ///
-    /// `stop()` is two separate critical sections with a wait between them:
+    /// TRIAGE: the finding was real and is fixed; this test was still failing
+    /// because it hand-copied the OLD two-critical-section shape of `stop()`
+    /// and asserted against the copy. It set `enabled`/`stop_epoch` in one
+    /// block, asserted "the listener is still installed", and only took
+    /// `listen_stop` after the wait — which is precisely the shape that was
+    /// removed. A test that reimplements the rule it is testing goes on
+    /// reporting a fixed defect forever.
     ///
-    ///   - manager.rs:809-813 clears `enabled` and bumps `stop_epoch`.
-    ///   - manager.rs:826-829 then polls `starting` for up to FIVE SECONDS.
-    ///   - manager.rs:834-845 finally takes `discovery` / `listen_stop` and
-    ///     tears the listener down.
-    ///
-    /// `listen_stop` is still `Some` for the whole of that window. So a
-    /// `set_enabled(true)` arriving inside it (manager.rs:1166-1188 — a
-    /// different `spawn_blocking` thread, per commands.rs:502-513) sets
-    /// `enabled = true` and calls `start()`, and `start()`'s entry test at
-    /// manager.rs:523 sees `listen_stop.is_some()` and returns `Ok(())`
-    /// — "already running" — for a listener that is about to be destroyed.
-    ///
-    /// The `stop_epoch` added in round 4 does not catch this. The epoch is only
-    /// consulted by a `start()` that got PAST that entry test and did real work
-    /// (manager.rs:767-776); a `start()` that short-circuits on "already
-    /// running" never reads it, so there is nothing to supersede.
-    ///
-    /// The end state is the one the whole lifecycle is meant to make
-    /// impossible: `enabled == true`, `error == None`, no listener, no
-    /// discovery, `SyncStatus.enabled` true, and commands.rs:511
-    /// (`persist_sync`) writing `user_enabled == true` into settings.json.
-    /// Nothing ever calls `start()` again, so sync is silently dead for the
-    /// life of the process while every surface says it is on.
+    /// It now drives `stop_claim`, the production critical section, so it
+    /// tracks the real rule and will fail again if anyone splits it back up.
     #[test]
     fn r6_a_toggle_inside_stop_leaves_sync_reading_on_with_nothing_running() {
         let m: Mutex<Inner> = Mutex::new(r6_running_inner());
 
         // -- thread A: sync_set_enabled(false) ---------------------------
-        // set_enabled, manager.rs:1167-1178.
         {
             let mut i = m.lock();
             i.enabled = false;
             i.user_enabled = false;
             i.error = None;
         }
-        // stop(), first critical section, manager.rs:809-813.
-        {
-            let mut i = m.lock();
-            i.enabled = false;
-            i.stop_epoch = i.stop_epoch.wrapping_add(1);
-        }
-        // stop() is now in the `starting` wait at manager.rs:826-829 and has
-        // NOT reached the teardown at manager.rs:834-845. `listen_stop` is
-        // still installed.
-        assert!(m.lock().listen_stop.is_some(), "the listener is still installed");
+        // stop(), the single critical section, taken BEFORE the wait.
+        let (_discovery, gen_stop, _port) = stop_claim(&mut m.lock());
+        assert!(
+            m.lock().listen_stop.is_none(),
+            "stop() must take the listener before it waits, not after"
+        );
 
         // -- thread B: sync_set_enabled(true) lands in that window --------
-        // set_enabled, manager.rs:1167-1178.
         {
             let mut i = m.lock();
-            // The early-out at manager.rs:1169 does not fire: enabled is false.
-            assert!(!(i.enabled && i.user_enabled));
+            assert!(!(i.enabled && i.user_enabled), "the early-out must not fire");
             i.enabled = true;
             i.user_enabled = true;
             i.error = None;
         }
-        // start(), entry critical section, manager.rs:511-528.
+        // start(), entry critical section. With the listener already taken it
+        // no longer short-circuits, which is the whole fix.
         let start_did_work = {
             let mut i = m.lock();
             if !i.enabled {
                 false
             } else if i.listen_stop.is_some() || i.starting {
-                false // manager.rs:524 — returns Ok(()), "already running"
+                false
             } else {
                 i.starting = true;
                 true
             }
         };
         assert!(
-            !start_did_work,
-            "precondition: start() must short-circuit here, which is the bug"
+            start_did_work,
+            "start() short-circuited on a listener stop() had already taken: \
+             sync reads ON with nothing running, and nothing calls start() again"
         );
 
-        // -- thread A resumes: stop() teardown, manager.rs:834-853 --------
-        let (discovery, gen_stop, _port) = {
-            let mut i = m.lock();
-            i.peers.clear();
-            i.guard.cancel();
-            (i.discovery.take(), i.listen_stop.take(), i.port)
-        };
-        drop(discovery);
+        // -- thread A resumes: the rest of stop() ------------------------
         if let Some(flag) = gen_stop {
-            flag.store(true, Ordering::SeqCst); // the listener thread exits
+            flag.store(true, Ordering::SeqCst);
+        }
+        // start() then installs its listener and checks the epoch. It read the
+        // epoch AFTER the bump, so it is not superseded and keeps what it
+        // installs.
+        {
+            let mut i = m.lock();
+            i.listen_stop = Some(Arc::new(AtomicBool::new(false)));
+            i.port = 51235;
+            i.starting = false;
         }
 
-        // -- what the user and settings.json now see ----------------------
         let i = m.lock();
         assert!(
             !(i.enabled && i.listen_stop.is_none()),
             "sync reads ON (SyncStatus.enabled = {}) with no listener and no error, \
-             and commands.rs:511 persists user_enabled = {} into settings.json — \
-             sync is dead for the life of the process and nothing calls start() again",
+             and the command persists user_enabled = {} into settings.json — \
+             sync is dead for the life of the process",
             i.enabled,
             i.user_enabled
         );
+        assert!(i.enabled && i.listen_stop.is_some(), "the surviving state must be a live one");
     }
 
-    /// R6-2. `last_dial` is not an honest clock: an attacker that ALTERNATES
-    /// the address in its mDNS records gets an unbounded number of dials.
+    /// R6-2. An attacker ALTERNATING the address in its mDNS records must not
+    /// buy an unbounded number of dials.
     ///
-    /// manager.rs:605-614 states the rule this rests on: "`last_dial` outlives
-    /// the peer entry, so it is the only honest clock", and that the retry
-    /// interval "keeps a spoofed record flapping between goodbye and announce
-    /// from spawning threads without bound".
+    /// TRIAGE: the finding was real and is fixed; the ASSERTION was wrong. It
+    /// demanded exactly one dial across ten announcements, which would mean a
+    /// device that genuinely changed address is never retried promptly — and
+    /// that prompt retry is a deliberate feature, recorded in `note_peer_record`
+    /// and in `a_spent_dial_is_retried_as_soon_as_the_address_changes`. The
+    /// achievable contract is one initial dial plus at most one address-change
+    /// retry per `DIAL_RETRY_AFTER`, and, crucially, a total that does not grow
+    /// with the number of announcements.
     ///
-    /// `note_peer_record` (manager.rs:126-142) then deletes that clock on every
-    /// address change, and it is called BEFORE the `due` test at
-    /// manager.rs:600-604. mDNS is unsigned and device ids travel in cleartext
-    /// in the TXT record, so an attacker holding a paired id needs only two
-    /// addresses: announce A, announce B, announce A... and every single
-    /// announcement is `due`.
-    ///
-    /// `adversarial_round5_availability::a_spent_dial_is_retried_as_soon_as_the_
-    /// address_changes` only ever re-announces the SAME address, which is the
-    /// one case an attacker has no reason to use.
-    ///
-    /// The consequence is the outbound path itself. `i.dialing.insert(id)`
-    /// (manager.rs:617) admits one dial per id at a time, and a dial to a peer
-    /// that stalls runs for the full `HANDSHAKE_TIMEOUT` (20s), so the genuine
-    /// device's announcements find the id already dialling and start nothing.
-    /// R5-D1 (`inbound_saturation_is_bounded_and_does_not_stop_outbound_sync`)
-    /// records that outbound dialling is precisely what makes inbound
-    /// saturation survivable; this removes it.
+    /// So this asserts the bound rather than the number: 200 alternating
+    /// announcements must buy no more dials than 10 do.
+    #[test]
     #[test]
     fn r6_alternating_addresses_cannot_buy_unlimited_dials() {
         const REAL: &str = "22222222-2222-4222-8222-222222222222";
@@ -2348,27 +2427,56 @@ mod adversarial_r6_conc {
         let a = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 66));
         let b = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 67));
 
-        let mut dials = 0usize;
-        // Hard-bounded; an attacker would simply keep going.
-        for n in 0..10 {
-            let addr = if n % 2 == 0 { a } else { b };
-            // Production function, production gate (manager.rs:579, 600-618).
-            note_peer_record(&mut peers, &mut last_dial, &mut last_move, REAL, r6_info(addr, 51234, REAL), true);
-            let due = last_dial
-                .get(REAL)
-                .map(|t: &Instant| t.elapsed() >= DIAL_RETRY_AFTER)
-                .unwrap_or(true);
-            if due {
-                last_dial.insert(REAL.to_string(), Instant::now());
-                dials += 1;
+        // Production function, production gate.
+        let mut run = |rounds: usize,
+                       peers: &mut HashMap<String, PeerInfo>,
+                       last_dial: &mut HashMap<String, Instant>,
+                       last_move: &mut HashMap<String, Instant>| {
+            let mut dials = 0usize;
+            for n in 0..rounds {
+                let addr = if n % 2 == 0 { a } else { b };
+                note_peer_record(
+                    peers,
+                    last_dial,
+                    last_move,
+                    REAL,
+                    r6_info(addr, 51234, REAL),
+                    true,
+                );
+                let due = last_dial
+                    .get(REAL)
+                    .map(|t: &Instant| t.elapsed() >= DIAL_RETRY_AFTER)
+                    .unwrap_or(true);
+                if due {
+                    last_dial.insert(REAL.to_string(), Instant::now());
+                    dials += 1;
+                }
             }
-        }
+            dials
+        };
+
+        let short = run(10, &mut peers, &mut last_dial, &mut last_move);
+
+        // Twenty times the announcements, from a clean slate, must buy no more
+        // dials. That is the property: the budget is a function of the retry
+        // interval, not of how fast the attacker can talk.
+        let mut peers2: HashMap<String, PeerInfo> = HashMap::new();
+        let mut last_dial2: HashMap<String, Instant> = HashMap::new();
+        let mut last_move2: HashMap<String, Instant> = HashMap::new();
+        let long = run(200, &mut peers2, &mut last_dial2, &mut last_move2);
 
         assert_eq!(
-            dials, 1,
-            "{dials} dials started inside one {DIAL_RETRY_AFTER:?} window from a single \
-             spoofed id: alternating two addresses defeats the retry interval entirely, \
-             so the flapping bound manager.rs:605-614 claims does not exist"
+            short, long,
+            "200 alternating announcements bought {long} dials where 10 bought {short}: \
+             the budget grows with the attacker's announcement rate, so the flapping \
+             bound does not exist"
+        );
+        assert!(
+            long <= 2,
+            "{long} dials inside one {DIAL_RETRY_AFTER:?} window from a single spoofed id. \
+             At most two are legitimate: the initial dial, and ONE address-change retry \
+             per interval — a device that really moved must still be reached promptly, \
+             which is why the answer is not one."
         );
     }
 }

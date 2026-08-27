@@ -107,6 +107,58 @@ pub fn validate_device_name(name: &str) -> Result<(), IdentityError> {
     }
 }
 
+/// Make a user-chosen name safe to put on the wire, or say it cannot be.
+///
+/// `validate_device_name` is a gate on a value that is already stored, and the
+/// settings layer had no matching gate: `sync_set_device_name` accepted any
+/// non-empty string truncated to 64 CHARACTERS, while the validator refuses
+/// `=`, refuses control characters, and counts BYTES. Two ordinary names got
+/// through and then disabled sync completely — every `Hello` became unsendable
+/// and discovery refused to start, which the UI reported as a network problem:
+///
+/// - `Ben=Work`, because the name rides in an mDNS TXT `key=value` pair;
+/// - any 40-plus-character name in a non-Latin script, because 64 characters
+///   of Japanese is roughly 130 bytes.
+///
+/// Sanitising rather than refusing is deliberate. These are mechanical
+/// transport constraints, not something to make the user solve: the name is a
+/// label in a pairing list, so dropping an `=` and trimming to fit costs the
+/// user nothing, where an error message about byte lengths would.
+///
+/// Returns `None` only when nothing usable survives, which is the one case the
+/// caller must report.
+pub fn sanitise_device_name(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control() && *c != '=')
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if cleaned.is_empty() {
+        return None;
+    }
+    // Truncate on a CHARACTER boundary to a BYTE budget. Slicing to
+    // MAX_DEVICE_NAME_BYTES directly panics mid-codepoint, which is how a
+    // "safe" truncation turns a bad name into a crash.
+    let mut out = String::new();
+    for c in cleaned.chars() {
+        if out.len() + c.len_utf8() > MAX_DEVICE_NAME_BYTES {
+            break;
+        }
+        out.push(c);
+    }
+    // A leading multi-byte character can leave the trimmed result empty only if
+    // the budget is smaller than one character, which it is not — but trim
+    // again, because dropping the tail can expose trailing whitespace.
+    let out = out.trim().to_string();
+    if out.is_empty() {
+        None
+    } else {
+        debug_assert!(validate_device_name(&out).is_ok());
+        Some(out)
+    }
+}
+
 /// A peer we have discovered on the LAN.
 ///
 /// Everything here is UNAUTHENTICATED until a session has been established from

@@ -215,24 +215,53 @@ fn seed_v4(path: &Path) {
     c.pragma_update(None, "user_version", 4i64).unwrap();
 }
 
+fn seed_v5(path: &Path) {
+    seed_v4(path);
+    let c = Connection::open(path).unwrap();
+    c.execute_batch(
+        "DROP TABLE IF EXISTS source_marks;
+         CREATE TABLE source_marks (
+             peer_machine   TEXT NOT NULL,
+             source_machine TEXT NOT NULL,
+             received_clock INTEGER NOT NULL,
+             PRIMARY KEY (peer_machine, source_machine)
+         );",
+    )
+    .unwrap();
+    c.pragma_update(None, "user_version", 5i64).unwrap();
+}
+
 // ---------------------------------------------------------------------------
-// R6-M1. Every historical version reaches a schema identical to a fresh v5.
+// R6-M1. Every historical version reaches a schema identical to a fresh one.
+//
+// Asserted against `Store::SCHEMA_VERSION_FOR_TEST` rather than a literal. The
+// literal was `5`, so adding the v6 migration failed this test for no reason
+// beyond its own staleness — which is noise that trains you to edit the test
+// whenever it complains, exactly the reflex that lets a real migration bug
+// through. The property under test is "every path lands where a fresh one
+// does", and that is version-independent.
 // ---------------------------------------------------------------------------
 #[test]
-fn r6_every_migration_path_lands_on_the_same_schema_as_a_fresh_v5() {
+fn r6_every_migration_path_lands_on_the_same_schema_as_a_fresh_store() {
     let dir = tempfile::tempdir().unwrap();
     let fresh = Store::open(&dir.path().join("fresh.db")).unwrap();
     let fresh_tables = table_shapes(fresh.conn_for_test());
     let fresh_objects = index_and_trigger_sql(fresh.conn_for_test());
-    assert_eq!(user_version(fresh.conn_for_test()), 5);
+    let current = Store::SCHEMA_VERSION_FOR_TEST;
+    assert_eq!(user_version(fresh.conn_for_test()), current);
 
-    let cases: [(&str, fn(&Path)); 4] =
-        [("v1", seed_v1), ("v2", seed_v2), ("v3", seed_v3), ("v4", seed_v4)];
+    let cases: [(&str, fn(&Path)); 5] = [
+        ("v1", seed_v1),
+        ("v2", seed_v2),
+        ("v3", seed_v3),
+        ("v4", seed_v4),
+        ("v5", seed_v5),
+    ];
     for (name, seed) in cases {
         let p = dir.path().join(format!("{name}.db"));
         seed(&p);
         let s = Store::open(&p).unwrap();
-        assert_eq!(user_version(s.conn_for_test()), 5, "{name}: version stamp");
+        assert_eq!(user_version(s.conn_for_test()), current, "{name}: version stamp");
         assert_eq!(table_shapes(s.conn_for_test()), fresh_tables, "{name}: table shapes differ");
         assert_eq!(
             index_and_trigger_sql(s.conn_for_test()),
@@ -299,7 +328,7 @@ fn r6_interrupted_migrations_are_re_runnable() {
     }
     for pass in 1..=2 {
         let s = Store::open(&a).unwrap();
-        assert_eq!(user_version(s.conn_for_test()), 5, "pass {pass}");
+        assert_eq!(user_version(s.conn_for_test()), Store::SCHEMA_VERSION_FOR_TEST, "pass {pass}");
         assert_eq!(table_shapes(s.conn_for_test()), fresh_tables, "pass {pass}");
         assert_eq!(s.count().unwrap(), 1, "pass {pass}: row survived");
     }
@@ -313,7 +342,7 @@ fn r6_interrupted_migrations_are_re_runnable() {
     }
     for pass in 1..=2 {
         let s = Store::open(&b).unwrap();
-        assert_eq!(user_version(s.conn_for_test()), 5, "pass {pass}");
+        assert_eq!(user_version(s.conn_for_test()), Store::SCHEMA_VERSION_FOR_TEST, "pass {pass}");
         assert_eq!(table_shapes(s.conn_for_test()), fresh_tables, "pass {pass}");
         assert_eq!(s.count().unwrap(), 1, "pass {pass}: row survived");
     }
@@ -328,7 +357,7 @@ fn r6_interrupted_migrations_are_re_runnable() {
     }
     for pass in 1..=2 {
         let s = Store::open(&c_path).unwrap();
-        assert_eq!(user_version(s.conn_for_test()), 5, "pass {pass}");
+        assert_eq!(user_version(s.conn_for_test()), Store::SCHEMA_VERSION_FOR_TEST, "pass {pass}");
         assert_eq!(table_shapes(s.conn_for_test()), fresh_tables, "pass {pass}");
         assert_eq!(s.count().unwrap(), 1, "pass {pass}: row survived");
     }

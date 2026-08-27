@@ -76,7 +76,10 @@ pub mod session;
 pub mod wire;
 
 pub use discovery::{Discovery, DiscoveryConfig, DiscoveryError, DiscoveryEvent, SERVICE_TYPE};
-pub use identity::{DeviceId, IdentityError, PeerInfo};
+pub use identity::{
+    sanitise_device_name, validate_device_name, DeviceId, IdentityError, PeerInfo,
+    MAX_DEVICE_NAME_BYTES,
+};
 pub use pairing::{
     ConfirmTag, PairedKey, Pairing, PairingCode, PairingConfirm, PairingError, PairingRole,
 };

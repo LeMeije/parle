@@ -515,13 +515,18 @@ pub async fn sync_set_enabled(state: State<'_, Arc<AppState>>, enabled: bool) ->
 
 #[tauri::command]
 pub async fn sync_set_device_name(state: State<'_, Arc<AppState>>, name: String) -> Result<()> {
-    let name = name.trim().to_string();
-    if name.is_empty() {
+    // Sanitised HERE, against the same rule the wire enforces, so the settings
+    // layer can never hold a name that makes sync unsendable. Taking 64 chars
+    // was not the same rule: the wire counts bytes and refuses '=' (the name
+    // rides in an mDNS TXT key=value pair), so "Ben=Work" and any longish
+    // non-Latin name were stored and then killed every exchange and discovery
+    // with it, which the UI showed as a network fault.
+    let Some(name) = echokey_sync::sanitise_device_name(&name) else {
         return Err("Give this device a name so you can recognise it when pairing".into());
-    }
+    };
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        st.sync.set_device_name(&name.chars().take(64).collect::<String>());
+        st.sync.set_device_name(&name);
         persist_sync(&st);
     })
     .await
