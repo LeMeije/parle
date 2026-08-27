@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const SETTINGS_VERSION: u32 = 1;
+pub const SETTINGS_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -474,10 +474,54 @@ pub enum SettingsError {
 impl Settings {
     pub fn load(path: &Path) -> Result<Self, SettingsError> {
         match std::fs::read_to_string(path) {
-            Ok(s) => Ok(serde_json::from_str(&s)?),
+            Ok(s) => {
+                let mut loaded: Self = serde_json::from_str(&s)?;
+                loaded.migrate();
+                Ok(loaded)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Bring a settings file written by an older build up to date.
+    ///
+    /// `#[serde(default)]` fills in fields that are ABSENT. It does nothing for
+    /// a field that is present and stale, and `excluded_apps` is present in
+    /// every settings.json this app has ever written. So additions to the
+    /// shipped exclusion list reached new installs only, and every machine the
+    /// app had already run on kept the list it was first given.
+    ///
+    /// That is not cosmetic: the round-9 additions include macOS's own
+    /// Passwords app, Keychain Access and the authenticators. Without this, a
+    /// password copied from the system password manager is captured and
+    /// replicated to the user's other machine on every existing install, while
+    /// the source reads as though it is covered.
+    ///
+    /// A UNION, not a replacement. A user who deliberately removed an entry
+    /// gets it back once, which is the lesser wrong: the alternative is
+    /// silently leaving a password manager unprotected because of a decision
+    /// they may not remember making.
+    fn migrate(&mut self) {
+        if self.version < 2 {
+            let defaults = default_excluded_apps();
+            let have: std::collections::HashSet<String> =
+                self.history.excluded_apps.iter().map(|a| a.to_ascii_lowercase()).collect();
+            let added: Vec<String> = defaults
+                .into_iter()
+                .filter(|d| !have.contains(&d.to_ascii_lowercase()))
+                .collect();
+            if !added.is_empty() {
+                tracing::info!(
+                    "settings: adding {} password managers to the exclusion list that shipped \
+                     after this install was created: {:?}",
+                    added.len(),
+                    added
+                );
+                self.history.excluded_apps.extend(added);
+            }
+        }
+        self.version = SETTINGS_VERSION;
     }
 
     /// Atomic write: temp file + rename, so a crash never corrupts settings.

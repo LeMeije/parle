@@ -585,12 +585,18 @@ pub fn read_clipboard() -> Option<String> {
         }
         let result = (|| {
             let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
-            let ptr = GlobalLock(windows::Win32::Foundation::HGLOBAL(handle.0 as _)) as *const u16;
+            let h = windows::Win32::Foundation::HGLOBAL(handle.0 as _);
+            // Bounded for the same reason as the merged reader above.
+            let cap = GlobalSize(h) / 2;
+            if cap == 0 {
+                return None;
+            }
+            let ptr = GlobalLock(h) as *const u16;
             if ptr.is_null() {
                 return None;
             }
             let mut len = 0usize;
-            while *ptr.add(len) != 0 {
+            while len < cap && *ptr.add(len) != 0 {
                 len += 1;
             }
             let slice = std::slice::from_raw_parts(ptr, len);
@@ -851,16 +857,34 @@ fn read_clipboard_unless_excluded() -> Option<String> {
                 return None;
             }
             let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
-            let ptr = GlobalLock(windows::Win32::Foundation::HGLOBAL(handle.0 as _)) as *const u16;
+            let h = windows::Win32::Foundation::HGLOBAL(handle.0 as _);
+            // BOUNDED by the allocation, like the DWORD read above.
+            //
+            // The NUL scan had no bound, and this buffer belongs to whichever
+            // process owns the clipboard. An app that publishes a
+            // CF_UNICODETEXT handle whose buffer is not NUL-terminated makes
+            // this walk off the end: an access violation at best, and at worst
+            // whatever is mapped next gets appended to the captured text,
+            // stored in history, and replicated to the user's other machine.
+            //
+            // Bounding the DWORD read and not this one was the inconsistency:
+            // the comment three lines up called the unchecked version "an
+            // unchecked cross-process dereference" while this did the same
+            // thing over an unbounded range.
+            let cap = GlobalSize(h) / 2;
+            if cap == 0 {
+                return None;
+            }
+            let ptr = GlobalLock(h) as *const u16;
             if ptr.is_null() {
                 return None;
             }
             let mut len = 0usize;
-            while *ptr.add(len) != 0 {
+            while len < cap && *ptr.add(len) != 0 {
                 len += 1;
             }
             let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
-            let _ = GlobalUnlock(windows::Win32::Foundation::HGLOBAL(handle.0 as _));
+            let _ = GlobalUnlock(h);
             Some(text)
         })();
         let _ = CloseClipboard();
@@ -960,8 +984,65 @@ fn consent_value(subkey: &str) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..len.min(buf.len())]))
 }
 
+/// macOS's system-wide secure-event-input flag has no Windows equivalent, so
+/// this is always false and callers must not read it as "not a password field".
+///
+/// Use [`focused_field_is_secure`] for that question. This is kept only so the
+/// two platforms expose the same surface.
 pub fn secure_input_active() -> bool {
     false
+}
+
+/// Is the focused control a password field?
+///
+/// The classic Win32 answer, which covers `EDIT` controls created with
+/// `ES_PASSWORD` and everything built on them. `GetGUIThreadInfo` for the
+/// foreground thread gives the focused HWND without attaching to its input
+/// queue, so this is cheap and has no side effects.
+///
+/// Returns `None` when we cannot tell rather than `false`, because "we could
+/// not read the focus" and "the focus is an ordinary field" are different
+/// answers and the caller decides what to do about each.
+///
+/// KNOWN GAP, stated rather than papered over: this does NOT see a WinUI
+/// `PasswordBox` or a Chromium `<input type=password>`, both of which draw
+/// their own controls. Those need UI Automation's `UIA_IsPasswordPropertyId`,
+/// which is a larger dependency. Until that lands, a dictation into a browser
+/// password field on Windows is NOT recognised as secure. That is a real hole
+/// and it is written down here so it is not mistaken for coverage: this
+/// function returning `Some(false)` means "the classic check says no", not
+/// "this is definitely not a password field".
+pub fn focused_field_is_secure() -> Option<bool> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetGUIThreadInfo, GetWindowLongW, GetWindowThreadProcessId,
+        GUITHREADINFO, GWL_STYLE,
+    };
+    const ES_PASSWORD: i32 = 0x0020;
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return None;
+        }
+        let tid = GetWindowThreadProcessId(fg, None);
+        if tid == 0 {
+            return None;
+        }
+        let mut gti = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        if GetGUIThreadInfo(tid, &mut gti).is_err() {
+            return None;
+        }
+        if gti.hwndFocus.0.is_null() {
+            return None;
+        }
+        let style = GetWindowLongW(gti.hwndFocus, GWL_STYLE);
+        if style == 0 {
+            return None;
+        }
+        Some(style & ES_PASSWORD != 0)
+    }
 }
 
 pub fn open_accessibility_settings() {}

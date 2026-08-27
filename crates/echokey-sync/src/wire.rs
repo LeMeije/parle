@@ -26,7 +26,7 @@ use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::marker::PhantomData;
 
-use crate::identity::{validate_device_name, DeviceId};
+use crate::identity::{DeviceId, MAX_DEVICE_NAME_BYTES};
 
 /// Version of the message format below. Bump on any breaking change.
 pub const PROTOCOL_VERSION: u16 = 4;
@@ -274,7 +274,25 @@ impl SyncMessage {
                         peer: *protocol_version,
                     });
                 }
-                validate_device_name(device_name)?;
+                // BOUNDED, not policed.
+                //
+                // This ran the full `validate_device_name`, so a peer whose
+                // name carried a character our policy dislikes failed to decode
+                // its `Hello` — the FIRST message of every exchange — and the
+                // two machines could not sync at all. The user saw a network
+                // failure and had no way to connect it to a name.
+                //
+                // A display string must never be able to deny sync. What this
+                // message needs from the name is a bound on allocation, which
+                // is what is checked here. The character policy belongs where
+                // the name is SHOWN: discovery refuses to list such a peer, and
+                // pairing sanitises before storing it. `exchange` reads the
+                // Hello name and discards it, so nothing here reaches a screen.
+                if device_name.is_empty() || device_name.len() > MAX_DEVICE_NAME_BYTES {
+                    return Err(WireError::DeviceName(
+                        crate::identity::IdentityError::InvalidDeviceName(MAX_DEVICE_NAME_BYTES),
+                    ));
+                }
                 Ok(())
             }
             SyncMessage::Watermarks { entries, .. } => {

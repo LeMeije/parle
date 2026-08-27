@@ -139,28 +139,47 @@ fn is_invisible_or_bidi(c: char) -> bool {
         // Soft hyphen and the zero-width space family.
         '\u{00AD}' | '\u{200B}' | '\u{2060}' | '\u{FEFF}' | '\u{180E}'
         // Bidirectional marks, embeddings, overrides and isolates. U+061C is
-        // ARABIC LETTER MARK, which IS a Bidi_Control and was missing.
+        // ARABIC LETTER MARK, a Bidi_Control that `char::is_control` misses.
         | '\u{061C}'
         | '\u{200E}'..='\u{200F}'
         | '\u{202A}'..='\u{202E}'
         | '\u{2066}'..='\u{2069}'
-        // Line and paragraph separators. Zl and Zp, so `char::is_control` is
-        // FALSE for both, and they render as a line break in the pairing list.
+        // Line and paragraph separators. Zl and Zp, so `is_control` is FALSE
+        // for both, and they render as a line break in the pairing list.
         | '\u{2028}' | '\u{2029}'
         // Invisible "letters" used to make a label look blank or padded.
         | '\u{3164}' | '\u{FFA0}'
-        // Variation selectors and the TAG block, the ASCII-smuggling set.
-        | '\u{FE00}'..='\u{FE0F}'
+        // The TAG block: the ASCII-smuggling set.
         | '\u{E0000}'..='\u{E007F}'
+        // NON-BREAKING AND EXOTIC SPACES.
+        //
+        // These were the hole. None is a control character and none was in the
+        // first version of this set, yet "Ben's\u{00A0}MacBook Pro" renders
+        // EXACTLY like "Ben's MacBook Pro" and is a different string on the
+        // wire. The doc comment above promised that two devices cannot show
+        // labels that are indistinguishable on screen and different underneath,
+        // and that promise was false for the most obvious character there is.
+        //
+        // A name of pure NBSP also passes as non-empty, so a blank row could be
+        // planted beside the honest one. The pairing code is the only
+        // authentication in the system and this list is what the user reads
+        // when deciding where to type it, so a convincing label IS the attack.
+        | '\u{00A0}'
+        | '\u{2000}'..='\u{200A}'
+        | '\u{202F}' | '\u{205F}' | '\u{3000}'
     )
-    // U+200C ZWNJ and U+200D ZWJ are deliberately NOT here.
+    // U+200C ZWNJ and U+200D ZWJ are deliberately NOT here: both are
+    // orthographically required, and stripping them turned a Persian name into
+    // a different word and a family emoji into two people.
     //
-    // They were, and stripping them is wrong in the other direction: both are
-    // orthographically required. "کتاب\u{200C}های بن" became a different and
-    // incorrect spelling, and "Ben 👨\u{200D}💻" became a man and a laptop.
-    // Neither is an invisible-label vector in the way the set above is, so the
-    // filter would have been silently corrupting correct names to close a hole
-    // they do not open.
+    // Nor are the VARIATION SELECTORS, U+FE00..U+FE0F, which an earlier version
+    // of this set included and should not have. U+FE0F is what makes ✈️ ❤️ ⚙️
+    // render as emoji at all, so banning it refused ordinary names typed from
+    // the macOS emoji picker AND corrupted ZWJ sequences by removing the
+    // selector while keeping the joiner. That is exactly the silent corruption
+    // the ZWNJ/ZWJ exemption exists to avoid, reintroduced one line below the
+    // comment explaining it. The smuggling vector is the TAG block, which is
+    // still refused.
 }
 
 /// Make a user-chosen name safe to put on the wire, or say it cannot be.

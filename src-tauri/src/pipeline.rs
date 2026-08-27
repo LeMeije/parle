@@ -64,23 +64,41 @@ pub struct Pipeline {
 
 /// Is this dictation going into a password field?
 ///
-/// Asked of the MACHINE, not of a paste preference, and asked on every
-/// dictation path.
+/// The FOCUSED ELEMENT decides, not the system-wide secure-input flag.
 ///
-/// The first version of this check read `manual_paste_required` off the
-/// `InjectionOutcome`, which fails twice. It was applied to only one of the two
-/// paths that finish a dictation, so a recording containing a mark stored the
-/// password anyway. And the outcome is `None` whenever "insert at cursor" is
-/// switched off, a shipped user-facing setting, so the check silently did
-/// nothing there — and that branch also calls the UNMARKED `write_clipboard`,
-/// so with secure input active the app both stored the password and stopped
-/// telling other clipboard managers not to. That was worse than having no check
-/// at all.
+/// Round 9 asked `secure_input_active()` and nothing else. That flag is
+/// process-global: any application may raise it and it stays raised until that
+/// application lowers it or exits. Measured on the development machine, it
+/// reads TRUE continuously with a password manager merely RUNNING and no
+/// password field focused anywhere. So the gate matched every dictation, and
+/// the app silently threw all of them away while reporting nothing but a log
+/// line. That is a worse failure than the leak it was closing: the leak needed
+/// a password field, and this needed only a password manager to be open.
 ///
-/// `secure_input_active()` exists on both platforms and answers the real
-/// question directly.
+/// `focused_field_is_secure()` asks the accessibility tree what the user is
+/// actually typing into, which is the question. It returns `None` when it
+/// cannot tell (no Accessibility permission, or the element does not answer),
+/// and `None` is deliberately NOT treated as secure: falling back to the global
+/// flag there would restore exactly the behaviour above.
+///
+/// The residual is stated so it is not mistaken for coverage: with
+/// Accessibility permission denied, a dictation into a password field IS
+/// stored. Parle needs that permission for paste-at-cursor anyway and says so
+/// in onboarding, and the clipboard write is still marked concealed on that
+/// path regardless.
 fn into_secure_field() -> bool {
-    platform::imp::secure_input_active()
+    platform::imp::focused_field_is_secure().unwrap_or(false)
+}
+
+/// Whether to mark the clipboard write concealed.
+///
+/// Wider than `into_secure_field`, deliberately, because the cost is asymmetric:
+/// marking an ordinary transcript concealed loses the user nothing they can see,
+/// while failing to mark a password tells every other clipboard manager on the
+/// machine to keep it. So the global flag counts here even though it must not
+/// count for dropping the row.
+fn should_conceal_clipboard() -> bool {
+    into_secure_field() || platform::imp::secure_input_active()
 }
 
 impl Pipeline {
@@ -439,7 +457,7 @@ impl Pipeline {
             // a secure field was put on the clipboard with no marking at all,
             // so every other clipboard manager on the machine kept it. The
             // injection path had always marked it; this branch never did.
-            platform::imp::write_clipboard_marked(&text, into_secure_field());
+            platform::imp::write_clipboard_marked(&text, should_conceal_clipboard());
             None
         } else {
             None
@@ -646,7 +664,7 @@ impl Pipeline {
             // a secure field was put on the clipboard with no marking at all,
             // so every other clipboard manager on the machine kept it. The
             // injection path had always marked it; this branch never did.
-            platform::imp::write_clipboard_marked(&text, into_secure_field());
+            platform::imp::write_clipboard_marked(&text, should_conceal_clipboard());
             None
         } else {
             None

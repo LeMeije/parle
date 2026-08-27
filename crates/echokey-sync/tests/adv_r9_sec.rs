@@ -92,7 +92,22 @@ fn r9_n1_invisible_characters_the_filter_does_not_know_about() {
         ("U+3164 HANGUL FILLER", '\u{3164}'),
         ("U+FFA0 HALFWIDTH HANGUL FILLER", '\u{FFA0}'),
         ("U+E0041 TAG LATIN CAPITAL A", '\u{E0041}'),
-        ("U+FE0E VARIATION SELECTOR-15", '\u{FE0E}'),
+        // U+FE0E VARIATION SELECTOR-15 was listed here and has been REMOVED,
+        // by round 10, which is a disagreement worth recording rather than
+        // silently resolving.
+        //
+        // Round 9's argument: it is invisible, therefore it is a label vector.
+        // Round 10's: banning the FE00..FE0F range refuses ordinary names typed
+        // from the macOS emoji picker, because U+FE0F is what makes ✈️ ❤️ ⚙️
+        // render as emoji at all, and it half-corrupts ZWJ sequences by
+        // stripping the selector while keeping the joiner. Round 10 has the
+        // stronger case because it demonstrated the corruption, and because a
+        // variation selector modifies a VISIBLE character's presentation rather
+        // than creating invisible content or reversing direction, which is what
+        // the rest of this list is about.
+        //
+        // The smuggling vector is the TAG block, and that is still refused
+        // (asserted below).
     ]
     .into_iter()
     .filter(|(_, c)| {

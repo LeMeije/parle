@@ -818,23 +818,28 @@ fn drain<S: Read + Write>(
                     // meant one row stamped i64::MAX parked this peer's cursor
                     // at the ceiling and hid everything it wrote afterwards —
                     // exactly what the range check exists to prevent.
-                    // A row whose CREATED_AT is out of range is refused by
-                    // `apply_remote_item` before it opens a transaction, so it
-                    // banks no receipt there and is re-offered on every
-                    // exchange for ever. Round 8 removed the standalone receipt
-                    // on the ground that an applied row takes its own; true of
-                    // every row `apply_remote_item` reaches, false of the ones
-                    // it refuses first.
+                    // A row whose CREATED_AT is out of range banks NOTHING.
                     //
-                    // Banked on `updated_at`, never on `created_at`: the mark
-                    // is a statement about the stream's clock, and
-                    // `note_received` range-checks it, so a row whose
-                    // `updated_at` is ITSELF out of range still banks nothing,
-                    // which is the cursor-parking defence and must stay.
+                    // Round 9 banked a receipt here, reasoning that
+                    // `apply_remote_item` returns before opening its
+                    // transaction on that path so nothing else would. True, and
+                    // still the wrong call: a `created_at` two minutes ahead
+                    // becomes acceptable two minutes from now, so the refusal is
+                    // TEMPORARY, and the rule this file states in three other
+                    // places is that a receipt is never banked for a refusal we
+                    // might reverse. Banking it excluded that exact row from
+                    // every future page, permanently.
+                    //
+                    // The loop that comes back is the one `apply_remote_item`
+                    // already accepts for an out-of-range `updated_at`: bounded,
+                    // self-inflicted waste from a machine whose clock is wrong,
+                    // one re-offer per exchange, ending the moment it is fixed.
+                    // An honest author cannot even produce this pair, because
+                    // every local write sets `created_at = now` and
+                    // `updated_at >= created_at`.
                     let created_ceiling =
                         crate::sync::manager::now_ms() + echokey_core::history::MAX_CLOCK_SKEW_MS;
                     if it.created_at > created_ceiling || it.created_at <= 0 {
-                        note_refused(store, attribution.peer_id, it.source_device.as_str(), it.updated_at, &it.origin_id)?;
                         stats.ignored += 1;
                         continue;
                     }

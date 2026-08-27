@@ -407,6 +407,13 @@ fn modifier_flag_present(keycode: CGKeyCode, flags: CGEventFlags) -> bool {
 /// restore window carry the OLDEST original forward instead of restoring a
 /// transcript over the user's real clipboard.
 static PENDING_RESTORE: Mutex<Option<String>> = Mutex::new(None);
+/// Was the clipboard we are holding for restore marked CONCEALED?
+///
+/// Carried alongside the text so the restore can put it back with the same
+/// claim it arrived with. Writing it back unmarked strips the OS's own
+/// statement that the content is a secret, which is not ours to remove.
+static PENDING_RESTORE_CONCEALED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 static RESTORE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Insert `text` at the cursor in the focused app.
@@ -443,7 +450,11 @@ pub fn inject_text(
     }
 
     // Clipboard + Cmd-V.
+    // Snapshot the MARKING as well as the text: `read_clipboard` reads the
+    // string and tells us nothing about whether the pasteboard called it a
+    // secret, and the restore below has to put back what it found.
     let previous = read_clipboard();
+    let previous_concealed = clipboard_is_concealed();
     write_clipboard_marked(text, false);
     let after_write = pasteboard_change_count();
     synth_cmd_v();
@@ -462,6 +473,8 @@ pub fn inject_text(
             let mut pending = PENDING_RESTORE.lock();
             if pending.is_none() {
                 *pending = previous;
+                PENDING_RESTORE_CONCEALED
+                    .store(previous_concealed, std::sync::atomic::Ordering::SeqCst);
             }
         }
         let generation = RESTORE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
@@ -473,8 +486,19 @@ pub fn inject_text(
             }
             // Only restore if nothing else wrote to the clipboard meanwhile.
             if pasteboard_change_count() == after_write {
+                // Restore with the marking it CAME with.
+                //
+                // This wrote `write_clipboard_marked(&prev, false)`, which
+                // strips ConcealedType. So a user who copied a password out of
+                // 1Password and then dictated anywhere, with the shipped
+                // default "restore clipboard" on, got their password back on
+                // the pasteboard with the OS's own statement that it is a
+                // secret removed by us. Every other clipboard manager was then
+                // free to keep it.
                 if let Some(prev) = PENDING_RESTORE.lock().take() {
-                    write_clipboard_marked(&prev, false);
+                    let was_concealed =
+                        PENDING_RESTORE_CONCEALED.load(std::sync::atomic::Ordering::SeqCst);
+                    write_clipboard_marked(&prev, was_concealed);
                 }
             } else {
                 *PENDING_RESTORE.lock() = None;
@@ -482,6 +506,82 @@ pub fn inject_text(
         });
     }
     InjectionOutcome { method: InjectionMethod::ClipboardPaste, manual_paste_required: false }
+}
+
+/// Is the element the user is actually typing into a SECURE text field?
+///
+/// This exists because `IsSecureEventInputEnabled()` does not answer that
+/// question and using it as though it did broke the product outright.
+///
+/// Secure event input is a SYSTEM-WIDE, process-global flag. Any application
+/// may raise it and it stays raised until that application lowers it or exits,
+/// so a crashed app leaves it up for good. Measured on the development machine:
+/// it reads TRUE continuously with 1Password merely RUNNING and no password
+/// field focused anywhere. Keying "do not store this dictation" off it therefore
+/// threw away every dictation, all day, reporting nothing but a log line.
+///
+/// The focused element's role IS the question. `AXSecureTextField` is what a
+/// password field reports, in AppKit, in Chromium, and in anything that renders
+/// an `<input type=password>` through the accessibility tree.
+///
+/// Returns `None` when we cannot tell: Accessibility permission is not granted,
+/// or the focused element does not answer. `None` must NOT be read as "secure",
+/// because the caller's fallback for that would be the global flag, which is
+/// the thing that was wrong.
+pub fn focused_field_is_secure() -> Option<bool> {
+    use accessibility_sys::{
+        kAXErrorSuccess, kAXFocusedUIElementAttribute, kAXRoleAttribute,
+        kAXSubroleAttribute, AXUIElementCopyAttributeValue, AXUIElementCreateSystemWide,
+        AXUIElementRef,
+    };
+    use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+    use core_foundation::string::{CFString, CFStringRef};
+    if !accessibility_trusted() {
+        return None;
+    }
+    unsafe {
+        let system = AXUIElementCreateSystemWide();
+        if system.is_null() {
+            return None;
+        }
+        let focused_attr = CFString::from_static_string(kAXFocusedUIElementAttribute);
+        let mut focused: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            system,
+            focused_attr.as_concrete_TypeRef(),
+            &mut focused as *mut _,
+        );
+        CFRelease(system as CFTypeRef);
+        if err != kAXErrorSuccess || focused.is_null() {
+            return None;
+        }
+        // Role and subrole both: AppKit reports the role, and some toolkits
+        // report a generic role with the secure detail in the subrole.
+        let mut secure = false;
+        let mut answered = false;
+        for attr in [kAXRoleAttribute, kAXSubroleAttribute] {
+            let key = CFString::from_static_string(attr);
+            let mut value: CFTypeRef = std::ptr::null();
+            let e = AXUIElementCopyAttributeValue(
+                focused as AXUIElementRef,
+                key.as_concrete_TypeRef(),
+                &mut value as *mut _,
+            );
+            if e == kAXErrorSuccess && !value.is_null() {
+                answered = true;
+                let s = CFString::wrap_under_create_rule(value as CFStringRef).to_string();
+                if s.contains("SecureTextField") {
+                    secure = true;
+                }
+            }
+        }
+        CFRelease(focused);
+        if answered {
+            Some(secure)
+        } else {
+            None
+        }
+    }
 }
 
 fn ax_insert_text(text: &str) -> bool {
@@ -560,22 +660,19 @@ pub fn read_clipboard() -> Option<String> {
     }
 }
 
-/// Write text to the clipboard, marked TRANSIENT so our own monitor skips it.
+/// Write text to the clipboard as the USER's own copy.
 ///
-/// The marking is not decoration: on Windows the equivalent call declares all
-/// four exclusion formats, so Parle never re-captures its own writes there,
-/// and macOS wrote unmarked. That asymmetry laundered excluded content back
-/// onto the wire. `commands::copy_item` is bound to Enter and double-click in
-/// the history palette, so pressing Copy on a row from an app in the user's
-/// exclusion list re-captured that text 150ms later under Parle's OWN app id,
-/// where the outbound exclusion filter no longer matched it, and replicated it
-/// to every paired device. The user pressed Copy in Parle's own history and
-/// their password crossed to the other machine.
+/// Unmarked, deliberately. Round 9 marked this TransientType so Parle's monitor
+/// would not re-capture it, which fixed a real leak (the palette's Copy
+/// re-captured an excluded row under Parle's own app id and replicated it) with
+/// far too broad an instrument: TransientType means "nobody should keep this",
+/// so every other clipboard manager on the machine threw away the row the user
+/// had just deliberately pressed Copy on.
 ///
-/// `write_clipboard_marked` remains for the concealed case, which is a
-/// stronger claim about the CONTENT rather than about who wrote it.
+/// Self-capture is suppressed by IDENTITY now, via `we_wrote_change`, which
+/// makes no claim about the text at all.
 pub fn write_clipboard(text: &str) {
-    write_clipboard_impl(text, true, false);
+    write_clipboard_impl(text, false, false);
 }
 
 /// Injection writes are marked org.nspasteboard.TransientType so clipboard
@@ -585,23 +682,56 @@ pub fn write_clipboard_marked(text: &str, concealed: bool) {
     write_clipboard_impl(text, true, concealed);
 }
 
+/// The pasteboard change count of the last write PARLE made.
+///
+/// This is how the monitor skips our own writes, and it replaces marking them
+/// TransientType for that purpose. The marker is a claim about the CONTENT
+/// ("nobody should keep this"), and using it to mean "we wrote this" told every
+/// clipboard manager on the machine to discard the row the user had just
+/// deliberately pressed Copy on. Alfred, Raycast, Maccy and the rest all honour
+/// it, so the user's own action silently did nothing outside Parle.
+///
+/// A change count identifies OUR write without making any claim about the text.
+static OUR_LAST_WRITE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
+/// Did WE write the pasteboard's current contents?
+pub fn we_wrote_change(count: i64) -> bool {
+    OUR_LAST_WRITE.load(std::sync::atomic::Ordering::SeqCst) == count
+}
+
 fn write_clipboard_impl(text: &str, transient: bool, concealed: bool) {
     use objc2_app_kit::NSPasteboard;
     use objc2_foundation::NSString;
     unsafe {
         let pb = NSPasteboard::generalPasteboard();
-        pb.clearContents();
-        let ty = NSString::from_str("public.utf8-plain-text");
-        let value = NSString::from_str(text);
-        pb.setString_forType(&value, &ty);
+        // EVERY type declared before any value is set.
+        //
+        // `clearContents` is what advances the change count, so setting the
+        // payload first and the markers afterwards leaves a window in which the
+        // pasteboard has changed and carries no marker yet. A monitor polling
+        // in that window sees unmarked content. Declaring the types up front
+        // closes it: the markers exist from the moment the change is visible.
+        let plain = NSString::from_str("public.utf8-plain-text");
+        let transient_ty = NSString::from_str("org.nspasteboard.TransientType");
+        let concealed_ty = NSString::from_str("org.nspasteboard.ConcealedType");
+        let mut types: Vec<&NSString> = vec![&plain];
         if transient {
-            let t = NSString::from_str("org.nspasteboard.TransientType");
-            pb.setString_forType(&NSString::from_str(""), &t);
+            types.push(&transient_ty);
         }
         if concealed {
-            let c = NSString::from_str("org.nspasteboard.ConcealedType");
-            pb.setString_forType(&NSString::from_str(""), &c);
+            types.push(&concealed_ty);
         }
+        let ns_types = objc2_foundation::NSArray::from_slice(&types);
+        pb.declareTypes_owner(&ns_types, None);
+        let value = NSString::from_str(text);
+        pb.setString_forType(&value, &plain);
+        if transient {
+            pb.setString_forType(&NSString::from_str(""), &transient_ty);
+        }
+        if concealed {
+            pb.setString_forType(&NSString::from_str(""), &concealed_ty);
+        }
+        OUR_LAST_WRITE.store(pb.changeCount() as i64, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

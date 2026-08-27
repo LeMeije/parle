@@ -102,99 +102,101 @@ fn poison_own_clock(s: &Store, drift_ms: i64) {
 
 #[test]
 fn r10_a_corrected_clock_never_recovers_every_later_row_is_refused_by_a_correct_peer() {
-    let a = store();
-    // Three days fast for one afternoon, then corrected.
-    let drift = 3 * 24 * 60 * 60 * 1000;
-    poison_own_clock(&a, drift);
+    // INVERTED: correcting the clock now DOES recover the machine.
+    //
+    // The finding was real and was a round-9 regression. Round 9 removed the
+    // ceiling entirely, so a machine whose clock had once been days fast kept
+    // its own `newest` up there for ever: nothing lowers it, tombstones are
+    // never pruned by age, and both delete and Clear stamp above it. Every row
+    // it wrote afterwards was stamped days ahead, a correctly-clocked peer
+    // refused all of them, and fixing the clock changed nothing.
+    //
+    // The clamp is on the CEILING now, not the floor. A peer only ever banks a
+    // cursor at or below its own `now + skew`, so a `newest` above our ceiling
+    // is not protecting any real cursor: those rows were refused, not received.
+    // Stamping at the ceiling is above every cursor that exists and inside what
+    // a correct peer accepts, so the machine recovers immediately.
+    let s = store();
+    let now = now_ms();
 
-    // The clock is now CORRECT. The user dictates.
-    let id = a.insert_clipboard("dictated after the clock was fixed", None, None).unwrap();
-    let stamped = updated_at_of(&a, id);
-    let over = stamped - (now_ms() + MAX_CLOCK_SKEW_MS);
-    assert!(
-        over > 0,
-        "premise failed: the new row was stamped inside the acceptable window ({over} ms under \
-         the ceiling), so there is nothing to prove"
-    );
+    // The machine wrote rows while its clock was three days fast.
+    let poisoned = now + 3 * 86_400_000;
+    s.conn_for_test()
+        .execute(
+            "INSERT INTO items (kind, text, created_at, updated_at, source_machine, origin_id)
+             VALUES ('clipboard', 'from the bad old days', ?1, ?1, ?2, 'poison')",
+            rusqlite::params![poisoned, ME],
+        )
+        .unwrap();
 
-    // The Mac, whose clock is right, refuses it — and banks no receipt, so it
-    // is re-offered on every exchange for ever.
-    let b = store_as(PEER);
-    let (origin, text) = a.origin_and_text_for_test(id).unwrap();
-    let wire = RemoteItem {
-        source_machine: ME.into(),
-        origin_id: origin.clone(),
-        kind: "clipboard".into(),
-        text,
-        created_at: now_ms(),
-        updated_at: stamped,
-        pinned: false,
-    };
-    let outcome = b.apply_remote_item(ME, &wire).unwrap();
-    assert_eq!(
-        format!("{outcome:?}"),
-        "Ignored",
-        "a correctly-clocked peer must refuse a row stamped {over} ms past its ceiling"
-    );
+    // The user notices and fixes the clock. The next thing they write must be
+    // acceptable to a peer whose clock is correct.
+    let id = s.insert_clipboard("after the fix", None, None).unwrap();
+    let clock: i64 = s
+        .conn_for_test()
+        .query_row("SELECT updated_at FROM items WHERE id=?1", rusqlite::params![id], |r| r.get(0))
+        .unwrap();
+
+    let peer_ceiling = now_ms() + MAX_CLOCK_SKEW_MS;
     assert!(
-        !b.holds_identity(ME, &origin).unwrap(),
-        "the refused row must not be stored"
+        clock <= peer_ceiling,
+        "a row written after the clock was corrected is stamped {clock}, past the {peer_ceiling} \
+         a correctly-clocked peer will accept. The device syncs nothing and fixing the clock \
+         does not help."
     );
-    assert!(
-        b.watermarks(ME).unwrap().is_empty(),
-        "a refused row must bank no receipt"
-    );
+    // And it is still strictly above the wall clock, so it cannot fall below a
+    // cursor an honest peer legitimately holds.
+    assert!(clock >= now_ms() - 1_000, "and it must not be stamped in the past: {clock}");
 }
 
 #[test]
 fn r10_no_user_action_repairs_a_poisoned_clock_delete_and_clear_both_make_it_worse() {
-    let a = store();
-    let drift = 3 * 24 * 60 * 60 * 1000;
-    poison_own_clock(&a, drift);
-
-    let baseline = {
-        let id = a.insert_clipboard("baseline", None, None).unwrap();
-        updated_at_of(&a, id)
-    };
-    assert!(baseline > now_ms() + MAX_CLOCK_SKEW_MS, "premise: the store is poisoned");
-
-    // Repair attempt 1: delete every row this machine holds.
-    let ids: Vec<i64> = {
-        let mut st = a.conn_for_test().prepare("SELECT id FROM items").unwrap();
-        let v = st.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
-        v
-    };
-    for id in ids {
-        a.delete(id).unwrap();
+    // INVERTED: delete and Clear no longer push the clock further out.
+    //
+    // They used to: `delete_item_local` stamped `newest + 1` and `clear`
+    // stamped `max(now, n.c + 1)`, both unbounded, so the two actions a user
+    // reaches for when something looks wrong each made the poisoning worse and
+    // moved it into a table nothing prunes.
+    let s = store();
+    let now = now_ms();
+    let poisoned = now + 3 * 86_400_000;
+    for (origin, text) in [("poison", "from the bad old days"), ("other", "also old")] {
+        s.conn_for_test()
+            .execute(
+                "INSERT INTO items (kind, text, created_at, updated_at, source_machine, origin_id)
+                 VALUES ('clipboard', ?3, ?1, ?1, ?2, ?4)",
+                rusqlite::params![poisoned, ME, text, origin],
+            )
+            .unwrap();
     }
-    let after_delete = {
-        let id = a.insert_clipboard("after deleting everything", None, None).unwrap();
-        updated_at_of(&a, id)
-    };
+    let ceiling = || now_ms() + MAX_CLOCK_SKEW_MS;
+
+    // Delete one.
+    let id: i64 = s
+        .conn_for_test()
+        .query_row("SELECT id FROM items WHERE origin_id='poison'", [], |r| r.get(0))
+        .unwrap();
+    s.delete_item_local(id).unwrap();
+    let d: i64 = s
+        .conn_for_test()
+        .query_row("SELECT deleted_at FROM tombstones WHERE origin_id='poison'", [], |r| r.get(0))
+        .unwrap();
     assert!(
-        after_delete > baseline,
-        "deleting every row should not lower the clock, and does not: {after_delete} vs {baseline}"
+        d <= ceiling(),
+        "deleting a row stamped the tombstone at {d}, past what any peer accepts: the delete \
+         never reaches the other machine and the poisoning is now in a table nothing prunes"
     );
 
-    // Repair attempt 2: Clear History, the product's panic button.
-    a.clear(None).unwrap();
-    let after_clear = {
-        let id = a.insert_clipboard("after clear history", None, None).unwrap();
-        updated_at_of(&a, id)
-    };
+    // And Clear the rest.
+    s.clear(None).unwrap();
+    let worst: i64 = s
+        .conn_for_test()
+        .query_row("SELECT MAX(deleted_at) FROM tombstones", [], |r| r.get(0))
+        .unwrap();
     assert!(
-        after_clear > now_ms() + MAX_CLOCK_SKEW_MS,
-        "Clear History must be shown NOT to repair the poisoned clock; it stamped {after_clear}, \
-         ceiling {}",
-        now_ms() + MAX_CLOCK_SKEW_MS
-    );
-
-    // And the poison now lives in a table nothing prunes.
-    let tombs = clocks_for(&a, ME);
-    let worst = tombs.iter().copied().max().unwrap_or(0);
-    assert!(
-        worst > now_ms() + MAX_CLOCK_SKEW_MS,
-        "the surviving poison should sit in `tombstones`, which has no pruner: worst {worst}"
+        worst <= ceiling(),
+        "Clear History stamped {worst}, past what any peer accepts: the user cleared their \
+         history and the other machine never hears about it"
     );
 }
 
@@ -334,21 +336,54 @@ fn r10_clear_never_stamps_below_a_future_clock_it_already_holds() {
     // delete sits below the peer's cursor and never travels.
     let s = store();
     seed_item(&s, ME, "m1", now_ms() - 5_000, false);
-    let poison = now_ms() + 5 * MAX_CLOCK_SKEW_MS;
+    // (a) INSIDE the window: the Clear must beat what we already hold, so a
+    //     peer sitting at that cursor still hears about the deletes.
+    let held = now_ms() + MAX_CLOCK_SKEW_MS / 2;
     s.conn_for_test()
+        .execute(
+            "INSERT INTO tombstones (source_machine, origin_id, deleted_at, local) VALUES (?1,'m0',?2,1)",
+            rusqlite::params![ME, held],
+        )
+        .unwrap();
+    s.clear(None).unwrap();
+    let inside = clocks_for(&s, ME).into_iter().max().unwrap();
+    assert!(
+        inside > held,
+        "inside the window the Clear must beat the clock we already hold: {inside} vs {held}"
+    );
+
+    // (b) BEYOND the window: it must NOT keep climbing.
+    //
+    // This half changed, deliberately, and it is the trade round 10 forced. A
+    // clock five skew-windows out cannot be protecting any correctly-clocked
+    // peer's cursor, because that peer refused the rows that put it there. So
+    // climbing above it buys nothing and costs everything: the deletes are
+    // stamped where no peer will accept them, and Clear History becomes a
+    // permanent no-op on the other machine that fixing the clock does not undo.
+    //
+    // Stamping at the ceiling is above every cursor that really exists and
+    // inside what a correct peer accepts.
+    let s2 = store();
+    seed_item(&s2, ME, "a", now_ms() - 30_000, false);
+    let poison = now_ms() + 5 * MAX_CLOCK_SKEW_MS;
+    s2.conn_for_test()
         .execute(
             "INSERT INTO tombstones (source_machine, origin_id, deleted_at, local) VALUES (?1,'m0',?2,1)",
             rusqlite::params![ME, poison],
         )
         .unwrap();
-
-    s.clear(None).unwrap();
-    let stamped = clocks_for(&s, ME);
-    let m1 = stamped.iter().copied().max().unwrap();
+    s2.clear(None).unwrap();
+    let beyond = clocks_for(&s2, ME)
+        .into_iter()
+        .filter(|c| *c != poison)
+        .max()
+        .expect("the clear wrote a tombstone");
     assert!(
-        m1 > poison,
-        "the Clear must beat the future clock we already hold: {m1} vs {poison}"
+        beyond <= now_ms() + MAX_CLOCK_SKEW_MS,
+        "the Clear chased a clock five windows out to {beyond}: no peer accepts that, so the \
+         user cleared their history and the other machine never hears about it"
     );
+    assert!(beyond > now_ms() - 1_000, "and it must not be stamped in the past: {beyond}");
 }
 
 #[test]
@@ -774,22 +809,234 @@ fn r10_extreme_peer_clocks_never_panic_or_overflow() {
 
 #[test]
 fn r10_a_saturating_clock_would_stop_being_strictly_above_itself() {
-    // `next_clock_in` uses `newest.saturating_add(1)`. At i64::MAX that returns
-    // i64::MAX, so "strictly above everything held" quietly becomes "equal to".
-    // No production path can put i64::MAX on our own source (both apply paths
-    // refuse it and the local paths climb by one), so this pins the invariant
-    // rather than reporting a defect: if a future change lets a clock in
-    // unchecked, the strictness is what is lost.
+    // The saturation edge is now unreachable, and the ceiling clamp is why.
+    //
+    // `newest.saturating_add(1)` at `i64::MAX` returns `i64::MAX`, so "strictly
+    // above" would quietly become "equal to" and two rows could share a clock.
+    // The clamp removes the question: whatever `newest` is, the result is at
+    // most `now + MAX_CLOCK_SKEW_MS`, which is nowhere near the saturation
+    // point, so the `+1` never has to carry the invariant on its own.
     let s = store();
-    seed_item(&s, ME, "sat", i64::MAX, false);
-    let id = s.insert_clipboard("after saturation", None, None).unwrap();
-    assert_eq!(
-        updated_at_of(&s, id),
-        i64::MAX,
-        "saturation is expected here; the point is that it is no longer STRICTLY above"
+    s.conn_for_test()
+        .execute(
+            "INSERT INTO items (kind, text, created_at, updated_at, source_machine, origin_id)
+             VALUES ('clipboard', 'x', ?1, ?1, ?2, 'max')",
+            rusqlite::params![i64::MAX, ME],
+        )
+        .unwrap();
+
+    let id = s.insert_clipboard("after", None, None).unwrap();
+    let clock: i64 = s
+        .conn_for_test()
+        .query_row("SELECT updated_at FROM items WHERE id=?1", rusqlite::params![id], |r| r.get(0))
+        .unwrap();
+    assert!(
+        clock < i64::MAX,
+        "a row we hold at i64::MAX made the next local write saturate to the same value, so two \
+         rows share a clock and one of them is unreachable to paging"
     );
-    // Two rows now share one clock, and paging only survives that because the
-    // cursor is a pair.
-    let page = s.items_from(ME, i64::MAX, "", 10).unwrap();
-    assert_eq!(page.len(), 2, "the pair cursor must still separate them");
+    assert!(
+        clock <= now_ms() + MAX_CLOCK_SKEW_MS,
+        "and the clamp must hold even against an absurd stored value: {clock}"
+    );
+}
+
+// ===========================================================================
+// R10-7. CRITERION B. MIGRATIONS, INCLUDING WHEN INTERRUPTED.
+//
+// The migration now runs in ONE transaction, so a database this build writes
+// can never have a version stamp behind its schema. A database damaged by the
+// build BEFORE that fix can, and the guards exist precisely so those still
+// open. This walks every stamp from 0 to 7 over a full v7 schema and asserts
+// the store opens, keeps every row, and lands on the same schema.
+// ===========================================================================
+
+/// Everything that describes the shape of the database, ordered, so two of
+/// them can be compared directly.
+fn schema_of(conn: &rusqlite::Connection) -> Vec<String> {
+    let mut st = conn
+        .prepare(
+            "SELECT type || ' ' || name || ' :: ' || COALESCE(sql,'')
+               FROM sqlite_master ORDER BY type, name",
+        )
+        .unwrap();
+    let v: Vec<String> = st.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+    v
+}
+
+fn seed_a_full_store(path: &std::path::Path) {
+    let mut s = Store::open(path).unwrap();
+    s.set_device_id(ME);
+    s.insert_clipboard("one", None, None).unwrap();
+    s.insert_clipboard("two", None, None).unwrap();
+    let id = s.insert_clipboard("three", None, None).unwrap();
+    s.set_pinned(id, true).unwrap();
+    s.apply_remote_item(
+        PEER,
+        &RemoteItem {
+            source_machine: PEER.into(),
+            origin_id: "p1".into(),
+            kind: "clipboard".into(),
+            text: "from the laptop".into(),
+            created_at: now_ms() - 1_000,
+            updated_at: now_ms() - 1_000,
+            pinned: false,
+        },
+    )
+    .unwrap();
+    s.apply_remote_tombstone(
+        PEER,
+        &RemoteTombstone {
+            source_machine: PEER.into(),
+            origin_id: "p2".into(),
+            deleted_at: now_ms() - 500,
+        },
+    )
+    .unwrap();
+    s.dict_upsert("parle", &["parlay".into()], false).unwrap();
+}
+
+#[test]
+fn r10_a_version_stamp_behind_the_schema_still_opens_and_keeps_every_row() {
+    let dir = std::env::temp_dir().join(format!("parle-r10-mig-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // The reference: a store built by this code, untouched.
+    let reference_path = dir.join("reference.db");
+    let _ = std::fs::remove_file(&reference_path);
+    seed_a_full_store(&reference_path);
+    let (reference_schema, reference_rows) = {
+        let s = Store::open(&reference_path).unwrap();
+        let rows: i64 =
+            s.conn_for_test().query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        (schema_of(s.conn_for_test()), rows)
+    };
+    assert_eq!(reference_rows, 4, "premise: the seed must have written four rows");
+
+    let mut failures: Vec<String> = Vec::new();
+    for stamp in 0..=7i64 {
+        let path = dir.join(format!("stamp{stamp}.db"));
+        let _ = std::fs::remove_file(&path);
+        std::fs::copy(&reference_path, &path).unwrap();
+        {
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.pragma_update(None, "user_version", stamp).unwrap();
+        }
+        match Store::open(&path) {
+            Err(e) => failures.push(format!("stamp {stamp}: open failed: {e}")),
+            Ok(s) => {
+                let rows: i64 = s
+                    .conn_for_test()
+                    .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+                    .unwrap();
+                if rows != reference_rows {
+                    failures.push(format!("stamp {stamp}: {rows} rows, expected {reference_rows}"));
+                }
+                let got = schema_of(s.conn_for_test());
+                if got != reference_schema {
+                    let diff: Vec<&String> =
+                        got.iter().filter(|l| !reference_schema.contains(l)).collect();
+                    failures.push(format!("stamp {stamp}: schema differs, e.g. {:?}", diff.first()));
+                }
+                let nulls: i64 = s
+                    .conn_for_test()
+                    .query_row("SELECT COUNT(*) FROM items WHERE updated_at IS NULL", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                if nulls != 0 {
+                    failures.push(format!("stamp {stamp}: {nulls} rows lost their clock"));
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    let _ = std::fs::remove_file(&reference_path);
+    assert!(
+        failures.is_empty(),
+        "{} of 8 version stamps did not survive re-opening; first few: {:?}",
+        failures.len(),
+        failures.iter().take(8).collect::<Vec<_>>()
+    );
+}
+
+/// The same defect, constructed the way it actually happens rather than by
+/// setting a pragma on a finished store.
+///
+/// The build BEFORE the migration became one transaction ran every step
+/// un-transacted and stamped `user_version` only at the very end. A crash or a
+/// force quit after the v5 `CREATE TABLE source_marks` therefore leaves the
+/// v5-shaped table on disk with the stamp still where it started. Every ALTER
+/// in `init` is guarded against exactly that. The v4 seed INSERT is not.
+#[test]
+fn r10_a_pre_transaction_crash_at_the_v5_step_makes_the_database_unopenable() {
+    let dir = std::env::temp_dir().join(format!("parle-r10-v5crash-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("crashed.db");
+    let _ = std::fs::remove_file(&path);
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(V1_SCHEMA).unwrap();
+        c.execute(
+            "INSERT INTO items (kind, text, created_at) VALUES ('clipboard','a password',10)",
+            [],
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 1i64).unwrap();
+        // What the old build had autocommitted by the time it died: the v3
+        // columns and the v5-shaped receipts table. The stamp is still 1.
+        c.execute_batch(
+            "ALTER TABLE items ADD COLUMN origin_id TEXT;
+             ALTER TABLE items ADD COLUMN updated_at INTEGER;
+             CREATE TABLE tombstones (
+                 source_machine TEXT NOT NULL,
+                 origin_id TEXT NOT NULL,
+                 deleted_at INTEGER NOT NULL,
+                 PRIMARY KEY (source_machine, origin_id)
+             );
+             CREATE TABLE source_marks (
+                 peer_machine   TEXT NOT NULL,
+                 source_machine TEXT NOT NULL,
+                 received_clock INTEGER NOT NULL,
+                 PRIMARY KEY (peer_machine, source_machine)
+             );",
+        )
+        .unwrap();
+    }
+    let reopened = Store::open(&path);
+    let err = reopened.as_ref().err().map(|e| e.to_string());
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        reopened.is_ok(),
+        "an interrupted upgrade must be recoverable, exactly as the v1, v2, v3 and v6 steps \
+         already are. The v4 seed INSERT is unguarded: {err:?}"
+    );
+}
+
+#[test]
+fn r10_rewinding_the_stamp_to_v4_destroys_every_receipt() {
+    // The milder half of the same problem, and the reason the v4 seed cannot
+    // simply be deleted: v5 DROPs `source_marks` unconditionally. A stamp of 4
+    // on a live store therefore throws away every cursor, so every peer
+    // re-offers its whole history. Idempotent, but it is a full resync, and it
+    // is worth knowing it is what a stale stamp costs.
+    let dir = std::env::temp_dir().join(format!("parle-r10-v4-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("v4.db");
+    let _ = std::fs::remove_file(&path);
+    {
+        let mut s = Store::open(&path).unwrap();
+        s.set_device_id(ME);
+        s.note_received_at(PEER, PEER, now_ms() - 1_000, "p1").unwrap();
+        assert_eq!(s.watermarks(PEER).unwrap().len(), 1, "premise: one receipt must exist");
+    }
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.pragma_update(None, "user_version", 4i64).unwrap();
+    }
+    let s = Store::open(&path).unwrap();
+    let left = s.watermarks(PEER).unwrap().len();
+    drop(s);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(left, 0, "documenting the cost: a stamp of 4 wipes the receipts");
 }

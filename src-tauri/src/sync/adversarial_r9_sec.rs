@@ -102,21 +102,39 @@ fn r9_h1_a_palette_copy_launders_an_excluded_row_back_onto_the_wire() {
     let mac = std::fs::read_to_string(repo_root().join("src-tauri/src/platform/macos.rs"))
         .expect("macos.rs is readable");
 
-    let write_fn = mac
-        .split("pub fn write_clipboard(text: &str) {")
-        .nth(1)
-        .and_then(|s| s.split('}').next())
-        .expect("write_clipboard is in the file");
+    // MECHANISM REVERSED BY ROUND 10, and the disagreement is recorded.
+    //
+    // Round 9 (this test, as written): macOS `write_clipboard` must mark its
+    // own writes TransientType so the monitor skips them.
+    //
+    // Round 10: TransientType is a claim about the CONTENT, "nobody should keep
+    // this". Using it to mean "we wrote this" told Alfred, Raycast, Maccy and
+    // every other clipboard manager to discard the row the user had just
+    // deliberately pressed Copy on. The leak was real; the instrument was far
+    // too broad.
+    //
+    // Self-capture is suppressed by IDENTITY now: `write_clipboard_impl`
+    // records the pasteboard change count of its own write and the monitor
+    // skips exactly that change, which makes no claim about the text at all.
+    // Round 10 wins: it closes the same leak without relabelling the user's
+    // data for every other app on the machine.
     assert!(
-        write_fn.contains("write_clipboard_impl(text, true,"),
-        "macOS write_clipboard leaves its own writes UNMARKED, so Parle's monitor re-captures \
-         them under Parle's own app id and the outbound exclusion filter no longer matches: \
-         pressing Copy on an excluded row in the palette sends it to every paired device"
+        mac.contains("fn we_wrote_change(") && mac.contains("OUR_LAST_WRITE"),
+        "nothing identifies Parle's own clipboard write, so the monitor re-captures it under \
+         Parle's own app id and the outbound exclusion filter no longer matches"
+    );
+    let monitor = std::fs::read_to_string(
+        repo_root().join("src-tauri/src/platform/macos_clipboard.rs"),
+    )
+    .expect("macos_clipboard.rs is readable");
+    assert!(
+        monitor.contains("we_wrote_change("),
+        "the monitor does not skip our own writes, so pressing Copy on an excluded row in the \
+         palette re-captures it and sends it to every paired device"
     );
 
-    // Control: the concealed variant is still distinct, so the assertion above
-    // is not passing because everything now claims to be concealed. Transient
-    // says "this is our own write"; concealed says something about the content.
+    // Control: the concealed variant is still distinct, and still a claim about
+    // content rather than about who wrote it.
     assert!(
         mac.contains("pub fn write_clipboard_marked(text: &str, concealed: bool)"),
         "the control is wrong: the concealed variant is gone"
@@ -291,10 +309,20 @@ fn r9_h4_the_secure_field_drop_depends_on_a_paste_setting() {
         .collect::<Vec<_>>()
         .join("\n");
 
+    // ROUND 10 NARROWED THIS. Round 9 asked `secure_input_active()` and
+    // nothing else; round 10 confirmed on hardware that the flag is
+    // process-global and reads TRUE with a password manager merely running, so
+    // that gate discarded every dictation. The dictation gate asks the FOCUSED
+    // ELEMENT now; the global flag still decides the clipboard marking, where
+    // over-marking costs the user nothing they can see.
+    assert!(
+        code.contains("focused_field_is_secure()"),
+        "the dictation gate must ask which element has focus: the system-wide flag cannot tell \
+         a password field from a password manager being open"
+    );
     assert!(
         code.contains("secure_input_active()"),
-        "pipeline.rs never asks the platform whether secure input is on; it exists on both \
-         platforms and is the only honest source for this decision"
+        "the clipboard marking should still widen to the global flag"
     );
     assert!(
         !code.contains("manual_paste_required"),
@@ -309,7 +337,7 @@ fn r9_h4_the_secure_field_drop_depends_on_a_paste_setting() {
     );
     // And that branch marks the clipboard when the field is secure.
     assert!(
-        code.contains("write_clipboard_marked(&text, into_secure_field())"),
+        code.contains("write_clipboard_marked(&text, should_conceal_clipboard())"),
         "the injection-disabled branch writes the clipboard unmarked, so with secure input on \
          every other clipboard manager on the machine keeps the password"
     );

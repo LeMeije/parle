@@ -24,6 +24,20 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn read_src(rel: &str) -> String {
+    std::fs::read_to_string(repo_root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+}
+
+/// Source with `//` comments stripped, so a passing mention of a word in prose
+/// cannot make a guard find nothing while looking as though it found something.
+fn code_of(rel: &str) -> String {
+    read_src(rel)
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn store_for(me: &str) -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.set_device_id(me);
@@ -49,44 +63,61 @@ fn outbound_texts(s: &Store) -> Vec<String> {
 /// reads as coverage in the source and is not what a real user is running.
 #[test]
 fn r10_a_an_existing_install_never_gains_the_new_exclusions() {
-    // Exactly what a round-8 install has on disk. Nothing exotic: this is the
-    // shipped default of the previous build, round-tripped through serde.
-    let round8_list = r#"[
-        "com.1password.1password","com.agilebits.onepassword7","1Password.exe",
-        "com.bitwarden.desktop","Bitwarden.exe",
-        "com.lastpass.LastPass","LastPass.exe",
-        "org.keepassxc.keepassxc","KeePassXC.exe",
-        "com.dashlane.Dashlane","Dashlane.exe",
-        "com.kee.keepass","KeePass.exe",
-        "in.sinew.Enpass-Desktop","Enpass.exe"
-    ]"#;
-    let stored = format!(r#"{{"history":{{"excluded_apps":{round8_list}}}}}"#);
-    let loaded: Settings =
-        serde_json::from_str(&stored).expect("an old settings.json still deserialises");
+    // INVERTED. `#[serde(default)]` fills in fields that are ABSENT and does
+    // nothing for a field that is present and stale, and `excluded_apps` is
+    // present in every settings.json this app has ever written. So additions to
+    // the shipped list reached new installs only, and every machine the app had
+    // already run on kept the list it was first given, while the source read as
+    // though it was covered.
+    //
+    // `Settings::migrate` unions the stored list with the defaults on load.
+    let dir = std::env::temp_dir().join(format!("parle-r10a-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
 
-    let fresh = HistorySettings::default().excluded_apps;
-    assert!(
-        fresh.iter().any(|a| a == "com.apple.Passwords"),
-        "premise: the round-9 default really does carry the system password manager"
-    );
+    // An install created before the round-9 additions.
+    let mut old = echokey_core::settings::Settings::default();
+    old.version = 1;
+    old.history.excluded_apps =
+        vec!["com.1password.1password".into(), "1Password.exe".into()];
+    std::fs::write(&path, serde_json::to_string_pretty(&old).unwrap()).unwrap();
 
+    let loaded = echokey_core::settings::Settings::load(&path).unwrap();
+    let have: Vec<String> =
+        loaded.history.excluded_apps.iter().map(|a| a.to_ascii_lowercase()).collect();
+
+    let defaults = echokey_core::settings::Settings::default().history.excluded_apps;
     let missing: Vec<&String> =
-        fresh.iter().filter(|a| !loaded.history.excluded_apps.contains(a)).collect();
+        defaults.iter().filter(|d| !have.contains(&d.to_ascii_lowercase())).collect();
     assert!(
         missing.is_empty(),
-        "R10-A: an upgraded install keeps the old list; these round-9 additions \
-         never reach it: {missing:?}"
+        "an upgraded install still never gains these: {missing:?}"
     );
+    // The user's own entry survives: a union, not a replacement.
+    assert!(
+        have.iter().any(|a| a == "com.1password.1password"),
+        "the migration must not discard what was already there"
+    );
+    assert_eq!(loaded.version, echokey_core::settings::SETTINGS_VERSION);
 }
 
 /// The consequence, at the layer that decides what leaves the machine. A row
 /// copied out of macOS Passwords on an UPGRADED install is servable.
 #[test]
 fn r10_a2_an_upgraded_install_still_replicates_the_system_password_manager() {
-    let stored = r#"{"history":{"excluded_apps":[
+    // Loaded through `Settings::load`, which is what the running app calls and
+    // which is where the migration lives. Round 10's version used a bare
+    // `serde_json::from_str`, which is precisely the call that skipped the
+    // migration and produced the finding; keeping it here would keep asserting
+    // the defect after the fix.
+    let stored = r#"{"version":1,"history":{"excluded_apps":[
         "com.1password.1password","com.bitwarden.desktop","org.keepassxc.keepassxc"
     ]}}"#;
-    let loaded: Settings = serde_json::from_str(stored).unwrap();
+    let dir = std::env::temp_dir().join(format!("parle-r10a2-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    std::fs::write(&path, stored).unwrap();
+    let loaded = Settings::load(&path).unwrap();
 
     let mut a = store_for(A);
     a.insert_clipboard("hunter2-bank-password", Some("com.apple.Passwords"), Some("Passwords"))
@@ -101,7 +132,7 @@ fn r10_a2_an_upgraded_install_still_replicates_the_system_password_manager() {
     );
     assert!(
         !out.iter().any(|t| t == "hunter2-bank-password"),
-        "R10-A2: on an upgraded install a password copied from macOS Passwords is \
+        "on an upgraded install a password copied from macOS Passwords is \
          handed to every paired device: {out:?}"
     );
 }
@@ -147,27 +178,44 @@ fn r10_a3_on_a_fresh_install_the_capitalised_entry_really_does_match() {
 /// `cfg`-ed out of this build. Comments are stripped so prose cannot satisfy it.
 #[test]
 fn r10_b_the_windows_secure_field_gate_is_a_constant_false() {
-    let win = std::fs::read_to_string(repo_root().join("src-tauri/src/platform/windows.rs"))
-        .expect("windows.rs is readable");
-    let code: String = win
-        .lines()
-        .map(|l| l.split("//").next().unwrap_or(""))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // INVERTED, partially, and the residual is pinned rather than hidden.
+    //
+    // The finding was right: both dictation paths depended on a gate that was a
+    // bare `false` on Windows, with no comment saying so, while `pipeline.rs`
+    // claimed the function "exists on both platforms and answers the real
+    // question". That is the `com.kee.keepass` pattern: a stub that reads as
+    // coverage.
+    //
+    // Windows now implements `focused_field_is_secure` via `GetGUIThreadInfo` +
+    // `ES_PASSWORD`, which covers classic Win32 edit controls. It does NOT see
+    // a WinUI PasswordBox or a Chromium `<input type=password>`, which need UI
+    // Automation. That gap is real and is written down in the function, so it
+    // cannot be mistaken for coverage.
+    let src = read_src("src-tauri/src/platform/windows.rs");
 
-    let body = code
-        .split("pub fn secure_input_active() -> bool {")
+    assert!(
+        src.contains("pub fn focused_field_is_secure()"),
+        "Windows has no focused-field check at all, so a password dictated on the PC is stored \
+         and replicated"
+    );
+    let f = src
+        .split("pub fn focused_field_is_secure()")
         .nth(1)
-        .and_then(|s| s.split('}').next())
-        .expect("premise: Windows defines secure_input_active");
-
-    assert_ne!(
-        body.trim(),
-        "false",
-        "R10-B: the secure-field gate both dictation paths now depend on is a \
-         constant `false` on Windows, so a password dictated on the PC is stored \
-         and replicated. A mitigation exists (UI Automation IsPassword); the \
-         finding is its absence, not the absence of an API."
+        .and_then(|s| s.split("\npub fn ").next())
+        .expect("the function is in the file");
+    assert!(
+        f.contains("ES_PASSWORD"),
+        "the Windows check does not actually inspect the focused control's style"
+    );
+    assert!(
+        f.contains("Option<bool>") || src.contains("focused_field_is_secure() -> Option<bool>"),
+        "it must distinguish 'not a password field' from 'could not tell'"
+    );
+    // The known gap is stated where the code is.
+    assert!(
+        src.contains("UI Automation") || src.contains("KNOWN GAP"),
+        "the WinUI and Chromium gap must be written down, or the next reader takes this for \
+         full coverage exactly as they took the constant `false`"
     );
 }
 
@@ -250,25 +298,29 @@ fn r10_c_the_restore_path_strips_the_concealed_marker_from_the_users_clipboard()
 /// the `into_secure_field()` gate in `pipeline.rs` and is not covered by it.
 #[test]
 fn r10_c2_the_marker_is_written_after_the_payload_not_with_it() {
-    let mac = std::fs::read_to_string(repo_root().join("src-tauri/src/platform/macos.rs"))
-        .expect("macos.rs is readable");
-    let body = mac
-        .split("fn write_clipboard_impl(text: &str, transient: bool, concealed: bool) {")
+    // INVERTED. `clearContents` is what advances the change count, so setting
+    // the payload first and the markers afterwards left a window in which the
+    // pasteboard had changed and carried no marker yet. A monitor polling in
+    // that window saw unmarked content. Microseconds against a 150ms poll, so
+    // it was a race rather than a routine leak, but it is closed by declaring
+    // every type before any value is set.
+    let code = code_of("src-tauri/src/platform/macos.rs");
+    let f = code
+        .split("fn write_clipboard_impl(")
         .nth(1)
-        .and_then(|s| s.split("\npub fn ").next())
-        .expect("premise: write_clipboard_impl is in the file");
-
-    let clear = body.find("clearContents()").expect("it clears first");
-    let payload = body.find("setString_forType(&value").expect("then writes the text");
-    let marker = body.find("TransientType").expect("then marks it");
-    assert!(clear < payload && payload < marker, "premise: this is the order");
+        .and_then(|s| s.split("\nfn ").next())
+        .expect("write_clipboard_impl is in the file");
 
     assert!(
-        body.contains("declareTypes") || body.contains("declare_types"),
-        "R10-C2: the pasteboard is populated payload-first and marked afterwards, so \
-         the change is observable through a window in which the content is present \
-         and the 'do not capture this' marker is not. `declareTypes:owner:` names \
-         every type in one call before any value is set and closes that window."
+        f.contains("declareTypes_owner"),
+        "the markers are still attached after the payload, so there is a window in which the \
+         pasteboard has changed and carries no marker"
+    );
+    let declare = f.find("declareTypes_owner").expect("checked above");
+    let set_value = f.find("setString_forType(&value").expect("the payload is still written");
+    assert!(
+        declare < set_value,
+        "the types must be declared BEFORE the value is set, or the window is still open"
     );
 }
 
@@ -327,11 +379,16 @@ fn r10_d_the_windows_text_read_has_no_globalsize_bound() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // The premise: the unbounded scan exists, more than once.
-    let scans = code.matches("while *ptr.add(len) != 0 {").count();
-    assert!(
-        scans >= 2,
-        "premise: the NUL scan appears in both read paths, found {scans}"
+    // The premise: both read paths scan for a NUL terminator. Matched on the
+    // dereference alone, NOT on the loop condition, so adding a bound changes
+    // the verdict rather than voiding the premise.
+    let scans: Vec<&str> = code.match_indices("*ptr.add(len) != 0").map(|(i, _)| &code[..i]).collect();
+    assert_eq!(
+        scans.len(),
+        2,
+        "premise: the NUL scan appears in `read_clipboard` and in \
+         `read_clipboard_unless_excluded`, found {}",
+        scans.len()
     );
     // The fixed DWORD read is the control: the file knows how to do this.
     assert!(
@@ -339,27 +396,43 @@ fn r10_d_the_windows_text_read_has_no_globalsize_bound() {
         "control: the DWORD read really is bounded, so the omission below is an omission"
     );
 
-    // Every unbounded scan must be preceded by a size bound on the SAME handle.
-    let bounded = code
-        .split("while *ptr.add(len) != 0 {")
-        .take(scans)
+    // Every scan must carry a size bound taken from the SAME handle, near it.
+    let unbounded = scans
+        .iter()
         .filter(|before| {
-            let tail = &before[before.len().saturating_sub(600)..];
-            tail.contains("GlobalSize") && tail.contains("CF_UNICODETEXT")
+            let tail = &before[before.len().saturating_sub(400)..];
+            !(tail.contains("GlobalSize") && tail.contains("len <"))
         })
         .count();
     assert_eq!(
-        bounded, scans,
-        "R10-D: {} of {scans} CF_UNICODETEXT reads dereference another process's \
-         allocation with no `GlobalSize` bound, the exact defect round 9 fixed one \
-         branch above",
-        scans - bounded
+        unbounded, 0,
+        "R10-D: {unbounded} of 2 CF_UNICODETEXT reads walk another process's \
+         allocation looking for a NUL with no `GlobalSize` bound, the exact defect \
+         round 9 fixed one branch above in the same function"
     );
 }
 
 // ---------------------------------------------------------------------------
 // R10-E. Attacked and HELD. Recorded so the next round starts elsewhere.
 // ---------------------------------------------------------------------------
+
+fn collect_field_names(v: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![v];
+    while let Some(node) = stack.pop() {
+        match node {
+            serde_json::Value::Object(m) => {
+                for (k, child) in m {
+                    out.push(k.clone());
+                    stack.push(child);
+                }
+            }
+            serde_json::Value::Array(a) => stack.extend(a.iter()),
+            _ => {}
+        }
+    }
+    out
+}
 
 /// I. No paired key, and nothing key-shaped, is serialisable into settings.json.
 #[test]
@@ -373,12 +446,26 @@ fn r10_e1_settings_carry_no_key_material() {
         last_seen: Some(1),
     });
     let json = serde_json::to_string(&s).unwrap();
-    for forbidden in ["key", "secret", "psk", "noise", "spake"] {
-        assert!(
-            !json.to_ascii_lowercase().contains(forbidden),
-            "settings.json carries a {forbidden}-shaped field: {json}"
-        );
+    // Field NAMES only. The first version of this matched raw substrings and
+    // fired on `"hotkeys"` and `"key":"Fn"`, which is a hotkey binding and not
+    // a secret: a guard that flags the theme is a guard nobody will read.
+    let names = collect_field_names(&serde_json::from_str(&json).unwrap());
+    // `key` is deliberately NOT here: `hotkeys.dictation.key` is a keyboard
+    // binding, and a guard that fires on the hotkey settings is a guard that
+    // gets muted. The 64-hex shape check below is what actually catches a key.
+    for forbidden in ["secret", "psk", "noise", "spake", "paired_key", "shared_secret"] {
+        let hit: Vec<&String> = names
+            .iter()
+            .filter(|n| n.to_ascii_lowercase() == forbidden)
+            .collect();
+        assert!(hit.is_empty(), "settings.json carries a {forbidden} field");
     }
+    // And nothing in it is 64 hex characters, which is how a PairedKey is
+    // written by `keystore::to_hex`. That is the shape, not the name.
+    assert!(
+        !json.split('"').any(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())),
+        "settings.json carries a 64-hex-character string, the exact shape keystore writes"
+    );
     // And the struct that DOES hold peers has exactly three fields, none secret.
     let one = serde_json::to_value(&s.sync.paired[0]).unwrap();
     assert_eq!(
@@ -388,17 +475,62 @@ fn r10_e1_settings_carry_no_key_material() {
     );
 }
 
-/// The macOS gate is not stuck on right now, on this machine, unprompted. If
-/// it were, R10-B2's silent-drop failure would already be live here.
+/// R10-F. **The gate is ON right now, on this machine, with no password field
+/// anywhere.**
+///
+/// `IsSecureEventInputEnabled()` is not a question about the focused field. It
+/// is a SYSTEM-WIDE, process-global flag that any application can raise and
+/// that stays raised until that application lowers it or exits. 1Password
+/// raises it. Terminal's Secure Keyboard Entry raises it. An app that crashes
+/// while holding it leaves it raised.
+///
+/// Round 9 made every dictation depend on it, on both paths, unconditionally.
+/// So while it is up: every dictation returns `item_id = -1` and is never
+/// stored, and every `copy_to_clipboard` write is marked ConcealedType so the
+/// user's other clipboard managers drop it too. The only report is a
+/// `tracing::info!`. The app looks like it is working and silently keeps
+/// nothing. Round 8's version, derived from `InjectionOutcome`, could not do
+/// this on the `copy_to_clipboard` branch at all.
+///
+/// Verified outside Rust as well, so this is not an FFI artefact: a three-line
+/// C program linked against Carbon prints `raw byte = 1` on this machine,
+/// repeatedly, over several seconds, with 1Password running and Terminal's
+/// `SecureKeyboardEntry` default reading 0.
 #[cfg(target_os = "macos")]
 #[test]
-fn r10_e2_secure_input_is_not_stuck_on_this_machine() {
-    let on = crate::platform::imp::secure_input_active();
+fn r10_f_secure_input_is_globally_on_so_every_dictation_is_silently_dropped() {
+    // INVERTED. The finding was the most consequential of the round and it was
+    // confirmed on this hardware: `IsSecureEventInputEnabled()` reads TRUE
+    // continuously with a password manager merely RUNNING and no password field
+    // focused. Round 9 keyed both dictation paths off it, so the app threw away
+    // every dictation, all day, reporting nothing but a log line.
+    //
+    // The gate asks the FOCUSED ELEMENT now. The global flag still decides
+    // whether to mark the clipboard concealed, where over-marking costs the
+    // user nothing visible, but it must not decide whether to keep the row.
+    let code = code_of("src-tauri/src/pipeline.rs");
+
     assert!(
-        !on,
-        "IsSecureEventInputEnabled() is true with no password field in sight; every \
-         dictation on this machine is currently being dropped from history"
+        code.contains("focused_field_is_secure()"),
+        "the dictation gate does not ask which element has focus, so it cannot tell a password \
+         field from a password manager being open"
     );
+    assert!(
+        !code.contains("fn into_secure_field() -> bool {\n    platform::imp::secure_input_active()"),
+        "the gate is still the bare system-wide flag"
+    );
+    // The concealed decision may still consult it, and should.
+    assert!(
+        code.contains("secure_input_active()"),
+        "the clipboard marking should still widen to the global flag: marking an ordinary \
+         transcript concealed costs nothing the user sees, failing to mark a password does"
+    );
+
+    // And the global flag really is on right now, which is what made this a
+    // finding rather than a theory. If it is ever false here the test still
+    // holds, it just stops being a live demonstration.
+    let globally_on = crate::platform::macos::secure_input_active();
+    eprintln!("R10-F: IsSecureEventInputEnabled() is currently {globally_on}");
 }
 
 /// The round-9 monitor restructure preserved every branch's bookkeeping. The
@@ -418,13 +550,38 @@ fn r10_e3_every_monitor_branch_still_returns_a_fresh_frontmost_app() {
         .and_then(|s| s.split("\n                        if let Some(ev) = event").next())
         .expect("premise: the poll body is inside a pool");
 
-    // Five exits, every one of them carrying a fresh reading.
+    // FIVE exits now, every one carrying a fresh reading.
+    //
+    // It was four, matching the pre-round-9 loop. Round 10 added a fifth: an
+    // early return when the change was one PARLE made, identified by change
+    // count rather than by marking our own writes TransientType (which told
+    // every other clipboard manager to bin the row the user had just
+    // deliberately copied).
+    //
+    // The COUNT is not the invariant, the property is: every path out of the
+    // pool must carry a fresh reading, or the next capture is attributed to a
+    // stale app and the exclusion list is matched against the wrong one. The
+    // count is how that property is checked, so it moves when a branch is
+    // legitimately added.
     let exits = body.matches("macos::frontmost_app()").count();
     assert_eq!(
         exits, 5,
         "a branch stopped refreshing prev_app; the next capture is attributed to a \
          stale app and the exclusion list is matched against the wrong one"
     );
+    // Named individually so a future edit cannot satisfy the count by moving
+    // one call and dropping another.
+    for branch in [
+        "if !enabled.load(Ordering::SeqCst) {",
+        "if now == last {",
+        "if macos::clipboard_is_concealed() {",
+    ] {
+        let after = body.split(branch).nth(1).unwrap_or_else(|| panic!("{branch} is gone"));
+        assert!(
+            after[..after.len().min(200)].contains("macos::frontmost_app()"),
+            "the {branch:?} branch stopped refreshing prev_app"
+        );
+    }
     // `last` is advanced on the disabled branch and on a real change, exactly
     // as before, and nowhere else.
     assert_eq!(

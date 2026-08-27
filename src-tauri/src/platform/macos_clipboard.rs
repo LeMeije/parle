@@ -76,6 +76,14 @@ impl ClipboardMonitor {
                                 return (macos::frontmost_app(), None);
                             }
                             last = now;
+                            // Our OWN write, identified by change count rather
+                            // than by a marker on the content. Marking it
+                            // TransientType also worked, and told every other
+                            // clipboard manager to bin the row the user had
+                            // just deliberately copied.
+                            if macos::we_wrote_change(now) {
+                                return (macos::frontmost_app(), None);
+                            }
                             if macos::clipboard_is_concealed() {
                                 return (macos::frontmost_app(), None);
                             }

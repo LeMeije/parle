@@ -10,7 +10,7 @@
 
 #![cfg(test)]
 
-use echokey_core::history::Store;
+use echokey_core::history::{RemoteItem, Store, MAX_CLOCK_SKEW_MS};
 use echokey_sync::{PairedKey, Session};
 use parking_lot::Mutex;
 use std::net::{TcpListener, TcpStream};
@@ -163,6 +163,19 @@ fn sync_until_quiet(
     panic!("the pair did not go quiet in {max} exchanges");
 }
 
+/// A row with independently chosen clocks, which an honest author cannot make.
+fn crafted_row(source: &str, origin: &str, created_at: i64, updated_at: i64) -> RemoteItem {
+    RemoteItem {
+        source_machine: source.into(),
+        origin_id: origin.into(),
+        kind: "clipboard".into(),
+        text: format!("text for {origin}"),
+        created_at,
+        updated_at,
+        pinned: false,
+    }
+}
+
 fn texts(store: &Arc<Mutex<Store>>) -> Vec<String> {
     let g = store.lock();
     let mut stmt = g
@@ -268,50 +281,52 @@ fn r9_a_legal_but_fast_peer_delete_makes_every_later_row_on_this_machine_unserva
 // ---------------------------------------------------------------------------
 #[test]
 fn r9_a_row_refused_for_its_created_at_is_re_offered_on_every_exchange() {
-    // Control: the same harness, an ordinary row, must go quiet.
-    {
-        let a = store_for(A);
-        let b = store_for(B);
-        a.lock().insert_clipboard("ordinary", None, None).unwrap();
-        let rounds = sync_until_quiet((&a, A), (&b, B), 5);
-        assert!(rounds <= 3, "the control took {rounds} exchanges to go quiet");
-    }
-
+    // REVERSED BY ROUND 10, and the disagreement is recorded rather than
+    // quietly resolved, because two rounds reached opposite conclusions about
+    // the same line and the reasoning matters more than the verdict.
+    //
+    // Round 9 (this test, as written): a row refused for an out-of-range
+    // `created_at` banks nothing, so it is re-offered on every exchange for
+    // ever. Criterion C. Fixed by banking a receipt.
+    //
+    // Round 10: that receipt is banked for a refusal that is TEMPORARY. A
+    // `created_at` two minutes ahead becomes acceptable two minutes from now,
+    // and banking excluded that exact row from every future page permanently.
+    // Criterion A, which is the more serious of the two.
+    //
+    // Round 10 wins on two counts. Losing a row for good is worse than
+    // re-offering it. And the loop is bounded and self-inflicted: the same one
+    // `apply_remote_item` already accepts for an out-of-range `updated_at`, one
+    // re-offer per exchange from a machine whose clock is wrong, ending the
+    // moment it is fixed. An honest author cannot even produce the pair,
+    // because every local write sets `created_at = now` and
+    // `updated_at >= created_at`, so it takes a peer crafting it deliberately.
+    //
+    // What this test pins now is that the waste stays BOUNDED: one re-offer per
+    // exchange, not a growing one, and confined to the crafted row.
     let a = store_for(A);
     let b = store_for(B);
-    a.lock().insert_clipboard("ordinary", None, None).unwrap();
-    // The newest row of ours, captured while this machine's clock was ten
-    // minutes fast, its text edited after the clock was corrected.
-    let bad = a.lock().insert_clipboard("captured on a fast clock", None, None).unwrap();
-    {
-        let g = a.lock();
-        let ahead = now_ms() + 600_000;
-        g.conn_for_test()
-            .execute_batch(&format!(
-                "UPDATE items SET created_at = {ahead} WHERE id = {bad};"
-            ))
-            .unwrap();
-    }
+    let ahead = now_ms() + 2 * MAX_CLOCK_SKEW_MS;
+
+    a.lock().apply_remote_item(A, &crafted_row(A, "ordinary", now_ms() - 5_000, now_ms() - 5_000)).unwrap();
+    a.lock().apply_remote_item(A, &crafted_row(A, "future-created", ahead, now_ms())).unwrap();
 
     let mut carried = Vec::new();
     for _ in 0..4 {
-        let (d, _acc) = sync_bounded((&a, A), (&b, B));
-        carried.push(d.sent_items);
+        carried.push(sync_bounded((&a, A), (&b, B)).0.sent_items);
     }
-    assert_eq!(
-        texts(&b),
-        vec!["ordinary".to_string()],
-        "premise failed: the bad row was applied after all"
+
+    // The ordinary row lands and stops being sent; the crafted one is re-offered
+    // at a steady one per exchange rather than accumulating.
+    assert!(
+        texts(&b).iter().any(|t| t.contains("ordinary")),
+        "the ordinary row must still arrive alongside the crafted one"
     );
-    // Exchange 1 legitimately carries both. Every one after it must carry
-    // nothing.
-    let after_first: usize = carried[1..].iter().sum();
-    assert_eq!(
-        after_first, 0,
-        "after the first exchange the pair still carried {after_first} rows across \
-         three exchanges ({:?}): the refused row banks no receipt and is offered \
-         for ever",
-        carried
+    let tail = &carried[1..];
+    assert!(
+        tail.iter().all(|&n| n <= 1),
+        "the waste is supposed to be one re-offer per exchange from a broken peer, not a \
+         growing one: sent_items per round was {carried:?}"
     );
 }
 

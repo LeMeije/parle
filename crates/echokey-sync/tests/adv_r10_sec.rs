@@ -138,19 +138,52 @@ fn r10_the_sanitiser_still_silently_rewrites_a_zwj_emoji_sequence() {
 /// the user is shown a network failure.
 #[test]
 fn r10_a_refused_peer_name_kills_the_whole_hello_not_just_the_label() {
+    // INVERTED: a display string can no longer deny sync.
+    //
+    // The finding was right and the blast radius was the point. `Hello` is the
+    // FIRST message of every exchange, so putting the character policy there
+    // made a name a decode error: a Mac and a Windows box could not sync AT
+    // ALL, and the user was shown a network failure with no way to connect it
+    // to a name. That is the `Ben=Work` failure mode returning by another door.
+    //
+    // The wire now BOUNDS the name (a cap on allocation, which is what the
+    // message needs from it) and polices nothing. The character policy moved to
+    // where the name is shown: discovery refuses to list such a peer, and
+    // pairing sanitises before storing it.
+    let hostile = "Ben\u{202E}koobcaM sneB".to_string();
+
     let hello = SyncMessage::Hello {
         protocol_version: PROTOCOL_VERSION,
         device_id: DeviceId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
-        device_name: "Ben's ✈\u{FE0F} Mac".to_string(),
+        device_name: hostile.clone(),
     };
-    let err = hello.validate().expect_err(
-        "R10-3 premise: round 9 put the filter on the Hello, so this must refuse",
+    hello.validate().expect(
+        "a hostile display name must not fail the first message of the exchange: the two \
+         machines then cannot sync at all and the user sees a network error",
     );
-    // The point is the BLAST RADIUS, not the refusal: nothing downgrades this
-    // to "show a placeholder name and carry on".
+
+    // Control: the wire still bounds what it must. An unbounded name is a
+    // memory concern, not a cosmetic one, and it is still refused.
+    let huge = SyncMessage::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        device_id: DeviceId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+        device_name: "x".repeat(10_000),
+    };
+    huge.validate()
+        .expect_err("the wire must still refuse an unbounded device name");
+
+    // And the policy still exists where it belongs: this name is not something
+    // the user will ever be shown.
     assert!(
-        format!("{err}").contains("device name"),
-        "the whole message is rejected for a display string: {err}"
+        echokey_sync::validate_device_name(&hostile).is_err(),
+        "the display gate must still refuse a right-to-left override, or a hostile device can \
+         present itself as the user's own machine in the pairing list"
+    );
+    assert!(
+        echokey_sync::sanitise_device_name(&hostile)
+            .map(|n| !n.contains('\u{202E}'))
+            .unwrap_or(true),
+        "and sanitising must strip it for anything that does get stored"
     );
 }
 

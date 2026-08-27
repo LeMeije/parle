@@ -319,8 +319,24 @@ impl Store {
                  );",
             )?;
             // Seed from what we hold, which is the best estimate available for
-            // a store that predates the table. Slightly conservative is fine —
-            // re-offered rows are idempotent — but a hole would not be.
+            // a store that predates the table. Slightly conservative is fine,
+            // since re-offered rows are idempotent, but a hole would not be.
+            //
+            // GUARDED, like every `ALTER` in this function and for the same
+            // reason. `ON CONFLICT(source_machine)` names a constraint that
+            // only the v4 shape has; run against a table already migrated to
+            // v5's `PRIMARY KEY (peer_machine, source_machine)` it fails at
+            // PREPARE time, so `Store::open` returns Err and the app will not
+            // start. Not on a database this build wrote (the whole sequence is
+            // one transaction) but very much on one damaged by the build before
+            // that transaction landed, which stamped `user_version` only at the
+            // very end. This app quits with `libc::_exit(0)`, so that window
+            // was not exotic, and the result is an unopenable history with no
+            // repair path short of deleting it.
+            //
+            // Skipping it when the table is already post-v4 is a no-op by
+            // construction: v5 drops the table unconditionally anyway.
+            if !has_col("source_marks", "peer_machine")? {
             conn.execute(
                 "INSERT INTO source_marks (source_machine, received_clock)
                  SELECT source_machine, MAX(clock) FROM (
@@ -333,6 +349,7 @@ impl Store {
                  ON CONFLICT(source_machine) DO NOTHING",
                 [],
             )?;
+            }
             version = 4;
         }
 
@@ -1029,7 +1046,39 @@ impl Store {
             |r| r.get(0),
         )?;
         let newest = newest_item.unwrap_or(0).max(newest_tomb.unwrap_or(0));
-        let wanted = now.max(newest.saturating_add(1));
+        // Clamp the CLIMB, not the floor.
+        //
+        // Round 8 clamped the floor: past a ceiling it returned the plain wall
+        // clock, which is BELOW what we hold, and that lost rows and deletes
+        // whenever a peer inside the accepted skew pushed us over.
+        //
+        // Round 9 removed the clamp entirely, and traded a recoverable failure
+        // for an unrecoverable one. A machine whose clock was once badly wrong
+        // (a flat CMOS battery, an RTC-versus-UTC dual-boot, someone setting
+        // the date forward to test something) keeps its own `newest` up there
+        // for ever: nothing lowers it, tombstones are never pruned by age, and
+        // both delete and Clear stamp above it. So every row it writes is
+        // stamped days ahead, a correctly-clocked peer refuses all of them, and
+        // FIXING THE CLOCK DOES NOT HELP. Sync discovers, handshakes and
+        // reports clean exchanges while nothing arrives, for as long as the
+        // original drift lasted.
+        //
+        // The clamp belongs on the ceiling because of what a cursor can be. A
+        // peer only ever banks a cursor at or below its OWN `now + skew`, so a
+        // `newest` above our ceiling cannot be protecting any correctly-clocked
+        // peer's cursor: those rows were refused, not received. Stamping at the
+        // ceiling is therefore above every cursor that really exists, and the
+        // machine recovers the moment its clock is corrected.
+        //
+        // Round 9's case is untouched: a peer 90 seconds fast is inside the
+        // window, so `newest + 1` is below the ceiling and wins.
+        //
+        // The residual, stated: a peer whose own clock is more than
+        // MAX_CLOCK_SKEW_MS fast could hold a cursor above our clamp, and rows
+        // we stamp there are lost to that one peer. That peer is by definition
+        // outside the window the design accepts, and it is warned about below.
+        let ceiling = now.saturating_add(MAX_CLOCK_SKEW_MS);
+        let wanted = now.max(newest.saturating_add(1).min(ceiling));
         // NEVER below what we already hold, whatever the drift.
         //
         // This used to fall back to the plain wall clock past a ceiling of
@@ -1056,11 +1105,12 @@ impl Store {
         // So the trade is: certain, permanent, silent loss on one side, against
         // a recoverable refusal on the other. We take the recoverable one, and
         // say so loudly, because a clock this far out is the user's to fix.
-        if wanted > now + MAX_CLOCK_SKEW_MS {
+        if newest >= ceiling {
             tracing::warn!(
-                "sync: the newest clock held for {source} is {} ms ahead of this machine's own. \
-                 Stamping above it anyway so nothing is lost, but a peer with a correct clock may \
-                 refuse these until the clocks agree. Check the time on your devices.",
+                "sync: the newest clock held for {source} is {} ms ahead of this machine's own, \
+                 past what any peer will accept. Stamping at the ceiling so this device can still \
+                 sync; rows written while a clock was that far out may not have reached your other \
+                 devices. Check the time on your devices.",
                 newest.saturating_sub(now)
             );
         }
@@ -1078,6 +1128,13 @@ impl Store {
     pub fn clear(&self, kind: Option<HistoryKind>) -> Result<usize, StoreError> {
         let tx = self.conn.unchecked_transaction()?;
         let now = now_ms();
+        // The SAME clamp `next_clock_impl` applies, and for the same reason: a
+        // clock above this is not protecting any correctly-clocked peer's
+        // cursor, because that peer would have refused the rows that put it
+        // there. Without it, a machine whose clock was once badly wrong found
+        // that Clear History made the poisoning worse and moved it into a table
+        // nothing prunes.
+        let ceiling = now.saturating_add(MAX_CLOCK_SKEW_MS);
         let n = match kind {
             Some(k) => {
                 tx.execute(
@@ -1122,7 +1179,7 @@ impl Store {
                      )
                      INSERT INTO tombstones (source_machine, origin_id, deleted_at, local)
                      SELECT i.source_machine, i.origin_id,
-                            max(?2, COALESCE(n.c, 0) + 1), 1
+                            max(?2, min(COALESCE(n.c, 0) + 1, ?3)), 1
                        FROM items i
                        LEFT JOIN newest n ON n.src = i.source_machine
                       WHERE i.kind=?1 AND i.pinned=0
@@ -1130,7 +1187,7 @@ impl Store {
                      ON CONFLICT(source_machine, origin_id)
                      DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at),
                                    local = 1",
-                    params![kind_str(k), now],
+                    params![kind_str(k), now, ceiling],
                 )?;
                 tx.execute("DELETE FROM items WHERE kind=?1 AND pinned=0", params![kind_str(k)])?
             }
@@ -1148,7 +1205,7 @@ impl Store {
                      )
                      INSERT INTO tombstones (source_machine, origin_id, deleted_at, local)
                      SELECT i.source_machine, i.origin_id,
-                            max(?1, COALESCE(n.c, 0) + 1), 1
+                            max(?1, min(COALESCE(n.c, 0) + 1, ?2)), 1
                        FROM items i
                        LEFT JOIN newest n ON n.src = i.source_machine
                       WHERE i.pinned=0
@@ -1156,7 +1213,7 @@ impl Store {
                      ON CONFLICT(source_machine, origin_id)
                      DO UPDATE SET deleted_at = max(tombstones.deleted_at, excluded.deleted_at),
                                    local = 1",
-                    params![now],
+                    params![now, ceiling],
                 )?;
                 tx.execute("DELETE FROM items WHERE pinned=0", [])?
             }

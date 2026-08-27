@@ -223,6 +223,16 @@ pub(crate) fn retention_widened(previous: u32, next: u32) -> bool {
     }
 }
 
+/// A PEER's name, made safe to display, with the device id as the fallback.
+///
+/// Never returns something misleading: if nothing survives sanitising, the user
+/// sees the id rather than a blank row or a name that reads like their own
+/// machine.
+fn usable_peer_name(raw: &str, id: &str) -> String {
+    echokey_sync::sanitise_device_name(raw)
+        .unwrap_or_else(|| format!("unnamed device {}", id.chars().take(8).collect::<String>()))
+}
+
 /// The stored device name, made safe for the wire, with a usable fallback.
 ///
 /// Never returns something `validate_device_name` would refuse, because every
@@ -1347,12 +1357,18 @@ impl SyncManager {
             // only a log line to say why.
             i.unpaired_mid_session.remove(&p.device_id);
             if let Some(existing) = i.paired.iter_mut().find(|d| d.id == p.device_id) {
-                existing.name = p.device_name;
+                // SANITISED before it is stored, because this one is shown.
+                //
+                // A peer's name arrives in an unsigned record and is what the
+                // user reads in the paired list. The wire deliberately only
+                // bounds its length (a display string must not be able to deny
+                // sync), so the character policy is applied here instead.
+                existing.name = usable_peer_name(&p.device_name, &existing.id);
                 existing.last_seen = Some(now_ms());
             } else {
                 i.paired.push(UiPaired {
+                    name: usable_peer_name(&p.device_name, &p.device_id),
                     id: p.device_id,
-                    name: p.device_name,
                     last_seen: Some(now_ms()),
                     online: true,
                     // Paired is not synced. The first exchange sets this.

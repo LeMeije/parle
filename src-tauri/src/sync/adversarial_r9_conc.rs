@@ -282,14 +282,31 @@ fn r9_a_local_dictation_does_not_slow_down_as_history_grows() {
         "R9-1 median local insert: 200 rows = {base_us}us, 10k (shipped cap) = {capped_us}us, \
          25k = {big_us}us, 25k owned by ANOTHER device = {foreign_us}us"
     );
-    // CONFIRMED, so the assertion pins the defect and flips when it is fixed.
-    // The control is what makes this a fact rather than a timing anecdote: the
-    // two 40k stores differ only in which device owns the rows.
+    // INVERTED, as the message on the old assertion asked.
+    //
+    // The finding was real: `next_clock_for` took a single `MAX` over a
+    // `UNION ALL` of items and tombstones, and SQLite plans that as a
+    // co-routine feeding an aggregate, so it VISITED every row for our own
+    // source. Measured then: 80us at 200 rows, 1,240us at the shipped 10,000
+    // cap, 3,080us at 25,000, against 61us for a store holding 25,000 rows
+    // owned by somebody else. Fifty times, on the app's hottest path, under the
+    // mutex the history window shares. And the scanned set had no ceiling,
+    // because tombstones are never pruned by age.
+    //
+    // Two plain `MAX` queries instead: each is a covering-index seek to the
+    // last entry, so the cost no longer depends on how much history we hold.
+    //
+    // The assertion is a RATIO against the small store, not an absolute
+    // microsecond figure, because this suite runs in parallel and an absolute
+    // threshold would fail on a loaded machine while the code was correct. A
+    // scan would show up here as hundreds of times the cost, so the bound is
+    // generous and still catches the regression it exists for.
     assert!(
-        big_us > foreign_us.max(1) * 4,
-        "R9-1 looks FIXED: 25k of our own rows now costs {big_us}us against {foreign_us}us \
-         for 25k of someone else's, so `next_clock_for` no longer scans the source. \
-         Re-measure and delete this test. (200 rows = {base_us}us, 10k = {capped_us}us.)"
+        big_us <= base_us.max(1) * 8,
+        "an insert into a 25k-row store costs {big_us}us against {base_us}us into a 200-row one. \
+         `next_clock_for` is scanning our own history again, on every dictation, edit and \
+         delete, under the store mutex the history window shares. \
+         (10k = {capped_us}us, 25k owned by another device = {foreign_us}us.)"
     );
 }
 
