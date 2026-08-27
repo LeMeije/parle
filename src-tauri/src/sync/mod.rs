@@ -18,3 +18,6 @@ pub mod keystore;
 pub mod pair_flow;
 pub mod replicate;
 pub mod wire_tcp;
+
+#[cfg(test)]
+mod adv5b;

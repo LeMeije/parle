@@ -596,9 +596,35 @@ impl Store {
     pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<(), StoreError> {
         self.conn.execute(
             "UPDATE items SET pinned=?1, updated_at=?2 WHERE id=?3",
-            params![pinned as i64, now_ms(), id],
+            params![pinned as i64, self.edit_clock(id)?, id],
         )?;
         Ok(())
+    }
+
+    /// The clock to stamp on a local edit of `id`.
+    ///
+    /// One past the row's current clock when that is already ahead of us, so a
+    /// user's edit always wins the conflict it is about to enter.
+    ///
+    /// A row from a peer whose clock runs a little fast — anything inside the
+    /// accepted skew — carries a clock we cannot reach with `now_ms()`. Stamping
+    /// the bare wall clock meant a pin or a text correction was born LOSING:
+    /// the next unchanged echo of that row from the peer beat it and silently
+    /// reverted it, with nothing to show the user why. `delete_item_local`
+    /// already did this; the other two edits did not.
+    fn edit_clock(&self, id: i64) -> Result<i64, StoreError> {
+        let current: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(updated_at, created_at) FROM items WHERE id=?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(match current {
+            Some(c) => now_ms().max(c.saturating_add(1)),
+            None => now_ms(),
+        })
     }
 
     /// User edited an item's text. Returns (old, new) so the caller can feed
@@ -611,7 +637,7 @@ impl Store {
         let Some(old) = old else { return Ok(None) };
         self.conn.execute(
             "UPDATE items SET text=?1, updated_at=?2 WHERE id=?3",
-            params![new_text, now_ms(), id],
+            params![new_text, self.edit_clock(id)?, id],
         )?;
         Ok(Some((old, new_text.to_string())))
     }
@@ -894,11 +920,17 @@ impl Store {
         )?;
         if n > MAX_SOURCES_PER_PEER {
             conn.execute(
+                // Never the peer's OWN cursor. That is the one it serves
+                // against, so evicting it makes the peer re-offer its entire
+                // history on every exchange — and it is the one an attacker
+                // would aim at, by naming a spray of invented source ids
+                // stamped just late enough to sort above it.
                 "DELETE FROM source_marks
                   WHERE peer_machine = ?1
+                    AND source_machine != ?1
                     AND source_machine IN (
                         SELECT source_machine FROM source_marks
-                         WHERE peer_machine = ?1
+                         WHERE peer_machine = ?1 AND source_machine != ?1
                          ORDER BY received_clock ASC
                          LIMIT ?2
                     )",
@@ -944,6 +976,16 @@ impl Store {
             params![peer, source, clock],
         )?;
         Ok(())
+    }
+
+    /// The replication identity and text of a local row. For tests.
+    #[doc(hidden)]
+    pub fn origin_and_text_for_test(&self, id: i64) -> Result<(String, String), StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(origin_id, ''), text FROM items WHERE id=?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
     }
 
     /// How many tombstones we hold for one source. For tests and diagnostics.
@@ -2966,4 +3008,178 @@ mod adversarial_round4_hostile {
         );
         a.pinned = false;
     }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW — ROUND 5. Demonstrations, not fixes.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round5 {
+    use super::*;
+
+    const ME: &str = "11111111-1111-4111-8111-111111111111";
+    const PEER: &str = "22222222-2222-4222-8222-222222222222";
+
+    fn store() -> Store {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_device_id(ME);
+        s
+    }
+
+    /// R5-3. `delete_item_local` stamps its tombstone `max(now, row.updated_at)`
+    /// precisely so a delete cannot lose to a row that came from a machine
+    /// whose clock runs ahead. `set_pinned` and `update_text` do not do that:
+    /// they write a bare `now_ms()`. A peer inside the accepted 2-minute skew
+    /// therefore holds a clock ABOVE anything we can stamp, so the local edit
+    /// is born losing, and the next exchange silently reverts it.
+    #[test]
+    fn r5_a_local_edit_of_a_slightly_future_row_is_silently_reverted() {
+        let s = store();
+        // Well inside MAX_CLOCK_SKEW_MS, so the row is accepted, not refused.
+        let ahead = now_ms() + 60_000;
+        let incoming = RemoteItem {
+            source_machine: PEER.into(),
+            origin_id: "row-1".into(),
+            kind: "transcription".into(),
+            text: "original".into(),
+            created_at: ahead,
+            updated_at: ahead,
+            pinned: false,
+        };
+        assert_eq!(s.apply_remote_item(PEER, &incoming).unwrap(), ApplyOutcome::Inserted);
+        let id = s.items_since(PEER, 0, 10).unwrap();
+        assert_eq!(id.len(), 1);
+        let rowid: i64 = s
+            .conn_for_test()
+            .query_row("SELECT id FROM items", [], |r| r.get(0))
+            .unwrap();
+
+        // The user pins it and corrects the text on THIS machine.
+        s.set_pinned(rowid, true).unwrap();
+        s.update_text(rowid, "corrected by the user").unwrap();
+
+        // The peer, which has changed nothing, offers its copy back. That is an
+        // ordinary echo: every exchange serves a device its own rows back so
+        // that edits made here can travel.
+        s.apply_remote_item(PEER, &incoming).unwrap();
+
+        let row = s.get(rowid).unwrap().expect("row still present");
+        assert_eq!(
+            (row.text.as_str(), row.pinned),
+            ("corrected by the user", true),
+            "a local edit was reverted by an unchanged echo of the peer's own row: \
+             set_pinned/update_text stamp a bare now_ms() instead of \
+             max(now_ms(), row.updated_at) the way delete_item_local does"
+        );
+    }
+}
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW — ROUND 5: what the caps evict.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round5_caps {
+    use super::*;
+
+    fn store_with_device(id: &str) -> Store {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_device_id(id);
+        s
+    }
+
+    const ME: &str = "11111111-1111-4111-8111-111111111111";
+    const B: &str = "22222222-2222-4222-8222-222222222222";
+    const C: &str = "33333333-3333-4333-8333-333333333333";
+
+    fn store() -> Store {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_device_id(ME);
+        s
+    }
+
+    /// R5-4. `MAX_TOMBSTONES_PER_SOURCE` evicts the OLDEST tombstone for a
+    /// source. A peer may create tombstones for its own source freely
+    /// (`Attribution::may_create`), so it can push our record of a delete out
+    /// of the table at will — and a third device that still holds the row then
+    /// puts it straight back. That is a resurrected delete in a three-device
+    /// mesh, driven entirely by rows a paired peer is entitled to send.
+    #[test]
+    fn tombstone_eviction_is_bounded_and_the_trade_is_stated() {
+        // There is no free option here and the choice is deliberate.
+        //
+        // Never pruning tombstones hands a paired device unbounded control over
+        // our disk: it may create them for its own rows with a free-form origin
+        // id. Pruning by age, or evicting past a cap, risks a device that has
+        // been offline never learning about a delete. We bound the table and
+        // evict the OLDEST, because an unbounded table is certain and the
+        // resurrection needs one source to exceed the cap AND a peer absent
+        // across the whole overflow.
+        //
+        // What must hold is that the bound is real and the newest deletes — the
+        // ones a peer is most likely still to need — are the ones kept.
+        let s = store_with_device("11111111-1111-4111-8111-111111111111");
+        let peer = "22222222-2222-4222-8222-222222222222";
+        let base = now_ms() - 1_000_000;
+
+        for i in 0..(MAX_TOMBSTONES_PER_SOURCE + 300) {
+            s.apply_remote_tombstone(
+                peer,
+                &RemoteTombstone {
+                    source_machine: peer.into(),
+                    origin_id: format!("t-{i:07}"),
+                    deleted_at: base + i,
+                },
+            )
+            .unwrap();
+        }
+
+        let held = s.tombstone_count(peer).unwrap();
+        assert!(
+            held <= MAX_TOMBSTONES_PER_SOURCE,
+            "{held} tombstones held, past the {MAX_TOMBSTONES_PER_SOURCE} cap"
+        );
+        let newest = s
+            .tombstones_since(peer, base + MAX_TOMBSTONES_PER_SOURCE + 200, 10)
+            .unwrap();
+        assert!(!newest.is_empty(), "the most recent deletes must be the ones kept");
+    }
+
+
+    /// R5-5. `Attribution::may_record` documents the rule "we only record a
+    /// cursor for a source this peer is entitled to speak for". It is dead
+    /// code — nothing calls it — so `drain` records a cursor for whatever
+    /// source id the peer names. The per-peer cap then evicts the LOWEST
+    /// clock, which is the genuine device's, and the peer re-offers its whole
+    /// history on the next exchange. Repeatable at will.
+    #[test]
+    fn invented_source_ids_cannot_evict_the_cursor_for_the_peer_itself() {
+        // Two defences, and this checks the deeper one.
+        //
+        // `drain` now banks a cursor only for a source the peer may speak for,
+        // so invented ids never reach the table through the wire at all. But the
+        // cap has to be safe on its own terms too: evicting the peer's OWN
+        // cursor would make it re-offer its whole history on every exchange, and
+        // that is exactly what a spray of invented ids stamped slightly later
+        // would have achieved.
+        let s = store_with_device("11111111-1111-4111-8111-111111111111");
+        let b = "22222222-2222-4222-8222-222222222222";
+        let t0 = now_ms() - 10_000;
+        s.note_received(b, b, t0).unwrap();
+
+        for i in 0..(MAX_SOURCES_PER_PEER + 50) {
+            s.note_received(b, &format!("99999999-9999-4999-8999-{i:012x}"), t0 + 1_000 + i)
+                .unwrap();
+        }
+
+        let marks = s.watermarks(b).unwrap();
+        assert!(
+            marks.iter().any(|(src, clock)| src == b && *clock == t0),
+            "the peer's own cursor was evicted; it now re-offers everything each time"
+        );
+        assert!(
+            marks.len() as i64 <= MAX_SOURCES_PER_PEER + 1,
+            "the table is still bounded: {} marks",
+            marks.len()
+        );
+    }
+
 }

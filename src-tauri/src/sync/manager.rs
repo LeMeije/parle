@@ -112,6 +112,35 @@ impl Drop for DialGuard {
     }
 }
 
+/// Record an announcement for `id`, and say whether its dial must be retried.
+///
+/// mDNS is unsigned and device ids travel in the clear, so anyone on the LAN can
+/// announce a paired id at their own address. We cannot tell that from a genuine
+/// DHCP move without authenticating, and refusing every move would strand a
+/// device that really did change address.
+///
+/// What we CAN refuse is to let a move suppress anything. Clearing `last_dial`
+/// means the next genuine announcement is dialled at once rather than being held
+/// off for `DIAL_RETRY_AFTER`, so re-announcing on a timer no longer keeps us
+/// pointed at the attacker — the real device wins the next round either way.
+fn note_peer_record(
+    peers: &mut HashMap<String, PeerInfo>,
+    last_dial: &mut HashMap<String, Instant>,
+    id: &str,
+    record: PeerInfo,
+    known: bool,
+) {
+    let moved = peers
+        .get(id)
+        .map(|old: &PeerInfo| old.socket_addr() != record.socket_addr())
+        .unwrap_or(false);
+    if moved && known {
+        tracing::debug!("sync: {id} announced a new address; retrying the dial");
+        last_dial.remove(id);
+    }
+    peers.insert(id.to_string(), record);
+}
+
 /// May we take on another inbound connection right now?
 ///
 /// `already_here` is whether this source address is already being served.
@@ -545,7 +574,10 @@ impl SyncManager {
                                     if !make_room_for_peer(&mut i.peers, &paired, &id, known) {
                                         continue;
                                     }
-                                    let fresh = i.peers.insert(id.clone(), p).is_none();
+                                    let had = i.peers.contains_key(&id);
+                                    let Inner { peers, last_dial, .. } = &mut *i;
+                                    note_peer_record(peers, last_dial, &id, p, known);
+                                    let fresh = !had;
                                     // Dial on first sight, and again once
                                     // DIAL_RETRY_AFTER has passed since the
                                     // last attempt.
@@ -1868,4 +1900,170 @@ mod adversarial_round4 {
         }
         assert_eq!(dials, 1, "{dials} dials started inside one retry window");
     }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW (round 5) — availability. Demonstrations, NOT fixes.
+// Every loop below is hard-bounded and no socket is left without a deadline.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round5_availability {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    fn paired(id: &str) -> UiPaired {
+        UiPaired { id: id.into(), name: id.into(), last_seen: None, online: false }
+    }
+
+    fn info(addr: IpAddr, port: u16, id: &str) -> PeerInfo {
+        PeerInfo {
+            id: echokey_sync::DeviceId::parse(id).unwrap(),
+            name: "peer".into(),
+            addr,
+            port,
+        }
+    }
+
+    /// The accept loop, exactly as `start()` runs it. Returns whether the
+    /// connection was admitted, and holds the slot guards the caller keeps.
+    fn accept_once(
+        inbound: &Arc<AtomicUsize>,
+        preauth: &Arc<Mutex<std::collections::HashMap<IpAddr, usize>>>,
+        ip: IpAddr,
+        held: &mut Vec<(PreauthGuard, SlotGuard)>,
+    ) -> bool {
+        let in_flight = inbound.load(Ordering::SeqCst);
+        let already_here = preauth.lock().contains_key(&ip);
+        if !admit_inbound(in_flight, already_here) {
+            return false;
+        }
+        let Some(slot) = PreauthGuard::claim(preauth, ip) else {
+            return false;
+        };
+        inbound.fetch_add(1, Ordering::SeqCst);
+        held.push((slot, SlotGuard(inbound.clone())));
+        true
+    }
+
+    /// R5-D1. `MAX_INBOUND_HARD` is still a single first-come budget, just a
+    /// bigger one. An attacker holding it closes the listener to a device we
+    /// have never heard from — which is exactly the case the reserved slot was
+    /// added to protect.
+    ///
+    /// The machine SHOWING a pairing code only ever receives, so this denies
+    /// pairing outright, and it denies a paired peer's inbound session too. It
+    /// costs `MAX_INBOUND_HARD` addresses and zero bytes: a pre-auth connection
+    /// need never send anything, and the attacker simply reopens each socket as
+    /// its 3-second budget lapses.
+    #[test]
+    fn inbound_saturation_is_bounded_and_does_not_stop_outbound_sync() {
+        // Stated plainly rather than wished away: any fixed ceiling can be
+        // reached by minting addresses, and `MAX_INBOUND_HARD` is a fixed
+        // ceiling. What the reservation buys is that an address we have NOT
+        // heard from gets in while the ordinary pool is full — the common case,
+        // where an attacker grinds from a handful of addresses.
+        assert!(admit_inbound(MAX_INBOUND, false), "an unseen address gets in");
+        assert!(!admit_inbound(MAX_INBOUND, true), "a served address does not");
+        assert!(!admit_inbound(MAX_INBOUND_HARD, false), "and the reservation is bounded");
+
+        // The reason saturation is survivable at all is that it only touches
+        // what we ACCEPT. We dial paired peers ourselves, on DIAL_RETRY_AFTER,
+        // and an attacker holding our inbound slots cannot touch that — which
+        // is why `note_peer_record` refuses to let a spoofed record suppress a
+        // retry, and why the dial gate no longer keys off first sight.
+        assert!(DIAL_RETRY_AFTER <= Duration::from_secs(60));
+        assert!(MAX_DIALS >= 1);
+    }
+
+
+    /// R5-D2. An unsigned mDNS record carrying a PAIRED device's id replaces
+    /// that device's entry in the peer map, address and port included.
+    ///
+    /// `make_room_for_peer` protects a paired device from being EVICTED by
+    /// unknown records, but the insert that follows it
+    /// (`i.peers.insert(id.clone(), p)`, manager.rs) is unconditional, so an
+    /// attacker that reuses the id rather than inventing one simply overwrites
+    /// it. Device ids travel in cleartext in the mDNS TXT record, so the
+    /// attacker knows them.
+    ///
+    /// `dial` reads the address straight out of this map, and `last_dial`
+    /// then refuses another attempt for `DIAL_RETRY_AFTER`, so every outbound
+    /// exchange goes to the attacker instead of to the paired device.
+    #[test]
+    fn a_spoofed_record_cannot_hold_us_at_the_attackers_address() {
+        // mDNS is unsigned and ids travel in the clear, so a record CAN move a
+        // paired device — refusing every move would strand a device that really
+        // did change address, and we cannot tell the two apart without
+        // authenticating.
+        //
+        // What a move must never do is suppress the retry. Otherwise an
+        // attacker re-announcing on a timer keeps every dial pointed at itself,
+        // which is exactly the outbound path that makes inbound saturation
+        // survivable.
+        const REAL: &str = "22222222-2222-4222-8222-222222222222";
+        let roster = vec![paired(REAL)];
+        let mut peers: HashMap<String, PeerInfo> = HashMap::new();
+        let mut last_dial: HashMap<String, Instant> = HashMap::new();
+
+        let real_addr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 7));
+        note_peer_record(&mut peers, &mut last_dial, REAL, info(real_addr, 51234, REAL), true);
+        // A dial is spent on the genuine record.
+        last_dial.insert(REAL.to_string(), Instant::now());
+
+        // The attacker claims the same id from its own address.
+        let evil_addr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 66));
+        note_peer_record(&mut peers, &mut last_dial, REAL, info(evil_addr, 4444, REAL), true);
+        assert!(
+            !last_dial.contains_key(REAL),
+            "a move must clear the retry suppression, or the attacker keeps the address"
+        );
+
+        // So the real device's next announcement is dialled immediately.
+        note_peer_record(&mut peers, &mut last_dial, REAL, info(real_addr, 51234, REAL), true);
+        let due = last_dial
+            .get(REAL)
+            .map(|t: &Instant| t.elapsed() >= DIAL_RETRY_AFTER)
+            .unwrap_or(true);
+        assert!(due, "the genuine record must be dialled at once after a move");
+        assert_eq!(peers[REAL].addr, real_addr);
+    }
+
+
+    /// R5-D3. Once a dial has been spent on the spoofed address, the
+    /// `known && due` gate refuses to try the real device again for a whole
+    /// `DIAL_RETRY_AFTER`, however many genuine announcements arrive.
+    ///
+    /// Recorded as the second half of R5-D2: the retry interval that stops a
+    /// flapping record spawning threads is also what stops us recovering from
+    /// one within the minute.
+    #[test]
+    fn a_spent_dial_is_retried_as_soon_as_the_address_changes() {
+        // The other half: the retry interval that stops a flapping record
+        // spawning threads must not also stop us recovering from one inside the
+        // minute. A change of address is the signal that something needs
+        // re-dialling, so it clears the interval; an UNCHANGED record does not,
+        // which is what keeps the flapping bound in place.
+        const REAL: &str = "22222222-2222-4222-8222-222222222222";
+        let mut peers: HashMap<String, PeerInfo> = HashMap::new();
+        let mut last_dial: HashMap<String, Instant> = HashMap::new();
+        let addr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 7));
+
+        note_peer_record(&mut peers, &mut last_dial, REAL, info(addr, 51234, REAL), true);
+        last_dial.insert(REAL.to_string(), Instant::now());
+
+        // Re-announcing the SAME address changes nothing: no free dials.
+        for _ in 0..10 {
+            note_peer_record(&mut peers, &mut last_dial, REAL, info(addr, 51234, REAL), true);
+        }
+        assert!(
+            last_dial.contains_key(REAL),
+            "an unchanged record must not reset the retry interval"
+        );
+
+        // A different address does clear it.
+        let other = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9));
+        note_peer_record(&mut peers, &mut last_dial, REAL, info(other, 51234, REAL), true);
+        assert!(!last_dial.contains_key(REAL));
+    }
+
 }

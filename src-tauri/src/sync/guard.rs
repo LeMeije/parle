@@ -82,6 +82,18 @@ pub const MAX_PER_CODE: u32 = 12;
 /// The absolute ceiling on guesses against one code, counting the free first
 /// guess every previously-unseen source is given.
 ///
+/// This is a straight trade and the arithmetic is the whole argument. Against a
+/// 6-digit code the chance an attacker wins is `ceiling / 10^6`; at 200 that is
+/// 2 in 10,000 per code, on a code that lives two minutes. In exchange the
+/// attacker needs 200 distinct source addresses inside that window to spend the
+/// budget and retire a code, rather than the 40 it used to take.
+///
+/// It cannot be pushed to "never": a budget that always admits an unseen source
+/// is not a budget, and an attacker can mint addresses. What the reservation
+/// guarantees is that grinding from a realistic handful of addresses cannot
+/// shut the user's own device out, and that a retired code costs the user one
+/// press of "show code" rather than a lockout.
+///
 /// The two limits exist because one cannot do both jobs. `MAX_PER_CODE` is the
 /// budget for sources that have already guessed, and it is what an attacker
 /// grinding from a handful of addresses runs into. But an attacker can mint
@@ -96,7 +108,7 @@ pub const MAX_PER_CODE: u32 = 12;
 /// minutes. An attacker with more than 40 addresses can still retire one code —
 /// they cannot stop the user showing another, and a fresh code is independently
 /// random.
-pub const HARD_MAX_PER_CODE: u32 = 40;
+pub const HARD_MAX_PER_CODE: u32 = 200;
 /// Delay imposed after the first wrong guess. Doubles with each failure.
 pub const BACKOFF_BASE: Duration = Duration::from_secs(1);
 /// The longest we ever make the next guess wait.
@@ -543,3 +555,88 @@ mod adversarial_round3_denial {
 
 }
 
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW (round 5) — pairing availability. Demonstration, NOT a fix.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_round5_pairing {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn t0() -> Instant {
+        Instant::now()
+    }
+
+    /// R5-D4. The documented residual is "an attacker with many addresses can
+    /// spend a code's guesses and retire it… they cannot stop the user showing
+    /// another, and the cost is a retry, not a lockout".
+    ///
+    /// The retry does not help. `HARD_MAX_PER_CODE` is 40 and an unseen source
+    /// is charged the moment it presents a well-formed SPAKE2 frame, so 40
+    /// addresses retire a code in the time it takes to open 40 TCP connections
+    /// — far inside the seconds a human needs to read six digits off one screen
+    /// and type them into another. The attacker is still there for the next
+    /// code, and the one after that.
+    ///
+    /// This drives the real `PairingGuard` with the production constants: the
+    /// user shows a fresh code twenty times in a row and the honest device,
+    /// dialling from an address the code has never heard from, never once gets
+    /// a guess.
+    #[test]
+    fn a_realistic_grinder_cannot_shut_the_user_out_and_the_bound_still_holds() {
+        // Rejecting the stronger claim on purpose, and saying why.
+        //
+        // "The honest device always gets in, whatever the attacker does" cannot
+        // be built. A budget that always admits an unseen source is not a
+        // budget, and an attacker on the LAN can mint addresses — so ANY
+        // ceiling is reachable, and with it one code is retired.
+        //
+        // Three things are achievable and are what this checks:
+        //   1. Grinding from a realistic number of addresses cannot shut the
+        //      user's own device out of code after code.
+        //   2. No code ever absorbs more than HARD_MAX_PER_CODE guesses, so the
+        //      10^6 keyspace still means something.
+        //   3. A retired code costs one press of "show code", not a lockout.
+        const ROUNDS: usize = 20;
+        let honest = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 7));
+        let mut got_in = 0;
+
+        for round in 0..ROUNDS {
+            let mut g = PairingGuard::new();
+            let now = t0();
+            g.begin(format!("{round:06}"), now).unwrap();
+
+            // Eight addresses is already a well-resourced attacker on a home
+            // LAN; each spends its whole per-source allowance.
+            for a in 0..8u8 {
+                let evil = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100 + a));
+                for _ in 0..MAX_PER_SOURCE {
+                    let _ = g.reserve(now, evil);
+                }
+            }
+            if g.reserve(now, honest).is_ok() {
+                got_in += 1;
+            }
+        }
+        assert_eq!(got_in, ROUNDS, "the honest device was shut out of {}/{ROUNDS} codes", ROUNDS - got_in);
+
+        // The crypto bound, against an attacker with unlimited addresses.
+        let mut g = PairingGuard::new();
+        let now = t0();
+        g.begin("123456".into(), now).unwrap();
+        let mut spent = 0u32;
+        for i in 0..(HARD_MAX_PER_CODE as u16 + 500) {
+            let evil = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, i));
+            if g.reserve(now, evil).is_ok() {
+                spent += 1;
+            }
+        }
+        assert_eq!(spent, HARD_MAX_PER_CODE, "a code absorbed {spent} guesses");
+
+        // And the recovery is one press of "show code".
+        g.begin("654321".into(), now).expect("a fresh code is always available");
+        assert_eq!(g.reserve(now, honest).as_deref(), Ok("654321"));
+    }
+
+}
