@@ -106,6 +106,15 @@ struct DialGuard {
     id: String,
 }
 
+impl DialGuard {
+    /// Built BEFORE the thread is spawned, so a spawn that fails still releases
+    /// the slot. Constructed inside the closure it never existed on failure,
+    /// and the id stayed in `dialing` for the life of the process.
+    fn new(owner: Arc<dyn ReleasesDial>, id: String) -> Self {
+        Self { owner, id }
+    }
+}
+
 impl Drop for DialGuard {
     fn drop(&mut self) {
         self.owner.release_dial(&self.id);
@@ -126,6 +135,7 @@ impl Drop for DialGuard {
 fn note_peer_record(
     peers: &mut HashMap<String, PeerInfo>,
     last_dial: &mut HashMap<String, Instant>,
+    last_move: &mut HashMap<String, Instant>,
     id: &str,
     record: PeerInfo,
     known: bool,
@@ -135,8 +145,29 @@ fn note_peer_record(
         .map(|old: &PeerInfo| old.socket_addr() != record.socket_addr())
         .unwrap_or(false);
     if moved && known {
-        tracing::debug!("sync: {id} announced a new address; retrying the dial");
-        last_dial.remove(id);
+        // At most ONE address-triggered retry per interval.
+        //
+        // Clearing the retry clock on every move was worse than not clearing
+        // it: mDNS is unsigned, so an attacker holding a paired id alternates
+        // between two addresses and every announcement reads as "due". That
+        // buys unlimited dials — each a thread, a keychain read and a connect
+        // held for the handshake timeout — and fills MAX_DIALS so the genuine
+        // device's announcements start nothing at all. Outbound dialling is
+        // exactly what makes inbound saturation survivable, so losing it is
+        // the whole game.
+        //
+        // Rate-limiting the reset keeps the honest case (a device really did
+        // change address, retry promptly) while capping the budget at one extra
+        // dial per interval.
+        let due = last_move
+            .get(id)
+            .map(|t: &Instant| t.elapsed() >= DIAL_RETRY_AFTER)
+            .unwrap_or(true);
+        if due {
+            tracing::debug!("sync: {id} announced a new address; retrying the dial");
+            last_dial.remove(id);
+            last_move.insert(id.to_string(), Instant::now());
+        }
     }
     peers.insert(id.to_string(), record);
 }
@@ -333,6 +364,9 @@ struct Inner {
     /// When we last tried to dial each peer, so a failed dial is retried rather
     /// than abandoned until the peer's mDNS record disappears and returns.
     last_dial: std::collections::HashMap<String, Instant>,
+    /// When we last let an address change shorten a peer's retry wait. Bounds
+    /// what an unsigned record can buy by flapping between two addresses.
+    last_move: std::collections::HashMap<String, Instant>,
     /// Peers we owe one full re-offer of our history, because the user widened
     /// what this machine shares. See `set_kinds`.
     resend_owed: std::collections::HashMap<String, i64>,
@@ -412,6 +446,7 @@ impl SyncManager {
                 listen_stop: None,
                 dialing: std::collections::HashSet::new(),
                 last_dial: std::collections::HashMap::new(),
+                last_move: std::collections::HashMap::new(),
                 // Restored, so a debt taken on before a quit is still owed.
                 resend_owed: s
                     .resend_owed
@@ -575,8 +610,8 @@ impl SyncManager {
                                         continue;
                                     }
                                     let had = i.peers.contains_key(&id);
-                                    let Inner { peers, last_dial, .. } = &mut *i;
-                                    note_peer_record(peers, last_dial, &id, p, known);
+                                    let Inner { peers, last_dial, last_move, .. } = &mut *i;
+                                    note_peer_record(peers, last_dial, last_move, &id, p, known);
                                     let fresh = !had;
                                     // Dial on first sight, and again once
                                     // DIAL_RETRY_AFTER has passed since the
@@ -617,7 +652,15 @@ impl SyncManager {
                                     if known && due && room && i.dialing.insert(id.clone()) {
                                         i.last_dial.insert(id.clone(), Instant::now());
                                         let me3 = me.clone();
-                                        std::thread::spawn(move || {
+                                        // Builder for the same reason as the
+                                        // accept loop, and the guard is built
+                                        // HERE rather than inside the closure:
+                                        // a spawn failure would otherwise leave
+                                        // the id stuck in `dialing` for ever.
+                                        let guard = DialGuard::new(me3.clone(), id.clone());
+                                        let launched = std::thread::Builder::new()
+                                            .name("echokey-sync-dial".into())
+                                            .spawn(move || {
                                             // RAII, for the same reason the
                                             // inbound path uses SlotGuard.
                                             // Removing the entry as a plain
@@ -629,12 +672,12 @@ impl SyncManager {
                                             // of the process, and four such
                                             // panics exhausted MAX_DIALS so the
                                             // machine dialled nobody at all.
-                                            let _slot = DialGuard {
-                                                owner: me3.clone(),
-                                                id: id.clone(),
-                                            };
-                                            me3.clone().dial(id.clone());
-                                        });
+                                                let _slot = guard;
+                                                me3.clone().dial(id.clone());
+                                            });
+                                        if let Err(e) = launched {
+                                            tracing::warn!("sync: could not start a dial thread: {e}");
+                                        }
                                     }
                                 }
                                 DiscoveryEvent::PeerLost(id) => {
@@ -722,15 +765,27 @@ impl SyncManager {
                             me.inbound.fetch_add(1, Ordering::SeqCst);
                             let me2 = me.clone();
                             let _global = SlotGuard(me.inbound.clone());
-                            std::thread::spawn(move || {
+                            // Builder, not `std::thread::spawn`: that PANICS if
+                            // the OS refuses a thread, which would unwind this
+                            // accept loop and release the port while
+                            // `listen_stop` stayed installed — after which every
+                            // start() returns "already running" for a listener
+                            // that no longer exists. That is the exact state the
+                            // rollback below the spawn exists to prevent.
+                            let launched = std::thread::Builder::new()
+                                .name("echokey-sync-serve".into())
+                                .spawn(move || {
                                 // RAII: released on every exit including a
                                 // panic. Decrementing after the call would leak
                                 // a slot per unwind, and eight leaks close the
                                 // listener to everyone.
-                                let _slot = slot;
-                                let _global = _global;
-                                me2.serve(s);
-                            });
+                                    let _slot = slot;
+                                    let _global = _global;
+                                    me2.serve(s);
+                                });
+                            if let Err(e) = launched {
+                                tracing::warn!("sync: could not start a handler thread: {e}");
+                            }
                         }
                         Err(e) => tracing::debug!("sync: accept failed: {e}"),
                     }
@@ -806,11 +861,36 @@ impl SyncManager {
         // it: `serve` and `run_session` both gate on it, so a stop() that left
         // it set would keep accepting connections and moving history after a
         // shutdown.
-        {
+        // Everything this stop owns is taken in ONE critical section, before
+        // the wait below.
+        //
+        // Taking it afterwards left `listen_stop` set for the whole wait, and a
+        // `set_enabled(true)` landing in that window found "already running"
+        // at the top of start(), returned Ok, and did nothing — for a listener
+        // this stop was about to destroy. The epoch could not catch it, because
+        // it is only checked by a start() that got PAST that entry test. Sync
+        // then read as on everywhere, including in settings.json, with nothing
+        // running and nothing left to call start() again.
+        //
+        // Taken first, a concurrent start() sees no listener, proceeds, and
+        // either keeps what it installs (its epoch matches, because the bump
+        // happened before it looked) or undoes itself.
+        let (discovery, gen_stop, port) = {
             let mut i = self.inner.lock();
             i.enabled = false;
             i.stop_epoch = i.stop_epoch.wrapping_add(1);
-        }
+            i.peers.clear();
+            i.guard.cancel();
+            // `dialing` is deliberately NOT cleared. Its entries are owned by
+            // live DialGuards; clearing it here let a new generation insert the
+            // same peer and then have the OLD guard's drop remove it, so two
+            // concurrent dials to one device were possible and the set
+            // under-counted against MAX_DIALS. The guards clean up by
+            // themselves as their threads unwind.
+            let port = i.port;
+            i.port = 0;
+            (i.discovery.take(), i.listen_stop.take(), port)
+        };
         // Wait for an in-flight start() to finish installing itself.
         //
         // start() claims `starting` and then releases the lock for the slow
@@ -827,22 +907,9 @@ impl SyncManager {
         while self.inner.lock().starting && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        // Take the daemon OUT under the lock and drop it outside. Discovery's
-        // Drop unregisters over the network and joins its worker with no bound;
-        // running that while holding `inner` would wedge every publish() and
-        // the UI thread along with it.
-        let (discovery, gen_stop, port) = {
-            let mut i = self.inner.lock();
-            i.peers.clear();
-            i.guard.cancel();
-            // `dialing` is deliberately NOT cleared. Its entries are owned by
-            // live DialGuards; clearing it here let a new generation insert the
-            // same peer and then have the OLD guard's drop remove it, so two
-            // concurrent dials to one device were possible and the set
-            // under-counted against MAX_DIALS. The guards clean up by
-            // themselves as their threads unwind.
-            (i.discovery.take(), i.listen_stop.take(), i.port)
-        };
+        // Dropped OUTSIDE the lock. Discovery's Drop unregisters over the
+        // network and joins its worker; running that while holding `inner`
+        // would wedge every publish() and the UI thread with it.
         drop(discovery);
 
         // Wake the listener so it observes the flag. accept() blocks until a
@@ -1256,26 +1323,44 @@ impl SyncManager {
     ///
     /// Paired KEYS are never written here; they live in the keychain.
     pub fn persist(&self) {
-        let (enabled, name, dictations, clipboard, paired) = self.persistable();
-        // Gathered BEFORE the settings lock is taken. Every other path locks
-        // `inner` first and `settings` second; reaching back into `inner` from
-        // under the settings lock here would be a genuine order inversion.
-        let owed: Vec<echokey_core::settings::ResendDebt> = self
-            .inner
-            .lock()
-            .resend_owed
-            .iter()
-            .map(|(id, from)| echokey_core::settings::ResendDebt {
-                device_id: id.clone(),
-                from: *from,
-            })
-            .collect();
+        // ONE snapshot, under ONE lock, taken before `settings`.
+        //
+        // Both halves matter. Three separate `inner` locks could tear the
+        // snapshot — the roster from one instant, the debts from another — and
+        // reaching into `inner` from UNDER the settings guard was the exact
+        // order inversion the comment here used to warn against while doing it.
+        let snap = {
+            let i = self.inner.lock();
+            (
+                // The USER's preference, not the runtime flag. `stop()` clears
+                // `enabled`, including at app exit, so persisting that meant an
+                // exchange finishing during shutdown wrote `enabled: false` and
+                // sync was silently off on the next launch.
+                i.user_enabled,
+                i.device_name.clone(),
+                i.dictations,
+                i.clipboard,
+                i.paired
+                    .iter()
+                    .map(|d| echokey_core::settings::PairedDevice {
+                        id: d.id.clone(),
+                        name: d.name.clone(),
+                        last_seen: d.last_seen,
+                    })
+                    .collect::<Vec<_>>(),
+                i.resend_owed
+                    .iter()
+                    .map(|(id, from)| echokey_core::settings::ResendDebt {
+                        device_id: id.clone(),
+                        from: *from,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let (enabled, name, dictations, clipboard, paired, owed) = snap;
+
         let mut s = self.settings.lock();
-        // The USER's preference, not the runtime flag. `stop()` clears
-        // `enabled` — including at app exit — so persisting that meant an
-        // exchange finishing during shutdown wrote `enabled: false` and sync
-        // was silently off next launch.
-        s.sync.enabled = self.inner.lock().user_enabled;
+        s.sync.enabled = enabled;
         s.sync.device_name = name;
         s.sync.sync_dictations = dictations;
         s.sync.sync_clipboard = clipboard;
@@ -1884,6 +1969,7 @@ mod adversarial_round4 {
     #[test]
     fn a_flapping_record_cannot_dial_more_often_than_the_retry_interval() {
         let mut last_dial: HashMap<String, Instant> = HashMap::new();
+        let mut last_move: HashMap<String, Instant> = HashMap::new();
         let id = "peer".to_string();
         let mut dials = 0;
 
@@ -2004,22 +2090,23 @@ mod adversarial_round5_availability {
         let roster = vec![paired(REAL)];
         let mut peers: HashMap<String, PeerInfo> = HashMap::new();
         let mut last_dial: HashMap<String, Instant> = HashMap::new();
+        let mut last_move: HashMap<String, Instant> = HashMap::new();
 
         let real_addr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 7));
-        note_peer_record(&mut peers, &mut last_dial, REAL, info(real_addr, 51234, REAL), true);
+        note_peer_record(&mut peers, &mut last_dial, &mut last_move, REAL, info(real_addr, 51234, REAL), true);
         // A dial is spent on the genuine record.
         last_dial.insert(REAL.to_string(), Instant::now());
 
         // The attacker claims the same id from its own address.
         let evil_addr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 66));
-        note_peer_record(&mut peers, &mut last_dial, REAL, info(evil_addr, 4444, REAL), true);
+        note_peer_record(&mut peers, &mut last_dial, &mut last_move, REAL, info(evil_addr, 4444, REAL), true);
         assert!(
             !last_dial.contains_key(REAL),
             "a move must clear the retry suppression, or the attacker keeps the address"
         );
 
         // So the real device's next announcement is dialled immediately.
-        note_peer_record(&mut peers, &mut last_dial, REAL, info(real_addr, 51234, REAL), true);
+        note_peer_record(&mut peers, &mut last_dial, &mut last_move, REAL, info(real_addr, 51234, REAL), true);
         let due = last_dial
             .get(REAL)
             .map(|t: &Instant| t.elapsed() >= DIAL_RETRY_AFTER)
@@ -2046,14 +2133,15 @@ mod adversarial_round5_availability {
         const REAL: &str = "22222222-2222-4222-8222-222222222222";
         let mut peers: HashMap<String, PeerInfo> = HashMap::new();
         let mut last_dial: HashMap<String, Instant> = HashMap::new();
+        let mut last_move: HashMap<String, Instant> = HashMap::new();
         let addr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 7));
 
-        note_peer_record(&mut peers, &mut last_dial, REAL, info(addr, 51234, REAL), true);
+        note_peer_record(&mut peers, &mut last_dial, &mut last_move, REAL, info(addr, 51234, REAL), true);
         last_dial.insert(REAL.to_string(), Instant::now());
 
         // Re-announcing the SAME address changes nothing: no free dials.
         for _ in 0..10 {
-            note_peer_record(&mut peers, &mut last_dial, REAL, info(addr, 51234, REAL), true);
+            note_peer_record(&mut peers, &mut last_dial, &mut last_move, REAL, info(addr, 51234, REAL), true);
         }
         assert!(
             last_dial.contains_key(REAL),
@@ -2062,8 +2150,225 @@ mod adversarial_round5_availability {
 
         // A different address does clear it.
         let other = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9));
-        note_peer_record(&mut peers, &mut last_dial, REAL, info(other, 51234, REAL), true);
+        note_peer_record(&mut peers, &mut last_dial, &mut last_move, REAL, info(other, 51234, REAL), true);
         assert!(!last_dial.contains_key(REAL));
     }
 
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL REVIEW (round 6) — concurrency / resource lifecycle.
+// Demonstrations of LIVE findings. NOT fixes. These tests are expected to FAIL
+// until the production code changes; each one names the invariant it breaks.
+//
+// Every loop below is hard-bounded and nothing here opens a socket, so no test
+// in this module can hang.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod adversarial_r6_conc {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn r6_paired(id: &str) -> UiPaired {
+        UiPaired { id: id.into(), name: id.into(), last_seen: None, online: false }
+    }
+
+    fn r6_info(addr: IpAddr, port: u16, id: &str) -> PeerInfo {
+        PeerInfo { id: echokey_sync::DeviceId::parse(id).unwrap(), name: "peer".into(), addr, port }
+    }
+
+    /// An `Inner` in the state the manager is in while sync is running.
+    ///
+    /// `SyncManager` itself cannot be built in a unit test: it holds a
+    /// `tauri::AppHandle<Wry>`, tauri is not compiled with its `test` feature
+    /// here (src-tauri/Cargo.toml has no dev-dependencies and no `tauri/test`),
+    /// and `MockRuntime` produces `AppHandle<MockRuntime>`, a different type.
+    /// `Inner` is the real production struct, so the state assertions below are
+    /// against production fields; the transitions are transcribed from the
+    /// numbered production lines named at each step.
+    fn r6_running_inner() -> Inner {
+        Inner {
+            enabled: true,
+            device_id: "33333333-3333-4333-8333-333333333333".into(),
+            device_name: "this machine".into(),
+            dictations: true,
+            clipboard: true,
+            peers: HashMap::new(),
+            paired: vec![r6_paired("22222222-2222-4222-8222-222222222222")],
+            guard: PairingGuard::new(),
+            discovery: None, // a live Discovery cannot be built without a network
+            port: 51234,
+            listen_stop: Some(Arc::new(AtomicBool::new(false))),
+            dialing: std::collections::HashSet::new(),
+            last_dial: std::collections::HashMap::new(),
+            last_move: std::collections::HashMap::new(),
+            resend_owed: std::collections::HashMap::new(),
+            starting: false,
+            stop_epoch: 0,
+            user_enabled: true,
+            unpaired_mid_session: std::collections::HashSet::new(),
+            error: None,
+        }
+    }
+
+    /// R6-1. A `set_enabled(true)` that lands inside `stop()` leaves sync
+    /// reading ON, in the UI and in settings.json, with nothing running.
+    ///
+    /// `stop()` is two separate critical sections with a wait between them:
+    ///
+    ///   - manager.rs:809-813 clears `enabled` and bumps `stop_epoch`.
+    ///   - manager.rs:826-829 then polls `starting` for up to FIVE SECONDS.
+    ///   - manager.rs:834-845 finally takes `discovery` / `listen_stop` and
+    ///     tears the listener down.
+    ///
+    /// `listen_stop` is still `Some` for the whole of that window. So a
+    /// `set_enabled(true)` arriving inside it (manager.rs:1166-1188 — a
+    /// different `spawn_blocking` thread, per commands.rs:502-513) sets
+    /// `enabled = true` and calls `start()`, and `start()`'s entry test at
+    /// manager.rs:523 sees `listen_stop.is_some()` and returns `Ok(())`
+    /// — "already running" — for a listener that is about to be destroyed.
+    ///
+    /// The `stop_epoch` added in round 4 does not catch this. The epoch is only
+    /// consulted by a `start()` that got PAST that entry test and did real work
+    /// (manager.rs:767-776); a `start()` that short-circuits on "already
+    /// running" never reads it, so there is nothing to supersede.
+    ///
+    /// The end state is the one the whole lifecycle is meant to make
+    /// impossible: `enabled == true`, `error == None`, no listener, no
+    /// discovery, `SyncStatus.enabled` true, and commands.rs:511
+    /// (`persist_sync`) writing `user_enabled == true` into settings.json.
+    /// Nothing ever calls `start()` again, so sync is silently dead for the
+    /// life of the process while every surface says it is on.
+    #[test]
+    fn r6_a_toggle_inside_stop_leaves_sync_reading_on_with_nothing_running() {
+        let m: Mutex<Inner> = Mutex::new(r6_running_inner());
+
+        // -- thread A: sync_set_enabled(false) ---------------------------
+        // set_enabled, manager.rs:1167-1178.
+        {
+            let mut i = m.lock();
+            i.enabled = false;
+            i.user_enabled = false;
+            i.error = None;
+        }
+        // stop(), first critical section, manager.rs:809-813.
+        {
+            let mut i = m.lock();
+            i.enabled = false;
+            i.stop_epoch = i.stop_epoch.wrapping_add(1);
+        }
+        // stop() is now in the `starting` wait at manager.rs:826-829 and has
+        // NOT reached the teardown at manager.rs:834-845. `listen_stop` is
+        // still installed.
+        assert!(m.lock().listen_stop.is_some(), "the listener is still installed");
+
+        // -- thread B: sync_set_enabled(true) lands in that window --------
+        // set_enabled, manager.rs:1167-1178.
+        {
+            let mut i = m.lock();
+            // The early-out at manager.rs:1169 does not fire: enabled is false.
+            assert!(!(i.enabled && i.user_enabled));
+            i.enabled = true;
+            i.user_enabled = true;
+            i.error = None;
+        }
+        // start(), entry critical section, manager.rs:511-528.
+        let start_did_work = {
+            let mut i = m.lock();
+            if !i.enabled {
+                false
+            } else if i.listen_stop.is_some() || i.starting {
+                false // manager.rs:524 — returns Ok(()), "already running"
+            } else {
+                i.starting = true;
+                true
+            }
+        };
+        assert!(
+            !start_did_work,
+            "precondition: start() must short-circuit here, which is the bug"
+        );
+
+        // -- thread A resumes: stop() teardown, manager.rs:834-853 --------
+        let (discovery, gen_stop, _port) = {
+            let mut i = m.lock();
+            i.peers.clear();
+            i.guard.cancel();
+            (i.discovery.take(), i.listen_stop.take(), i.port)
+        };
+        drop(discovery);
+        if let Some(flag) = gen_stop {
+            flag.store(true, Ordering::SeqCst); // the listener thread exits
+        }
+
+        // -- what the user and settings.json now see ----------------------
+        let i = m.lock();
+        assert!(
+            !(i.enabled && i.listen_stop.is_none()),
+            "sync reads ON (SyncStatus.enabled = {}) with no listener and no error, \
+             and commands.rs:511 persists user_enabled = {} into settings.json — \
+             sync is dead for the life of the process and nothing calls start() again",
+            i.enabled,
+            i.user_enabled
+        );
+    }
+
+    /// R6-2. `last_dial` is not an honest clock: an attacker that ALTERNATES
+    /// the address in its mDNS records gets an unbounded number of dials.
+    ///
+    /// manager.rs:605-614 states the rule this rests on: "`last_dial` outlives
+    /// the peer entry, so it is the only honest clock", and that the retry
+    /// interval "keeps a spoofed record flapping between goodbye and announce
+    /// from spawning threads without bound".
+    ///
+    /// `note_peer_record` (manager.rs:126-142) then deletes that clock on every
+    /// address change, and it is called BEFORE the `due` test at
+    /// manager.rs:600-604. mDNS is unsigned and device ids travel in cleartext
+    /// in the TXT record, so an attacker holding a paired id needs only two
+    /// addresses: announce A, announce B, announce A... and every single
+    /// announcement is `due`.
+    ///
+    /// `adversarial_round5_availability::a_spent_dial_is_retried_as_soon_as_the_
+    /// address_changes` only ever re-announces the SAME address, which is the
+    /// one case an attacker has no reason to use.
+    ///
+    /// The consequence is the outbound path itself. `i.dialing.insert(id)`
+    /// (manager.rs:617) admits one dial per id at a time, and a dial to a peer
+    /// that stalls runs for the full `HANDSHAKE_TIMEOUT` (20s), so the genuine
+    /// device's announcements find the id already dialling and start nothing.
+    /// R5-D1 (`inbound_saturation_is_bounded_and_does_not_stop_outbound_sync`)
+    /// records that outbound dialling is precisely what makes inbound
+    /// saturation survivable; this removes it.
+    #[test]
+    fn r6_alternating_addresses_cannot_buy_unlimited_dials() {
+        const REAL: &str = "22222222-2222-4222-8222-222222222222";
+        let mut peers: HashMap<String, PeerInfo> = HashMap::new();
+        let mut last_dial: HashMap<String, Instant> = HashMap::new();
+        let mut last_move: HashMap<String, Instant> = HashMap::new();
+        let a = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 66));
+        let b = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 67));
+
+        let mut dials = 0usize;
+        // Hard-bounded; an attacker would simply keep going.
+        for n in 0..10 {
+            let addr = if n % 2 == 0 { a } else { b };
+            // Production function, production gate (manager.rs:579, 600-618).
+            note_peer_record(&mut peers, &mut last_dial, &mut last_move, REAL, r6_info(addr, 51234, REAL), true);
+            let due = last_dial
+                .get(REAL)
+                .map(|t: &Instant| t.elapsed() >= DIAL_RETRY_AFTER)
+                .unwrap_or(true);
+            if due {
+                last_dial.insert(REAL.to_string(), Instant::now());
+                dials += 1;
+            }
+        }
+
+        assert_eq!(
+            dials, 1,
+            "{dials} dials started inside one {DIAL_RETRY_AFTER:?} window from a single \
+             spoofed id: alternating two addresses defeats the retry interval entirely, \
+             so the flapping bound manager.rs:605-614 claims does not exist"
+        );
+    }
 }

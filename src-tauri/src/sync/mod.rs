@@ -21,3 +21,9 @@ pub mod wire_tcp;
 
 #[cfg(test)]
 mod adv5b;
+
+#[cfg(test)]
+mod adversarial_r6;
+
+#[cfg(test)]
+mod adversarial_r6_sec;
