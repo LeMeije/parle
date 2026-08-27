@@ -122,6 +122,13 @@ pub struct RoundStats {
     /// Counted rather than silently dropped: one of these used to abort the
     /// WHOLE exchange, permanently, so the number matters to the user.
     pub oversized: usize,
+    /// The peer's own name, as it gave it INSIDE the session.
+    ///
+    /// The only authenticated statement of the name there is: the Noise
+    /// session is keyed by the paired secret, so nobody else can make it. The
+    /// mDNS record that carries the same field is unsigned and anyone on the
+    /// LAN can write it.
+    pub peer_name: Option<String>,
     /// We hit the per-exchange batch cap with rows still to send.
     ///
     /// An ordinary exchange resumes next time, because the peer's cursor moved.
@@ -307,7 +314,11 @@ pub fn exchange<S: Read + Write>(
         device_name: me.1.chars().take(64).collect(),
     })?;
     match session.recv()? {
-        SyncMessage::Hello { protocol_version, .. } if protocol_version == PROTOCOL_VERSION => {}
+        SyncMessage::Hello { protocol_version, device_name, .. }
+            if protocol_version == PROTOCOL_VERSION =>
+        {
+            stats.peer_name = Some(device_name);
+        }
         SyncMessage::Hello { protocol_version, .. } => {
             return Err(ReplicateError::Version { peer: protocol_version, ours: PROTOCOL_VERSION })
         }

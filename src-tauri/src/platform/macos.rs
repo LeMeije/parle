@@ -431,7 +431,10 @@ pub fn inject_text(
 ) -> InjectionOutcome {
     // A genuinely SECURE FIELD: hand it over on the clipboard, concealed, and
     // let the user paste. We should not be typing into a password field.
-    if focused_field_is_secure() == Some(true) {
+    // Probed ONCE, and carried. Reading it again below would be a second
+    // observation of a value that can change between the two.
+    let field = focused_field_is_secure();
+    if field == Some(true) {
         write_clipboard_marked(text, true);
         return InjectionOutcome {
             method: InjectionMethod::ClipboardOnly,
@@ -470,7 +473,16 @@ pub fn inject_text(
             // is too sensitive to send to the user's own second device, and
             // this handed the same string to every clipboard manager on the
             // machine unmarked.
-            write_clipboard_marked(text, keystrokes_blocked);
+            // `field.is_none() && keystrokes_blocked`, not `keystrokes_blocked`
+            // alone. The gate above already returned for a known password
+            // field, so reaching here with `Some(false)` means the field is
+            // known ORDINARY, and `FieldSecrecy::conceal_clipboard` says an
+            // ordinary field is never concealed. `keep_on_clipboard` is the
+            // user pressing "also copy": concealing it tells every clipboard
+            // manager on the machine to bin the copy they just asked for, and
+            // `clipboard_is_concealed` then reads our own mark back as the OS
+            // calling the row a secret.
+            write_clipboard_marked(text, field.is_none() && keystrokes_blocked);
         }
         if press_enter {
             synth_return();

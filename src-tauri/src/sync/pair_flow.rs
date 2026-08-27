@@ -49,24 +49,100 @@ pub enum PairFlowError {
 /// Prefix of a refusal frame.
 ///
 /// The pairing frames are raw SPAKE2 bytes, not `SyncMessage`, so a refusal
-/// cannot be a new enum variant. It is a frame that `looks_like_pairing_message`
-/// rejects by length, so it can never be mistaken for an opening message, and
-/// it is only ever read where a SPAKE2 reply was expected.
+/// cannot be a new enum variant. It is only ever read where a SPAKE2 reply was
+/// expected. `looks_like_pairing_message` refuses it explicitly rather than by
+/// length: an earlier comment here claimed the length check was enough, and it
+/// was not, because a refusal padded to `spake2_msg_len()` passes it.
 pub const REFUSED_PREFIX: &[u8] = b"PARLE-PAIR-REFUSED:";
 
-/// Build a refusal frame carrying `reason`.
-pub fn refusal_frame(reason: &str) -> Vec<u8> {
+/// A refusal carries a CODE and a number, never the peer's own words.
+///
+/// The first shape of this put the showing machine's error string on the
+/// entering machine's screen verbatim. That frame is read BEFORE `verify_peer`,
+/// so nothing has been proven about who sent it, and mDNS is unsigned, so the
+/// "device" the user tapped is whatever answered. The sender capped the string
+/// at 256 bytes; the reader's only bound was the 4 KB frame limit. Anyone on
+/// the LAN could put kilobytes of their own text, in any script and any
+/// direction, on the pairing screen at the exact moment the user is deciding
+/// whom to trust. The same commit banned invisible characters from a twelve
+/// word device LABEL for that reason.
+///
+/// A code cannot say anything. Parle supplies the words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalCode {
+    NotPairing,
+    Expired,
+    LockedOut,
+    CodeExhausted,
+    Unknown,
+}
+
+impl RefusalCode {
+    fn as_byte(self) -> u8 {
+        match self {
+            Self::NotPairing => 1,
+            Self::Expired => 2,
+            Self::LockedOut => 3,
+            Self::CodeExhausted => 4,
+            Self::Unknown => 0,
+        }
+    }
+    fn from_byte(b: u8) -> Self {
+        match b {
+            1 => Self::NotPairing,
+            2 => Self::Expired,
+            3 => Self::LockedOut,
+            4 => Self::CodeExhausted,
+            _ => Self::Unknown,
+        }
+    }
+    /// Parle's own words, chosen here and never by the peer.
+    pub fn advice(self, retry_secs: u32) -> String {
+        match self {
+            Self::NotPairing => {
+                "That device is not showing a pairing code. Open Settings on it and press \
+                 Pair, then try again."
+                    .into()
+            }
+            Self::Expired => {
+                "That pairing code has expired. Show a new one on the other device.".into()
+            }
+            Self::LockedOut => format!(
+                "Too many incorrect codes. That device will accept another attempt in {} \
+                 seconds.",
+                retry_secs
+            ),
+            Self::CodeExhausted => {
+                "Too many incorrect codes for that pairing code. Show a new one on the other \
+                 device."
+                    .into()
+            }
+            Self::Unknown => "The other device turned down the pairing attempt.".into(),
+        }
+    }
+}
+
+/// Build a refusal frame: prefix, one code byte, four bytes of retry seconds.
+///
+/// Fixed length, so it carries no attacker-chosen content of any kind.
+pub fn refusal_frame(code: RefusalCode, retry_secs: u32) -> Vec<u8> {
     let mut v = REFUSED_PREFIX.to_vec();
-    // Bounded: this is a display string and must never be able to deny
-    // anything, the same rule the Hello name follows.
-    v.extend_from_slice(reason.as_bytes().iter().take(256).copied().collect::<Vec<_>>().as_slice());
+    v.push(code.as_byte());
+    v.extend_from_slice(&retry_secs.to_be_bytes());
     v
 }
 
 /// Read a refusal out of a frame, if that is what it is.
 fn refusal_reason(buf: &[u8]) -> Option<String> {
     let rest = buf.strip_prefix(REFUSED_PREFIX)?;
-    Some(String::from_utf8_lossy(rest).to_string())
+    let code = RefusalCode::from_byte(rest.first().copied().unwrap_or(0));
+    let secs = match rest.get(1..5) {
+        Some(b) => u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+        None => 0,
+    };
+    // Clamped: a peer-supplied number still reaches a sentence, so it must not
+    // be able to make an absurd one.
+    Some(code.advice(secs.min(3600)))
 }
 
 /// Length of a SPAKE2 opening message, measured from the library rather than
@@ -87,7 +163,12 @@ pub fn spake2_msg_len() -> usize {
 /// cheaply and reveals nothing, so the charge-before-exchange ordering that
 /// closes the TOCTOU is untouched.
 pub fn looks_like_pairing_message(buf: &[u8]) -> bool {
-    !buf.is_empty() && buf.len() == spake2_msg_len()
+    // The prefix check is not redundant with the length check. A refusal frame
+    // padded to exactly `spake2_msg_len()` satisfies the length and would then
+    // be classified as an opening message here and as a refusal by the reader.
+    // The doc comment on `REFUSED_PREFIX` used to claim length alone separated
+    // them, which was false.
+    !buf.is_empty() && buf.len() == spake2_msg_len() && !buf.starts_with(REFUSED_PREFIX)
 }
 
 /// What we learn about the other device once pairing succeeds.

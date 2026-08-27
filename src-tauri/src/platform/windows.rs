@@ -536,10 +536,35 @@ pub fn inject_text(
     // of a password manager, dictate anywhere with the shipped restore default
     // on, and Parle republished it with the owner's own "do not keep this, do
     // not upload this" statement deleted.
+    //
+    // The two reads are BRACKETED by the sequence number, because they are two
+    // separate clipboard sessions. `read_clipboard` ignores markers entirely,
+    // so it will happily capture a password manager's marked secret; if the
+    // clipboard then turned over to ordinary content before the probe opened,
+    // the probe answered "not excluded" and the restore republished that secret
+    // with `CanUploadToCloudClipboard = 0` deleted. That is the exact leak this
+    // pair was added to close. `read_clipboard_unless_excluded` forty lines
+    // away already brackets its own read for the same reason.
+    let seq_before = unsafe { GetClipboardSequenceNumber() };
     let previous = read_clipboard();
-    let previous_excluded = clipboard_is_excluded();
+    let mut previous_excluded = clipboard_is_excluded();
+    if unsafe { GetClipboardSequenceNumber() } != seq_before {
+        // The text and the marking may belong to different content. Marking is
+        // the safe direction: over-marking costs a Win+V entry, under-marking
+        // uploads a secret to Microsoft and pushes it to the user's other
+        // machines.
+        previous_excluded = true;
+    }
     write_clipboard(text);
-    let seq_after_write = unsafe { GetClipboardSequenceNumber() };
+    // The number the WRITER recorded, not a fresh read.
+    //
+    // `write_clipboard_inner` reads the sequence number inside its clipboard
+    // session and stores it in `OUR_LAST_WRITE`; reading it again out here
+    // happens after `CloseClipboard`, so the two are equal only if closing the
+    // clipboard does not move the counter. Nothing in this repo establishes
+    // that, and Windows clipboard behaviour has never been checked on hardware.
+    // Taking the writer's own number is correct whichever way it goes.
+    let seq_after_write = OUR_LAST_WRITE.load(std::sync::atomic::Ordering::SeqCst);
     synth_ctrl_v();
     if press_enter {
         std::thread::sleep(std::time::Duration::from_millis(160));

@@ -923,7 +923,27 @@ impl Store {
             //
             // Both properties are needed, so take both: above the cursor, and
             // above the row.
-            Ok((self.local_clock_at(now_ms())?.max(current.saturating_add(1)), true))
+            let stamp = self.local_clock_at(now_ms())?.max(current.saturating_add(1));
+            if stamp > now_ms().saturating_add(MAX_CLOCK_SKEW_MS) {
+                // Said HERE, by the machine that minted it.
+                //
+                // `current + 1` is bounded by nothing, so after a backwards
+                // clock step larger than the skew window this is the one stamp
+                // in the store above the ceiling every other stamp is clamped
+                // to, and a correctly clocked peer refuses exactly that. The
+                // edit is not lost, it is postponed until the wall clock climbs
+                // past the row's pre-correction stamp, which can be days. The
+                // alternative is worse: stamping below the row loses the edit
+                // permanently, because the peer keeps the older text and this
+                // machine no longer holds a higher clock to beat it with.
+                tracing::warn!(
+                    "this machine's clock moved backwards, so an edit is stamped {} ms beyond \
+                     what a peer will accept; it will not replicate until the clock catches \
+                     up. Check THIS machine's clock.",
+                    stamp - now_ms()
+                );
+            }
+            Ok((stamp, true))
         } else {
             Ok((current, false))
         }

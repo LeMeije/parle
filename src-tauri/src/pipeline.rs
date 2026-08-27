@@ -91,7 +91,12 @@ pub struct Pipeline {
 enum FieldSecrecy {
     Secure,
     Ordinary,
-    Unknown,
+    Unknown {
+        /// Whether SOME application had secure input raised at the moment we
+        /// looked. Carried rather than re-read, so every decision in one
+        /// dictation is made from one observation.
+        secure_input: bool,
+    },
 }
 
 /// Sampled ONCE, before anything is injected.
@@ -110,7 +115,19 @@ fn sample_field_secrecy() -> FieldSecrecy {
         // password is somewhere on screen, but not that it is under THIS
         // caret. Combined with a probe that could not answer, it is enough to
         // keep the row off the wire and not enough to throw it away.
-        None => FieldSecrecy::Unknown,
+        // The flag is SAMPLED HERE, once, and carried.
+        //
+        // It used to be read live inside `keep_local_only` and
+        // `conceal_clipboard`, which made those predicates impure: any
+        // application may lower the flag at any moment, so two calls in the
+        // same dictation could disagree. `store_transcription` called it to
+        // decide where the row goes and the `Completed` literal called it again
+        // to decide what the user is told, and a flag that dropped in between
+        // stored the row local-only while reporting it as ordinary, so the
+        // toast rendered the first 42 characters of a suspected password. That
+        // is the defect round 12 added `withheld` to fix, reintroduced by the
+        // fix itself.
+        None => FieldSecrecy::Unknown { secure_input: platform::imp::secure_input_active() },
     }
 }
 
@@ -122,7 +139,7 @@ impl FieldSecrecy {
 
     /// Keep it, but never let it leave this machine.
     fn keep_local_only(self) -> bool {
-        self == FieldSecrecy::Unknown && platform::imp::secure_input_active()
+        matches!(self, FieldSecrecy::Unknown { secure_input: true })
     }
 
     /// Mark the clipboard write concealed.
@@ -131,8 +148,7 @@ impl FieldSecrecy {
     /// concealed loses the user nothing they can see, while failing to mark a
     /// password tells every other clipboard manager on the machine to keep it.
     fn conceal_clipboard(self) -> bool {
-        self != FieldSecrecy::Ordinary && platform::imp::secure_input_active()
-            || self == FieldSecrecy::Secure
+        self == FieldSecrecy::Secure || self.keep_local_only()
     }
 }
 
@@ -146,6 +162,11 @@ fn store_transcription(
     app_id: &Option<String>,
     app_name: &Option<String>,
     secrecy: FieldSecrecy,
+    // Did the text actually reach the clipboard on this path? The
+    // empty-after-cleanup branch never injects and never copies, and it was
+    // telling the user "Password field: copied, not saved to History". Half of
+    // that sentence was false, and it is the half that reassures.
+    copied: bool,
 ) -> (i64, Option<String>) {
     // The second half of the pair is what the USER is told.
     //
@@ -156,7 +177,18 @@ fn store_transcription(
     // for a whole round.
     if secrecy.drop_entirely() {
         tracing::info!("dictation went to a password field; not storing it");
-        return (-1, Some("Password field: copied, not saved to History".into()));
+        return (
+            -1,
+            Some(if copied {
+                // The user's previous clipboard is gone, and saying so is the
+                // only warning they get: the text has to stay there to be
+                // pasted, so it cannot be restored on a delay without taking
+                // the dictation away before they use it.
+                "Password field: replaced your clipboard, not saved to History".into()
+            } else {
+                "Password field: not saved to History".to_string()
+            }),
+        );
     }
     let g = store.lock();
     if secrecy.keep_local_only() {
@@ -518,14 +550,19 @@ impl Pipeline {
                     cleanup_tier: 0,
                 };
                 let (_, notice) =
-                    store_transcription(&self.store, &tr, &app_id, &app_name, secrecy);
+                    store_transcription(&self.store, &tr, &app_id, &app_name, secrecy, false);
                 if let Some(reason) = notice {
                     (self.sink)(PipelineEvent::Empty { reason });
                     self.emit_idle_if_quiescent();
                     return;
                 }
             }
-            (self.sink)(PipelineEvent::Empty { reason: "Nothing left after cleanup (kept raw in history)".into() });
+            (self.sink)(PipelineEvent::Empty { reason: if raw_text.is_empty() {
+                    "Nothing to save".into()
+                } else {
+                    // Only claim to have kept something when we did.
+                    "Nothing left after cleanup (kept raw in history)".to_string()
+                } });
             self.emit_idle_if_quiescent();
             return;
         }
@@ -584,14 +621,27 @@ impl Pipeline {
         // password typed into a password field belongs in a history that syncs.
         // The text is still on the clipboard for the user to paste, which is
         // the whole point of that branch.
-        let (item_id, notice) = store_transcription(&self.store, &tr, &app_id, &app_name, secrecy);
+        let (item_id, notice) =
+            store_transcription(&self.store, &tr, &app_id, &app_name, secrecy, injection.is_some());
         if let Some(reason) = notice {
             (self.sink)(PipelineEvent::Empty { reason });
         }
 
+        // A FAILED WRITE is an error, not a withholding.
+        //
+        // `withheld` was `item_id < 0 || ...`, which folded the two together.
+        // Both handlers return early on `withheld`, so a store that failed
+        // (locked, disk full, key gone) produced no toast, no HUD line and no
+        // notice: the text had been injected and nothing anywhere said the
+        // history write had not happened.
+        if item_id < 0 && !secrecy.drop_entirely() {
+            (self.sink)(PipelineEvent::Error {
+                message: "Could not save that to History. The text was still inserted.".into(),
+            });
+        }
         (self.sink)(PipelineEvent::Completed {
             item_id,
-            withheld: item_id < 0 || secrecy.keep_local_only(),
+            withheld: secrecy.drop_entirely() || secrecy.keep_local_only(),
             text,
             duration_ms: recording.duration_ms,
             transcribe_ms: asr.transcribe_ms,
@@ -779,14 +829,20 @@ impl Pipeline {
         // The SAME secure-field gate as the plain path. This one was missed,
         // so a dictation into a password field that happened to contain a mark
         // was stored and replicated while the other path correctly dropped it.
-        let (item_id, notice) = store_transcription(&self.store, &tr, &app_id, &app_name, secrecy);
+        let (item_id, notice) =
+            store_transcription(&self.store, &tr, &app_id, &app_name, secrecy, injection.is_some());
         if let Some(reason) = notice {
             (self.sink)(PipelineEvent::Empty { reason });
         }
 
+        if item_id < 0 && !secrecy.drop_entirely() {
+            (self.sink)(PipelineEvent::Error {
+                message: "Could not save that to History. The text was still inserted.".into(),
+            });
+        }
         (self.sink)(PipelineEvent::Completed {
             item_id,
-            withheld: item_id < 0 || secrecy.keep_local_only(),
+            withheld: secrecy.drop_entirely() || secrecy.keep_local_only(),
             text,
             duration_ms: recording.duration_ms,
             transcribe_ms,

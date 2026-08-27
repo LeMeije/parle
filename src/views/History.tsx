@@ -32,19 +32,30 @@ export default function HistoryView() {
   const [gone, setGone] = useState(false);
   // Names for the delete confirmation. A delete travels and is absorbing on the
   // peer, so the confirmation has to be able to say WHERE it travels to.
-  const [pairedNames, setPairedNames] = useState<string[]>([]);
+  // `null` means we do not know yet, which is NOT the same as "nobody to
+  // warn about". Collapsing the two into an empty array made a failed status
+  // call silently downgrade the warning on an irreversible, travelling delete.
+  const [pairedNames, setPairedNames] = useState<string[] | null>(null);
   useEffect(() => {
     api
       .syncStatus()
-      .then((st) => setPairedNames(st.enabled ? st.paired.map((d) => d.name) : []))
-      .catch(() => setPairedNames([]));
+      // No `st.enabled` gate. A delete banks a durable tombstone whatever the
+      // sync toggle says, and it absorbs on the peer the moment sync comes
+      // back on. The Clear-all disclosure this was copied from has no such
+      // gate either; the copy invented one.
+      .then((st) => setPairedNames(st.paired.map((d) => d.name)))
+      .catch(() => setPairedNames(null));
   }, []);
 
   function confirmDelete(item: HistoryItem): boolean {
-    const where =
-      pairedNames.length > 0 && !item.local_only
-        ? `\n\nThis also deletes it from ${pairedNames.join(', ')}.`
-        : '';
+    let where = '';
+    if (!item.local_only) {
+      if (pairedNames === null) {
+        where = '\n\nThis may also delete it from your paired devices.';
+      } else if (pairedNames.length > 0) {
+        where = `\n\nThis also deletes it from ${pairedNames.join(', ')}.`;
+      }
+    }
     return window.confirm(`Delete this item? It cannot be undone.${where}`);
   }
   const inputRef = useRef<HTMLInputElement>(null);

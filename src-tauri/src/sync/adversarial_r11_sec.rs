@@ -283,9 +283,17 @@ fn r11_the_secure_gate_is_decided_after_the_paste_not_before() {
     );
     // And it is sampled ONCE and carried, not re-asked.
     assert!(
-        code.contains("secrecy.conceal_clipboard()") && code.contains("secrecy)"),
+        code.contains("secrecy.conceal_clipboard()") && code.contains("secrecy,"),
         "the sampled value must be carried to both the clipboard marking and the store, or the \
          two can disagree about the same dictation"
+    );
+    // Round 13: carrying the VARIANT was not enough, because the predicates
+    // read the global flag live, so two calls in one dictation could disagree.
+    // The flag is sampled with the probe and carried in the variant.
+    assert!(
+        code.contains("FieldSecrecy::Unknown { secure_input: platform::imp::secure_input_active() }"),
+        "the secure-input flag is read live inside the predicates rather than sampled once, so \
+         the same dictation can be classified two different ways"
     );
 }
 
@@ -319,9 +327,15 @@ fn r11_injection_still_keys_off_the_discredited_global_flag() {
         .and_then(|s| s.split("\nfn ").next())
         .expect("inject_text is in the file");
 
+    // Round 13 hoisted the probe to `let field = focused_field_is_secure();`
+    // so it is read ONCE per injection. The gate is the comparison.
     assert!(
-        f.contains("focused_field_is_secure() == Some(true)"),
+        f.contains("field == Some(true)") || f.contains("focused_field_is_secure() == Some(true)"),
         "the injection gate does not ask whether this is actually a password field"
+    );
+    assert!(
+        f.contains("let field = focused_field_is_secure();"),
+        "the probe is not read once and carried, so two reads in one injection can disagree"
     );
     let secure_at = f.find("focused_field_is_secure()").expect("checked above");
     let flag_at = f.find("secure_input_active()").expect("the flag is still consulted");

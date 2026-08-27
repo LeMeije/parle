@@ -18,6 +18,23 @@ pub struct Settings {
     /// can never take an entry off the list at all. A version gate gave the
     /// second and not the first; this gives both, because it records what was
     /// offered rather than when.
+    // A FIELD-level `#[serde(default)]` fills a missing key from the FIELD's
+    // Default, an empty Vec, NOT from `Settings::default()`. That is
+    // deliberate, and it is the reason an absent key means "offer the shipped
+    // list once".
+    //
+    // Round 13 proposed `#[serde(default = "default_excluded_apps")]` so that a
+    // downgrade to an older build, which round-trips settings.json without the
+    // key, would not re-offer an entry the user deliberately removed. DECLINED:
+    // an absent key cannot distinguish that downgrade from an install that
+    // simply predates this scheme, and the second is the common case. Reading
+    // absent as "already offered" would leave every existing install without
+    // the additions this whole mechanism exists to deliver, to protect a rare
+    // downgrade from re-adding one entry once.
+    //
+    // So a downgrade-then-upgrade re-offers the shipped list one more time.
+    // That is the same trade the union has always made, stated where the
+    // decision lives.
     #[serde(default)]
     pub excluded_defaults_seen: Vec<String>,
     pub onboarding_complete: bool,

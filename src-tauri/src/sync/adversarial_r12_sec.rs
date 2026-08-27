@@ -345,8 +345,12 @@ fn r12_sec_the_withholding_notice_names_no_secret_and_no_app() {
     let (gate, _) = rest.split_once("\nimpl Pipeline {").expect("the gate ends");
 
     // Both notices are string LITERALS, not formatted.
+    // Round 13 split this in two, because the empty-after-cleanup branch never
+    // copies and the message claimed it did. Both arms are still LITERALS: the
+    // branch chooses between them, it does not build one.
     assert!(
-        gate.contains(r#"Some("Password field: copied, not saved to History".into())"#),
+        gate.contains(r#""Password field: replaced your clipboard, not saved to History".into()"#)
+            && gate.contains(r#""Password field: not saved to History".to_string()"#),
         "the password-field notice is no longer a bare literal; check what it now interpolates"
     );
     assert!(
@@ -369,7 +373,8 @@ fn r12_sec_the_withholding_notice_names_no_secret_and_no_app() {
         "the gate now formats a string; check whether the transcript or the app reaches the user"
     );
     for literal in [
-        "Password field: copied, not saved to History",
+        "Password field: replaced your clipboard, not saved to History",
+        "Password field: not saved to History",
         "Saved on this device only: this may be a password field",
     ] {
         assert!(!literal.contains('{'), "{literal} carries a placeholder");

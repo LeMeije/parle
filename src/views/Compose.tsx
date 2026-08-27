@@ -44,7 +44,11 @@ export default function ComposeView() {
         }
       }
       if (e.kind === 'mark_added') setMarks((m) => [...m, { at_ms: e.at_ms, text: e.text }]);
-      if (e.kind === 'completed') setResult(e.text);
+      // `withheld` first: the event is broadcast to EVERY window, so a
+      // password-field dictation aimed at a browser lands here too, and this
+      // view paints the result in full and offers a Copy button for it.
+      if (e.kind === 'completed' && e.withheld) setResult('');
+      else if (e.kind === 'completed') setResult(e.text);
       if (e.kind === 'empty') setResult('');
       if (e.kind === 'error') setError(e.message);
     });

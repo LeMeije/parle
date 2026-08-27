@@ -665,20 +665,6 @@ impl SyncManager {
                 .paired
                 .iter()
                 .map(|p| UiPaired {
-                    // The LIVE name when the peer is on the LAN.
-                    //
-                    // `UiPaired.name` was written in exactly one place,
-                    // `complete_pairing`, so renaming a machine left the other
-                    // one showing the old label for ever, including in the
-                    // Unpair confirmation, which is the one destructive action
-                    // in that panel. `usable_peer_name` applies the same
-                    // character policy the pairing path applies, so an unsigned
-                    // name cannot arrive here unfiltered.
-                    name: i
-                        .peers
-                        .get(&p.id)
-                        .map(|q| usable_peer_name(&q.name, &p.id))
-                        .unwrap_or_else(|| p.name.clone()),
                     online: i.peers.contains_key(&p.id),
                     ..p.clone()
                 })
@@ -1166,7 +1152,19 @@ impl SyncManager {
                     // The comment on that mapping says six failures used to
                     // collapse into one wrong answer. This is the same defect
                     // pointed the other way.
-                    let _ = write_frame(&mut s, &pair_flow::refusal_frame(&e.to_string()));
+                    // A CODE, not our error string. See `RefusalCode`: the
+                    // frame is read on the other side before anything about
+                    // this machine has been authenticated, so it must not be
+                    // able to carry chosen text.
+                    let (code, secs) = match &e {
+                        GuardError::NotPairing => (pair_flow::RefusalCode::NotPairing, 0),
+                        GuardError::Expired => (pair_flow::RefusalCode::Expired, 0),
+                        GuardError::LockedOut { retry_in } => {
+                            (pair_flow::RefusalCode::LockedOut, retry_in.as_secs() as u32)
+                        }
+                        GuardError::CodeExhausted => (pair_flow::RefusalCode::CodeExhausted, 0),
+                    };
+                    let _ = write_frame(&mut s, &pair_flow::refusal_frame(code, secs));
                     tracing::info!("sync: pairing attempt refused: {e}");
                     return;
                 }
@@ -1728,8 +1726,21 @@ impl SyncManager {
                             // finish: every pass re-sent the same batch and
                             // stopped in the same place.
                             let from = stats.resend_progress.unwrap_or(0);
-                            i.resend_owed.insert(peer_id.clone(), from);
-                            Some(from)
+                            // COMPARE AND SWAP against what we read before the
+                            // exchange. `set_kinds` primes this same key with 0
+                            // when the user switches a sync kind back on, and a
+                            // truncating exchange already in flight would land
+                            // afterwards and overwrite that 0 with its own
+                            // higher resume point. Nothing ever offers a row
+                            // below the peer's mark, so a debt above a stranded
+                            // row loses it permanently.
+                            let current = i.resend_owed.get(&peer_id).copied();
+                            if current == resend_from {
+                                i.resend_owed.insert(peer_id.clone(), from);
+                                Some(from)
+                            } else {
+                                current
+                            }
                         } else {
                             i.resend_owed.remove(&peer_id);
                             None
@@ -1800,13 +1811,44 @@ impl SyncManager {
                 // one row had been accepted. The comment on that dot says it was
                 // moved off `online` precisely to stop being green and confident
                 // while nothing moved.
+                // The peer's name, refreshed from the ONE authenticated
+                // statement of it.
+                //
+                // Round 12 fixed "a renamed peer keeps its old name" by reading
+                // the name out of `i.peers` in `snapshot`. That map is filled
+                // from mDNS, which is unsigned: anyone on the LAN announcing the
+                // paired device's id could relabel an already-authenticated
+                // device, and that label is what the Unpair confirmation
+                // renders. The comment defending it argued that the character
+                // policy still applied, which was never the property that
+                // mattered. This is the same freshness from a source a peer
+                // cannot forge.
+                if let Some(name) = stats.peer_name.clone() {
+                    let mut i = self.inner.lock();
+                    if let Some(d) = i.paired.iter_mut().find(|d| d.id == peer_id) {
+                        let fresh = usable_peer_name(&name, &peer_id);
+                        if d.name != fresh {
+                            d.name = fresh;
+                        }
+                    }
+                }
                 if stats.ignored > 0 {
                     self.report_device_problem(
                         &peer_id,
                         &format!(
-                            "{} row{} refused. Check that device's clock is set correctly.",
+                            // "both", not "that device". A refusal means a
+                            // timestamp is outside the accepted window, and the
+                            // machine at fault can be either one: an edit made
+                            // after a backwards clock step carries a stamp
+                            // beyond the ceiling even once that clock is
+                            // corrected, so naming the sender sends the user to
+                            // check the machine that is now right.
+                            "{} row{} refused because {} timestamp{} outside the accepted \
+                             window. Check the clocks on both devices.",
                             stats.ignored,
-                            if stats.ignored == 1 { " was" } else { "s were" }
+                            if stats.ignored == 1 { " was" } else { "s were" },
+                            if stats.ignored == 1 { "its" } else { "their" },
+                            if stats.ignored == 1 { " is" } else { "s are" }
                         ),
                     );
                 }

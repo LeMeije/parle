@@ -247,7 +247,9 @@ fn r12_flow_the_withheld_dictation_notice_is_overwritten_by_the_next_event() {
          this test is reasoning about code that has moved"
     );
     assert!(
-        pipe.contains("Password field: copied, not saved to History"),
+        // Round 13 split this: the empty-after-cleanup branch never copies, so
+        // it no longer says it did.
+        pipe.contains("Password field: not saved to History"),
         "anchor lost: round 11's withholding notice is not in pipeline.rs"
     );
     assert!(
@@ -255,7 +257,7 @@ fn r12_flow_the_withheld_dictation_notice_is_overwritten_by_the_next_event() {
         "anchor lost: Hud.tsx no longer handles both 'empty' and 'completed'"
     );
     assert!(
-        mac.contains("focused_field_is_secure() == Some(true)"),
+        mac.contains("field == Some(true)"),
         "anchor lost: macos::inject_text no longer branches on a known-secure field"
     );
 
@@ -326,7 +328,7 @@ fn r12_flow_the_withheld_dictation_notice_is_overwritten_by_the_next_event() {
         .nth(1)
         .expect("anchor lost: macos::inject_text not found");
     let secure_branch = inject
-        .split("focused_field_is_secure() == Some(true)")
+        .split("field == Some(true)")
         .nth(1)
         .expect("anchor lost")
         .split("}\n\n")
@@ -792,7 +794,15 @@ fn r12_flow_a_locked_out_pairing_code_reports_itself_as_a_network_drop() {
     // 400-character window, and a comment explaining the arm is prose that
     // pushes the code out of it: the same reason `code_of` exists to stop prose
     // SATISFYING a guard applies to prose DEFEATING one.
-    let mgr = code_of("src-tauri/src/sync/manager.rs");
+    // Comments stripped AND the blank lines they leave behind dropped: the
+    // refusal arm below is inspected through a fixed-size window, and a
+    // stripped comment would push the code out of it while looking like
+    // nothing at all.
+    let mgr: String = code_of("src-tauri/src/sync/manager.rs")
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         mgr.contains("fn serve_pairing"),
         "anchor lost: serve_pairing is gone"
@@ -813,7 +823,7 @@ fn r12_flow_a_locked_out_pairing_code_reports_itself_as_a_network_drop() {
         .find("Err(e) => {")
         .expect("anchor lost: the reserve refusal arm changed shape");
     // The whole arm and then some: enough to catch anything it might do.
-    let refusal = &after_reserve[refusal_at..(refusal_at + 400).min(after_reserve.len())];
+    let refusal = &after_reserve[refusal_at..(refusal_at + 700).min(after_reserve.len())];
     assert!(
         refusal.contains("tracing::info!") || refusal.contains("refusal_frame"),
         "anchor lost: the refusal neither logs nor answers"
@@ -927,19 +937,28 @@ fn r12_flow_a_renamed_peer_keeps_its_old_name_in_the_paired_list() {
         snap.contains("online: i.peers.contains_key(&p.id),"),
         "anchor lost: snapshot no longer derives online from the peers map"
     );
+    // Round 13 moved this OFF `snapshot`. Reading the name from `i.peers`
+    // fixed the staleness by taking it from unsigned mDNS, which let anyone on
+    // the LAN relabel an authenticated device. The refresh now happens after an
+    // exchange, from the peer's Hello inside the Noise session.
+    let mgr_all = code_of("src-tauri/src/sync/manager.rs");
     assert!(
-        snap.contains("usable_peer_name(&q.name, &p.id)"),
-        "FINDING: snapshot copies the stored paired entry wholesale, so a peer that has been \
-         renamed keeps its old label for ever, including in the Unpair confirmation, which \
-         is the one destructive action in that panel"
+        mgr_all.contains("if let Some(name) = stats.peer_name.clone()"),
+        "FINDING: nothing refreshes a paired device's name, so a peer that has been renamed \
+         keeps its old label for ever, including in the Unpair confirmation, which is the \
+         one destructive action in that panel"
+    );
+    assert!(
+        !snap.contains("i.peers.get(&p.id).map(|q| usable_peer_name"),
+        "the paired name is read from the unsigned mDNS map, which is worse than stale"
     );
     // The freshly-discovered name is right there, one field away, and unused
     // for paired devices.
     let paired_block = snap.split("paired: i").nth(1).unwrap().split(".collect(),").next().unwrap();
+    // Round 13: the refresh is deliberately NOT in `snapshot`. See above.
     assert!(
-        paired_block.contains("name:"),
-        "FINDING: the paired snapshot sets no name, so it keeps whatever `complete_pairing` \
-         wrote once. The freshly-discovered name is one field away and unused"
+        !paired_block.contains("i.peers.get(&p.id)"),
+        "the paired snapshot derives the displayed name from the unsigned mDNS map"
     );
 }
 

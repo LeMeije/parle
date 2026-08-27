@@ -251,7 +251,8 @@ function TestStep({ onDone }: { onDone: () => void }) {
     const un = onPipelineEvent((e) => {
       if (e.kind === 'state_changed') setRecording(e.state === 'recording');
       if (e.kind === 'completed') {
-        setResult(e.text);
+        // Withheld rows are never rendered. The event reaches every window.
+        setResult(e.withheld ? '' : e.text);
         setFinishing(false);
       }
       if (e.kind === 'empty') {

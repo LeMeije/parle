@@ -12,6 +12,8 @@ mod adversarial_r10_data;
 mod adversarial_r11_data;
 #[cfg(test)]
 mod adversarial_r12_data;
+#[cfg(test)]
+mod adversarial_r13_data;
 
 pub mod dictionary;
 pub mod formatter;
