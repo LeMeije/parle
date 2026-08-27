@@ -119,6 +119,16 @@ pub const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// Doubling from one second and capped at thirty fits about eight guesses into
 /// a code's two-minute life. Saturating throughout: a long-lived guard must not
 /// be able to overflow the shift or the instant.
+/// The longest wait any honest Parle can ask a peer to sit out.
+///
+/// Derived from the only producer, `LockedOut`, rather than written down
+/// separately: `MAX_PER_SOURCE` guesses is the most a source can spend, so
+/// `backoff_for` of that is the most it can ever be told to wait. Anything
+/// larger on the wire came from something that is not Parle.
+pub fn max_honest_retry_secs() -> u32 {
+    backoff_for(MAX_PER_SOURCE).as_secs() as u32
+}
+
 fn backoff_for(failures: u32) -> Duration {
     if failures == 0 {
         return Duration::ZERO;

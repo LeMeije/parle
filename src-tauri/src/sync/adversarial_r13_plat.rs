@@ -147,11 +147,14 @@ fn r13_plat_every_clipboard_write_follows_the_snapshot() {
         "src-tauri/src/platform/macos.rs",
     ] {
         let body = body_of(rel, "pub fn inject_text(");
+        // `read_clipboard()` now appears as `let mut previous = read_clipboard();`
+        // and the writes below it are `write_clipboard_inner`, which round 14
+        // made the single writer once the marking had to travel.
         let read_at = index_of(&body, "read_clipboard()", rel);
         let writes: Vec<usize> = body
             .match_indices("write_clipboard")
             .map(|(i, _)| i)
-            .filter(|i| !body[*i..].starts_with("write_clipboard_inner"))
+            .filter(|_| true)
             .collect();
         // CONTROL: at least one write must sit AFTER the snapshot, or the
         // ordering claim below could be satisfied by finding no writes at all.
@@ -268,9 +271,9 @@ fn r13_plat_windows_marking_probe_has_no_sequence_recheck() {
     // so a change under either session can be detected. Two reads, therefore,
     // before the transcript is written over the top.
     let body = body_of(rel, "pub fn inject_text(");
-    let read_at = index_of(&body, "let previous = read_clipboard();", rel);
+    let read_at = index_of(&body, "let mut previous = read_clipboard();", rel);
     let probe_at = index_of(&body, "clipboard_is_excluded()", rel);
-    let write_at = index_of(&body, "write_clipboard(text)", rel);
+    let write_at = index_of(&body, "write_clipboard_inner(text, view.conceal)", rel);
     assert!(
         read_at < probe_at && probe_at < write_at,
         "{rel}: snapshot, probe and write are not in the order this test assumes \
@@ -423,9 +426,12 @@ fn r13_plat_macos_conceals_a_copy_the_pipeline_says_to_leave_alone() {
     assert!(!arg.is_empty(), "{rel}: could not read the concealment argument; found nothing");
 
     assert!(
-        // `is_none` without the parens: the extractor above stops at the first
-        // `)`, which is the one that closes `is_none()` itself.
-        arg.contains("field.is_none"),
+        // Round 14 moved the decision out of the platform entirely: the
+        // pipeline's `conceal_clipboard()` is `Secure || keep_local_only()`,
+        // which is false for Ordinary by construction, and the answer is
+        // carried in. That is stronger than reproducing the rule here, because
+        // there is no longer a second rule to disagree with the first.
+        arg.contains("view.conceal"),
         "{rel}: the keep_on_clipboard branch conceals on `{arg}` alone, which is \
          secure_input_active(). The secure-field gate above has already returned for \
          Some(true), so this branch conceals the user's deliberate 'also copy to clipboard' \

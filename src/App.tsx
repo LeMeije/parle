@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { AudioLines, BookA, Cpu, History as HistoryIcon, Settings as SettingsIcon } from 'lucide-react';
 import appIcon from './assets/icon.png';
 import { api, onPipelineEvent } from './api';
+import { PASTE_KEYS } from './types';
 import type { PipelineEvent, Settings } from './types';
 import { onFocusPalette } from './api';
 import HistoryView from './views/History';
@@ -37,11 +38,22 @@ export default function App() {
         // event, and `e.text` is the thing we withheld. Rendering a preview of
         // it here overwrote the explanation with the first 42 characters of the
         // password.
-        if (e.withheld) return;
+        // Same rule as the HUD: withhold the transcript, keep the
+        // instruction.
+        if (e.withheld && !e.injection?.manual_paste_required) return;
+        if (e.withheld) {
+          showToast(`Copied. Press ${PASTE_KEYS} to paste`, 'ok');
+          return;
+        }
         const preview = e.text.length > 42 ? e.text.slice(0, 42) + '…' : e.text;
         showToast(
           e.injection?.manual_paste_required
-            ? 'Copied. Press paste to insert (secure field)'
+            // Round 12 fixed both halves of this sentence in the HUD and
+            // wrote down why; neither round 12 nor round 13 carried it to the
+            // identical literal here. It named no key on either platform, and
+            // asserted "(secure field)" on a path where the field may be known
+            // ordinary and only a password manager is running.
+            ? `Copied. Press ${PASTE_KEYS} to paste`
             : e.injection
               ? `Inserted "${preview}"`
               : `Copied "${preview}"`,

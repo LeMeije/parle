@@ -103,6 +103,35 @@ pub enum InjectionMethod {
     ClipboardOnly,
 }
 
+/// What the PIPELINE already decided about the focused field.
+///
+/// Passed in rather than re-probed. `inject_text` used to ask
+/// `focused_field_is_secure()` and `secure_input_active()` itself, so the
+/// platform layer and the pipeline formed two independent opinions about one
+/// dictation from two observations taken milliseconds apart. Either order of
+/// disagreement is a real failure: a field the pipeline called Secure could be
+/// written to the clipboard unmarked, and a field it called Ordinary could be
+/// stored and replicated while the same string was concealed locally.
+///
+/// Round 13 made the pipeline sample once and carry the answer. This carries it
+/// the rest of the way.
+#[derive(Debug, Clone, Copy)]
+pub struct FieldView {
+    /// `Some(true)` known password field, `Some(false)` known ordinary,
+    /// `None` the probe could not tell.
+    pub is_secure: Option<bool>,
+    /// Mark the clipboard write so other clipboard managers skip it.
+    pub conceal: bool,
+}
+
+impl FieldView {
+    /// For callers with no dictation context, such as pasting an existing
+    /// history row the user picked themselves.
+    pub fn unknown() -> Self {
+        Self { is_secure: None, conceal: false }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct InjectionOutcome {
     pub method: InjectionMethod,

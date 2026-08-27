@@ -12,7 +12,7 @@ import {
   PinOff,
   Trash2,
 } from 'lucide-react';
-import { api, onFocusPalette, onHistoryChanged, onPipelineEvent } from '../api';
+import { api, onSyncStatus, onFocusPalette, onHistoryChanged, onPipelineEvent } from '../api';
 import type { HistoryItem } from '../types';
 
 type Filter = 'all' | 'transcription' | 'clipboard';
@@ -37,6 +37,17 @@ export default function HistoryView() {
   // call silently downgrade the warning on an irreversible, travelling delete.
   const [pairedNames, setPairedNames] = useState<string[] | null>(null);
   useEffect(() => {
+    // SUBSCRIBED, not fetched once. A `[]` that was right at mount is
+    // indistinguishable from one that is now wrong: pair a device after
+    // opening this tab and `length > 0` omits the travel warning entirely.
+    // `sync-status` is pushed for exactly this and SettingsView already
+    // listens to it.
+    let stop: (() => void) | undefined;
+    onSyncStatus((st) => setPairedNames(st.paired.map((d) => d.name)))
+      .then((un) => {
+        stop = un;
+      })
+      .catch(() => {});
     api
       .syncStatus()
       // No `st.enabled` gate. A delete banks a durable tombstone whatever the
@@ -45,6 +56,7 @@ export default function HistoryView() {
       // gate either; the copy invented one.
       .then((st) => setPairedNames(st.paired.map((d) => d.name)))
       .catch(() => setPairedNames(null));
+    return () => stop?.();
   }, []);
 
   function confirmDelete(item: HistoryItem): boolean {

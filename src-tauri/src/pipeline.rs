@@ -150,6 +150,21 @@ impl FieldSecrecy {
     fn conceal_clipboard(self) -> bool {
         self == FieldSecrecy::Secure || self.keep_local_only()
     }
+
+    /// The sampled answer, in the shape the platform layer needs.
+    ///
+    /// The platform used to re-probe both globals itself. One sample, one
+    /// decision, carried the whole way down.
+    fn view(self) -> platform::FieldView {
+        platform::FieldView {
+            is_secure: match self {
+                FieldSecrecy::Secure => Some(true),
+                FieldSecrecy::Ordinary => Some(false),
+                FieldSecrecy::Unknown { .. } => None,
+            },
+            conceal: self.conceal_clipboard(),
+        }
+    }
 }
 
 /// Store a finished dictation according to what we could learn about the field.
@@ -199,6 +214,13 @@ fn store_transcription(
         let id = g
             .insert_transcription_local_only(tr, app_id.as_deref(), app_name.as_deref())
             .unwrap_or(-1);
+        // No notice when the write FAILED. The notice was returned on the same
+        // statement that swallows the error into `-1`, so one dictation emitted
+        // "Saved on this device only", then "Could not save that to History",
+        // then Completed. The caller's `item_id < 0` arm owns the failure.
+        if id < 0 {
+            return (id, None);
+        }
         return (id, Some("Saved on this device only: this may be a password field".into()));
     }
     (
@@ -573,6 +595,14 @@ impl Pipeline {
         // Output: inject + clipboard + history, simultaneously in intent.
         // `secrecy` was sampled above, before the empty-after-cleanup branch and
         // before any injection.
+        // Tracks the CLIPBOARD, which is what the message is about.
+        //
+        // `copied` was derived from `injection.is_some()`, which is false on
+        // the one branch that copies without injecting: with "insert at cursor"
+        // off, a password-field dictation reported "not saved to History" while
+        // the clipboard had silently been replaced, with no snapshot and no
+        // restore on that path.
+        let mut copied_to_clipboard = false;
         let injection = if settings.paste.inject && !frontmost_is_self() {
             Some(platform::imp::inject_text(
                 &text,
@@ -581,6 +611,7 @@ impl Pipeline {
                 settings.paste.copy_to_clipboard,
                 settings.paste.restore_clipboard,
                 settings.paste.press_enter,
+                secrecy.view(),
             ))
         } else if settings.paste.copy_to_clipboard {
             // CONCEALED when this is a password field. The unmarked call here
@@ -589,6 +620,7 @@ impl Pipeline {
             // so every other clipboard manager on the machine kept it. The
             // injection path had always marked it; this branch never did.
             platform::imp::write_clipboard_marked(&text, secrecy.conceal_clipboard());
+            copied_to_clipboard = true;
             None
         } else {
             None
@@ -621,8 +653,19 @@ impl Pipeline {
         // password typed into a password field belongs in a history that syncs.
         // The text is still on the clipboard for the user to paste, which is
         // the whole point of that branch.
+        // The injecting path writes the clipboard too: a ClipboardOnly outcome
+        // IS the clipboard write, and `copy_to_clipboard` asks for one
+        // alongside the insert.
+        if matches!(
+            injection.as_ref().map(|o| &o.method),
+            Some(platform::InjectionMethod::ClipboardPaste)
+                | Some(platform::InjectionMethod::ClipboardOnly)
+        ) || (injection.is_some() && settings.paste.copy_to_clipboard)
+        {
+            copied_to_clipboard = true;
+        }
         let (item_id, notice) =
-            store_transcription(&self.store, &tr, &app_id, &app_name, secrecy, injection.is_some());
+            store_transcription(&self.store, &tr, &app_id, &app_name, secrecy, copied_to_clipboard);
         if let Some(reason) = notice {
             (self.sink)(PipelineEvent::Empty { reason });
         }
@@ -636,13 +679,34 @@ impl Pipeline {
         // history write had not happened.
         if item_id < 0 && !secrecy.drop_entirely() {
             (self.sink)(PipelineEvent::Error {
-                message: "Could not save that to History. The text was still inserted.".into(),
+                // The sentence is chosen from what actually happened. It said
+                // "The text was still inserted" unconditionally, and with
+                // injection off, copy off, or Parle's own window frontmost,
+                // nothing was: the dictation was lost outright and the one
+                // message told the user it was in their document.
+                message: if injection.is_some() {
+                    "Could not save that to History. The text was still inserted.".into()
+                } else {
+                    "Could not save that to History, and it was not inserted anywhere. \
+                     That dictation is lost."
+                        .to_string()
+                },
             });
         }
         (self.sink)(PipelineEvent::Completed {
             item_id,
             withheld: secrecy.drop_entirely() || secrecy.keep_local_only(),
-            text,
+            // BLANKED at the source. `withheld` protected the render and not
+            // the transmission, so the password still reached every webview
+            // heap and the only thing between it and a screen was five React
+            // files each remembering a convention. That mechanism has failed in
+            // both rounds it has existed. Nothing on the frontend needs the
+            // text of a row it must not show.
+            text: if secrecy.drop_entirely() || secrecy.keep_local_only() {
+                String::new()
+            } else {
+                text
+            },
             duration_ms: recording.duration_ms,
             transcribe_ms: asr.transcribe_ms,
             model_id,
@@ -791,6 +855,14 @@ impl Pipeline {
 
         // Sampled BEFORE `inject_text`, which pastes and may post Return.
         let secrecy = sample_field_secrecy();
+        // Tracks the CLIPBOARD, which is what the message is about.
+        //
+        // `copied` was derived from `injection.is_some()`, which is false on
+        // the one branch that copies without injecting: with "insert at cursor"
+        // off, a password-field dictation reported "not saved to History" while
+        // the clipboard had silently been replaced, with no snapshot and no
+        // restore on that path.
+        let mut copied_to_clipboard = false;
         let injection = if settings.paste.inject && !frontmost_is_self() {
             Some(platform::imp::inject_text(
                 &text,
@@ -799,6 +871,7 @@ impl Pipeline {
                 settings.paste.copy_to_clipboard,
                 settings.paste.restore_clipboard,
                 settings.paste.press_enter,
+                secrecy.view(),
             ))
         } else if settings.paste.copy_to_clipboard {
             // CONCEALED when this is a password field. The unmarked call here
@@ -807,6 +880,7 @@ impl Pipeline {
             // so every other clipboard manager on the machine kept it. The
             // injection path had always marked it; this branch never did.
             platform::imp::write_clipboard_marked(&text, secrecy.conceal_clipboard());
+            copied_to_clipboard = true;
             None
         } else {
             None
@@ -829,21 +903,53 @@ impl Pipeline {
         // The SAME secure-field gate as the plain path. This one was missed,
         // so a dictation into a password field that happened to contain a mark
         // was stored and replicated while the other path correctly dropped it.
+        // The injecting path writes the clipboard too: a ClipboardOnly outcome
+        // IS the clipboard write, and `copy_to_clipboard` asks for one
+        // alongside the insert.
+        if matches!(
+            injection.as_ref().map(|o| &o.method),
+            Some(platform::InjectionMethod::ClipboardPaste)
+                | Some(platform::InjectionMethod::ClipboardOnly)
+        ) || (injection.is_some() && settings.paste.copy_to_clipboard)
+        {
+            copied_to_clipboard = true;
+        }
         let (item_id, notice) =
-            store_transcription(&self.store, &tr, &app_id, &app_name, secrecy, injection.is_some());
+            store_transcription(&self.store, &tr, &app_id, &app_name, secrecy, copied_to_clipboard);
         if let Some(reason) = notice {
             (self.sink)(PipelineEvent::Empty { reason });
         }
 
         if item_id < 0 && !secrecy.drop_entirely() {
             (self.sink)(PipelineEvent::Error {
-                message: "Could not save that to History. The text was still inserted.".into(),
+                // The sentence is chosen from what actually happened. It said
+                // "The text was still inserted" unconditionally, and with
+                // injection off, copy off, or Parle's own window frontmost,
+                // nothing was: the dictation was lost outright and the one
+                // message told the user it was in their document.
+                message: if injection.is_some() {
+                    "Could not save that to History. The text was still inserted.".into()
+                } else {
+                    "Could not save that to History, and it was not inserted anywhere. \
+                     That dictation is lost."
+                        .to_string()
+                },
             });
         }
         (self.sink)(PipelineEvent::Completed {
             item_id,
             withheld: secrecy.drop_entirely() || secrecy.keep_local_only(),
-            text,
+            // BLANKED at the source. `withheld` protected the render and not
+            // the transmission, so the password still reached every webview
+            // heap and the only thing between it and a screen was five React
+            // files each remembering a convention. That mechanism has failed in
+            // both rounds it has existed. Nothing on the frontend needs the
+            // text of a row it must not show.
+            text: if secrecy.drop_entirely() || secrecy.keep_local_only() {
+                String::new()
+            } else {
+                text
+            },
             duration_ms: recording.duration_ms,
             transcribe_ms,
             model_id,

@@ -47,7 +47,10 @@ export default function ComposeView() {
       // `withheld` first: the event is broadcast to EVERY window, so a
       // password-field dictation aimed at a browser lands here too, and this
       // view paints the result in full and offers a Copy button for it.
-      if (e.kind === 'completed' && e.withheld) setResult('');
+      // `null`, not `''`. Empty string is already the sentinel this view
+      // renders as "No speech detected", so a dictation Parle heard perfectly
+      // and withheld on purpose was reported as a hardware failure.
+      if (e.kind === 'completed' && e.withheld) setResult(null);
       else if (e.kind === 'completed') setResult(e.text);
       if (e.kind === 'empty') setResult('');
       if (e.kind === 'error') setError(e.message);

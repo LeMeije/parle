@@ -4,17 +4,9 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { api, onLevel, onPartial, onPipelineEvent } from './api';
+import { PASTE_KEYS } from './types';
 import type { Settings } from './types';
 import './hud.css';
-
-/// The paste chord, which is not the same on both platforms Parle ships on.
-///
-/// `SettingsView` has used `IS_MAC` in eleven places since before sync landed;
-/// the HUD had no platform branch of any kind, and the one instruction the
-/// product gives told a Windows user to press a key their keyboard does not
-/// have.
-const IS_MAC = navigator.userAgent.includes('Mac');
-const PASTE_KEYS = IS_MAC ? '\u2318V' : 'Ctrl+V';
 
 const BAR_COUNT = 27;
 
@@ -52,9 +44,14 @@ export default function Hud() {
         }
       }
       if (e.kind === 'empty') setOutcome({ text: e.reason, kind: 'ok' });
-      if (e.kind === 'completed' && e.withheld) return;
+      // A withheld dictation still needs the paste instruction. It IS on the
+      // clipboard and the field IS empty, and this is the only instruction the
+      // product ever gives. Round 13's blanket early return removed it, so a
+      // local-only dictation left the user with "Saved on this device only",
+      // an empty field and nothing to do. The instruction names no transcript.
+      if (e.kind === 'completed' && e.withheld && !e.injection?.manual_paste_required) return;
       if (e.kind === 'error') setOutcome({ text: e.message, kind: 'error' });
-      if (e.kind === 'completed' && e.injection?.manual_paste_required && !e.withheld) {
+      if (e.kind === 'completed' && e.injection?.manual_paste_required) {
         // PLATFORM-AWARE, and it does not claim to know why.
         //
         // This was a bare '⌘V', which is wrong on the half of the product that

@@ -521,7 +521,21 @@ fn serve<S: Read + Write>(
         // machine that recorded the row however it gets there.
         let items_wanted = source == me.0;
         for _ in 0..MAX_BATCHES {
-            if !items_wanted || sent_messages + 2 >= MAX_EXCHANGE_MESSAGES {
+            if !items_wanted {
+                break;
+            }
+            // The MESSAGE cap reports truncation, exactly as the batch cap and
+            // the tombstone loop below already do.
+            //
+            // This break set nothing, so a pass cut short here reported a clean
+            // complete exchange, the manager took the arm that CLEARS the debt,
+            // and the rest of the source was stranded. The premise is remote (it
+            // needs on the order of 26 source devices each holding a full
+            // tombstone table) but the asymmetry with the loop twenty lines
+            // below is free to remove and is exactly the shape a later round
+            // trips over.
+            if sent_messages + 2 >= MAX_EXCHANGE_MESSAGES {
+                stats.truncated = true;
                 break;
             }
             if abort() {

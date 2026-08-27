@@ -100,7 +100,7 @@ fn r12_sec_windows_injection_never_asks_whether_it_is_a_password_field() {
     // macOS sibling has the gate. If this ever fails, the assertion below is
     // measuring nothing.
     assert!(
-        mac.contains("focused_field_is_secure"),
+        mac.contains("if field == Some(true)"),
         "the macOS injection gate is gone, so this test can no longer discriminate"
     );
     assert!(
@@ -109,7 +109,9 @@ fn r12_sec_windows_injection_never_asks_whether_it_is_a_password_field() {
     );
 
     assert!(
-        win.contains("focused_field_is_secure"),
+        // Round 14: both platforms read the PIPELINE's sample rather than
+        // probing again, so the gate is `view.is_secure`, not a live probe.
+        win.contains("view.is_secure == Some(true)"),
         "`inject_text` on Windows writes the transcript with `write_clipboard`, which since \
          round 11 declares no exclusion formats. A dictation the pipeline classifies \
          `FieldSecrecy::Secure` and refuses to store is therefore published to Win+V history \
@@ -176,8 +178,11 @@ fn r12_sec_windows_restore_puts_back_what_it_found_with_the_marking_it_found() {
          found: whatever it restores is unmarked, and the owner's 'do not keep this, do not \
          upload this' statement is deleted in the process"
     );
+    // Round 14 gave Windows the chained-restore guard macOS already had, so
+    // the marking travels through `PENDING_RESTORE` rather than a local.
     assert!(
-        win.contains("write_clipboard_inner(&prev, previous_excluded)"),
+        win.contains("*pending = Some((prev, previous_excluded));")
+            && win.contains("write_clipboard_inner(&prev, excluded);"),
         "the Windows restore probes the marking and then does not apply it"
     );
 }

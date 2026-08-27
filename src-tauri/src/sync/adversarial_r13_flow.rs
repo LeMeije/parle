@@ -480,7 +480,7 @@ fn r13_flow_c1_a_failed_insert_is_reported_to_the_user_as_nothing_at_all() {
         "ANCHOR MISSING: App.tsx no longer has a completed branch"
     );
     assert!(
-        app.contains("if(e.withheld)return;constpreview="),
+        app.contains("if(e.withheld&&!e.injection?.manual_paste_required)return;"),
         "ANCHOR MISSING: App.tsx's early return is not immediately before the preview"
     );
     // There is no other toast for a completed event, so the return is total.
@@ -490,12 +490,15 @@ fn r13_flow_c1_a_failed_insert_is_reported_to_the_user_as_nothing_at_all() {
 
     let hud = squashed_tsx("src/Hud.tsx");
     assert!(
-        hud.contains("if(e.kind==='completed'&&e.withheld)return;"),
+        hud.contains("if(e.kind==='completed'&&e.withheld&&!e.injection?.manual_paste_required)return;"),
         "ANCHOR MISSING: the HUD no longer returns early on withheld"
     );
+    // Round 14: the instruction is NOT gated on `!withheld` any more, because
+    // a withheld dictation still sits on the clipboard waiting to be pasted.
+    // What stays gated is the transcript.
     assert!(
-        hud.contains("e.injection?.manual_paste_required&&!e.withheld"),
-        "ANCHOR MISSING: the HUD's only completed outcome is not gated on !withheld"
+        hud.contains("e.kind==='completed'&&e.injection?.manual_paste_required"),
+        "ANCHOR MISSING: the HUD's only completed outcome has changed shape"
     );
 
     // The precondition, proven rather than assumed: insert_transcription is a

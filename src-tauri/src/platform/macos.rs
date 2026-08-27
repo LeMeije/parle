@@ -428,12 +428,13 @@ pub fn inject_text(
     keep_on_clipboard: bool,
     restore: bool,
     press_enter: bool,
+    view: super::FieldView,
 ) -> InjectionOutcome {
     // A genuinely SECURE FIELD: hand it over on the clipboard, concealed, and
     // let the user paste. We should not be typing into a password field.
-    // Probed ONCE, and carried. Reading it again below would be a second
-    // observation of a value that can change between the two.
-    let field = focused_field_is_secure();
+    // The PIPELINE's answer, carried in. Probing again here made the platform
+    // layer and the pipeline two independent observers of one dictation.
+    let field = view.is_secure;
     if field == Some(true) {
         write_clipboard_marked(text, true);
         return InjectionOutcome {
@@ -482,7 +483,7 @@ pub fn inject_text(
             // manager on the machine to bin the copy they just asked for, and
             // `clipboard_is_concealed` then reads our own mark back as the OS
             // calling the row a secret.
-            write_clipboard_marked(text, field.is_none() && keystrokes_blocked);
+            write_clipboard_marked(text, view.conceal);
         }
         if press_enter {
             synth_return();
@@ -493,7 +494,16 @@ pub fn inject_text(
     // Accessibility insertion did not take, and the OS will swallow a synthetic
     // Cmd-V, so there is nothing left but to hand it over and say so.
     if keystrokes_blocked {
-        write_clipboard_marked(text, true);
+        // `view.conceal`, not `true`.
+        //
+        // Round 13 narrowed the identical write four lines above and left this
+        // one concealing unconditionally, including for a field the gate above
+        // has already established is ORDINARY. Its own test called this branch
+        // the common case rather than the exotic one. Concealing here also
+        // launders: the next dictation's `clipboard_is_concealed()` reads
+        // Parle's own mark back as the OS calling the row a secret, and
+        // `PENDING_RESTORE_CONCEALED` carries it into the restore.
+        write_clipboard_marked(text, view.conceal);
         return InjectionOutcome {
             method: InjectionMethod::ClipboardOnly,
             manual_paste_required: true,

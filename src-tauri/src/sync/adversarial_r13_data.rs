@@ -566,7 +566,7 @@ fn r13_data_an_ordinary_truncated_pass_writes_into_the_kind_widening_map() {
          two writes race over one key and the ordinary pass's value is the later one"
     );
     assert!(
-        code.contains("let resend_from = self.inner.lock().resend_owed.get(&peer_id).copied();"),
+        code.contains("i.resend_owed.get(&peer_id).copied(), i.resend_epoch.get(&peer_id)"),
         "premise: the value the exchange serves from is read BEFORE the exchange and \
          written back AFTER it, which is what makes the window a window"
     );

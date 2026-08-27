@@ -523,6 +523,15 @@ pub(crate) struct Inner {
     /// Peers we owe one full re-offer of our history, because the user widened
     /// what this machine shares. See `set_kinds`.
     resend_owed: std::collections::HashMap<String, i64>,
+    /// Bumped whenever something OTHER than an exchange writes `resend_owed`.
+    ///
+    /// A compare-and-swap on the value alone cannot do this job. `set_kinds`
+    /// only ever writes the literal `0`, so when the debt read before an
+    /// exchange was already `Some(0)` a `0` primed mid-flight compares equal to
+    /// the `0` we read, the swap succeeds, and the fresh promise is overwritten
+    /// by the truncation's own resume point. Textbook ABA. A counter cannot be
+    /// confused with itself.
+    resend_epoch: std::collections::HashMap<String, u64>,
     /// Set for the whole of start(), which binds a port and brings up mDNS and
     /// is far too slow to leave the "already running" test unguarded.
     starting: bool,
@@ -615,6 +624,7 @@ impl SyncManager {
                     .iter()
                     .map(|d| (d.device_id.clone(), d.from))
                     .collect(),
+                resend_epoch: std::collections::HashMap::new(),
                 starting: false,
                 stop_epoch: 0,
                 user_enabled: s.enabled,
@@ -1156,11 +1166,38 @@ impl SyncManager {
                     // frame is read on the other side before anything about
                     // this machine has been authenticated, so it must not be
                     // able to carry chosen text.
+                    // `NotPairing` is answered with SILENCE, and that is the
+                    // whole of this fix.
+                    //
+                    // `reserve` charges nothing for it: it returns before the
+                    // live code is touched. Round 12 made this arm write a frame
+                    // naming which of the four states it is in, so for 33 bytes
+                    // per TCP connect anyone on the LAN could poll for ever,
+                    // free, and be told the instant a code appeared on screen.
+                    // The guard's own header says the per-source carve-out
+                    // exists because an automated attacker always wins the race
+                    // to the next open slot; this told it exactly when the slot
+                    // opened, so its three guesses landed on every code the user
+                    // ever showed. Before round 12 the socket simply closed.
+                    //
+                    // The other three only ever reach a source that has already
+                    // spent a guess against a live code, so they tell it nothing
+                    // it did not already know.
+                    if matches!(e, GuardError::NotPairing) {
+                        tracing::debug!("sync: pairing attempt while no code is live; no answer");
+                        return;
+                    }
                     let (code, secs) = match &e {
                         GuardError::NotPairing => (pair_flow::RefusalCode::NotPairing, 0),
                         GuardError::Expired => (pair_flow::RefusalCode::Expired, 0),
                         GuardError::LockedOut { retry_in } => {
-                            (pair_flow::RefusalCode::LockedOut, retry_in.as_secs() as u32)
+                            // Rounded UP. `as_secs()` truncates, so the last
+                            // fraction of every honest lockout rendered as
+                            // "try again in 0 seconds".
+                            (
+                                pair_flow::RefusalCode::LockedOut,
+                                retry_in.as_secs_f64().ceil().max(1.0) as u32,
+                            )
                         }
                         GuardError::CodeExhausted => (pair_flow::RefusalCode::CodeExhausted, 0),
                     };
@@ -1545,6 +1582,9 @@ impl SyncManager {
         if widened {
             let owed: Vec<(String, i64)> =
                 i.paired.iter().map(|d| (d.id.clone(), 0)).collect();
+            for (id, _) in &owed {
+                *i.resend_epoch.entry(id.clone()).or_insert(0) += 1;
+            }
             i.resend_owed.extend(owed);
         }
         drop(i);
@@ -1674,7 +1714,10 @@ impl SyncManager {
         // dies halfway does not consume the debt and leave the hole open.
         // `Some(clock)` means we owe this peer a re-offer, resuming from that
         // clock. A truncated re-offer keeps the debt and records how far it got.
-        let resend_from = self.inner.lock().resend_owed.get(&peer_id).copied();
+        let (resend_from, resend_epoch) = {
+            let i = self.inner.lock();
+            (i.resend_owed.get(&peer_id).copied(), i.resend_epoch.get(&peer_id).copied().unwrap_or(0))
+        };
         let resend_all = resend_from.is_some();
         // Only the handshake-proven peer may author rows, and only for itself.
         let known: Vec<String> = self.inner.lock().paired.iter().map(|d| d.id.clone()).collect();
@@ -1720,7 +1763,23 @@ impl SyncManager {
                 if resend_all || stats.truncated {
                     let resumed = {
                         let mut i = self.inner.lock();
-                        if stats.truncated {
+                        // Did anything else write this debt while we were in
+                        // flight? Round 13 guarded only the truncated arm, and
+                        // compared VALUES. Both halves were wrong.
+                        //
+                        // The `else` arm is the one an ordinary complete
+                        // exchange takes, and it deleted the key outright: a
+                        // widening that primed a 0 mid-flight had that 0
+                        // removed by an exchange which served under the kinds
+                        // snapshot taken BEFORE the toggle, so it never offered
+                        // a row of the newly enabled kind and then cancelled
+                        // the promise to. Nothing offers a row below the peer's
+                        // mark and nothing lowers a mark, so those rows are
+                        // unreachable for ever.
+                        let epoch_now = i.resend_epoch.get(&peer_id).copied().unwrap_or(0);
+                        if epoch_now != resend_epoch {
+                            i.resend_owed.get(&peer_id).copied()
+                        } else if stats.truncated {
                             // Resume where it stopped. Restarting from zero
                             // meant a history larger than the cap could never
                             // finish: every pass re-sent the same batch and
@@ -1823,14 +1882,28 @@ impl SyncManager {
                 // policy still applied, which was never the property that
                 // mattered. This is the same freshness from a source a peer
                 // cannot forge.
+                let mut changed = false;
                 if let Some(name) = stats.peer_name.clone() {
                     let mut i = self.inner.lock();
                     if let Some(d) = i.paired.iter_mut().find(|d| d.id == peer_id) {
                         let fresh = usable_peer_name(&name, &peer_id);
                         if d.name != fresh {
                             d.name = fresh;
+                            changed = true;
                         }
                     }
+                }
+                // PERSISTED. `SyncManager::new` rebuilds `paired` from
+                // settings.json, so a name held only in memory is restored to
+                // its stale value on every restart and stays there until the
+                // next fully successful exchange with that device, which for a
+                // device that is switched off is never. Round 12's version read
+                // the name from the mDNS map on every status call, so at least
+                // it was fresh after a restart; taking it off unsigned mDNS was
+                // right, making it the one value that cannot survive a restart
+                // was not.
+                if changed {
+                    self.persist();
                 }
                 if stats.ignored > 0 {
                     self.report_device_problem(
@@ -2594,6 +2667,7 @@ mod adversarial_r6_conc {
             last_dial: std::collections::HashMap::new(),
             last_move: std::collections::HashMap::new(),
             resend_owed: std::collections::HashMap::new(),
+            resend_epoch: std::collections::HashMap::new(),
             starting: false,
             stop_epoch: 0,
             user_enabled: true,

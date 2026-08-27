@@ -343,7 +343,7 @@ fn r12_flow_the_withheld_dictation_notice_is_overwritten_by_the_next_event() {
     // now fine, because it no longer WINS: the handler returns early when the
     // event is marked withheld, so round 11's notice is what stays on screen.
     assert!(
-        hud.contains("e.withheld) return;"),
+        hud.contains("e.withheld && !e.injection?.manual_paste_required) return;"),
         "FINDING: on the secure-field path the last event wins and its message \
          says nothing about the dictation being withheld from History. Round \
          11's notice is emitted and immediately overwritten."
@@ -364,13 +364,21 @@ fn r12_flow_the_hud_tells_a_windows_user_to_press_command_v() {
     // INVERTED IN ROUND 12. The HUD now knows what platform it is on, so the
     // assertions run the other way: the branch must exist and both keys must
     // be reachable.
+    // Round 14 hoisted the chord into `types.ts` so the HUD and the main
+    // window cannot drift apart again, which is what happened when round 12
+    // fixed one of the two literals.
+    let shared = read_src("src/types.ts");
     assert!(
-        hud.contains("IS_MAC") || hud.contains("navigator.userAgent"),
-        "Hud.tsx branches on no platform at all, and it carries the ONLY paste \
-         instruction the product gives"
+        shared.contains("export const PASTE_KEYS") && shared.contains("navigator.userAgent"),
+        "nothing branches on platform at all, and this is the ONLY paste instruction the \
+         product gives"
     );
     assert!(
-        hud.contains("Ctrl+V"),
+        hud.contains("PASTE_KEYS"),
+        "Hud.tsx no longer uses the shared paste chord"
+    );
+    assert!(
+        shared.contains("Ctrl+V"),
         "FINDING: Hud.tsx offers only the macOS key. A Windows user is told to \
          press a key that does not exist on their keyboard."
     );
@@ -823,7 +831,7 @@ fn r12_flow_a_locked_out_pairing_code_reports_itself_as_a_network_drop() {
         .find("Err(e) => {")
         .expect("anchor lost: the reserve refusal arm changed shape");
     // The whole arm and then some: enough to catch anything it might do.
-    let refusal = &after_reserve[refusal_at..(refusal_at + 700).min(after_reserve.len())];
+    let refusal = &after_reserve[refusal_at..(refusal_at + 1200).min(after_reserve.len())];
     assert!(
         refusal.contains("tracing::info!") || refusal.contains("refusal_frame"),
         "anchor lost: the refusal neither logs nor answers"

@@ -55,6 +55,10 @@ pub enum PairFlowError {
 /// was not, because a refusal padded to `spake2_msg_len()` passes it.
 pub const REFUSED_PREFIX: &[u8] = b"PARLE-PAIR-REFUSED:";
 
+// The clamp is the guard's own ceiling, asked for rather than restated. An
+// earlier attempt used CODE_TTL (120s), which is the life of the code and not
+// the length of any wait: still thirty times anything real.
+
 /// A refusal carries a CODE and a number, never the peer's own words.
 ///
 /// The first shape of this put the showing machine's error string on the
@@ -140,9 +144,14 @@ fn refusal_reason(buf: &[u8]) -> Option<String> {
         Some(b) => u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
         None => 0,
     };
-    // Clamped: a peer-supplied number still reaches a sentence, so it must not
-    // be able to make an absurd one.
-    Some(code.advice(secs.min(3600)))
+    // Clamped to the LONGEST WAIT AN HONEST PARLE CAN ASK FOR.
+    //
+    // 3600 was the absurd number this clamp was written to prevent. The only
+    // producer is `GuardError::LockedOut`, whose wait comes from `backoff_for`
+    // with at most `MAX_PER_SOURCE` failures, and the code itself dies after
+    // `CODE_TTL`. Anything past that is advice about a code that no longer
+    // exists, and this frame is read before the peer has been authenticated.
+    Some(code.advice(secs.min(crate::sync::guard::max_honest_retry_secs())))
 }
 
 /// Length of a SPAKE2 opening message, measured from the library rather than

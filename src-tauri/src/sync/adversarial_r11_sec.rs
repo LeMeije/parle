@@ -333,12 +333,22 @@ fn r11_injection_still_keys_off_the_discredited_global_flag() {
         f.contains("field == Some(true)") || f.contains("focused_field_is_secure() == Some(true)"),
         "the injection gate does not ask whether this is actually a password field"
     );
+    // Round 14 moved the probe out of the platform layer entirely: the
+    // pipeline samples once and passes the answer down in `FieldView`. That is
+    // strictly stronger than probing once here, because the platform and the
+    // pipeline can no longer form two opinions about one dictation.
     assert!(
-        f.contains("let field = focused_field_is_secure();"),
-        "the probe is not read once and carried, so two reads in one injection can disagree"
+        f.contains("let field = view.is_secure;"),
+        "the injection path forms its own opinion of the field instead of using the one the \
+         pipeline already sampled, so the two can disagree about the same dictation"
     );
-    let secure_at = f.find("focused_field_is_secure()").expect("checked above");
-    let flag_at = f.find("secure_input_active()").expect("the flag is still consulted");
+    // The FIELD answer is settled before the flag is consulted. It arrives
+    // pre-sampled now, so the ordering is between using it and reading the
+    // flag, rather than between two probes.
+    let secure_at = f.find("let field = view.is_secure;").expect("checked above");
+    let flag_at = f
+        .find("let keystrokes_blocked = secure_input_active();")
+        .expect("the flag is still consulted");
     assert!(
         secure_at < flag_at,
         "the global flag is still consulted before the focused-field check, so it decides the \

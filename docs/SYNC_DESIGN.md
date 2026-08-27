@@ -129,6 +129,35 @@ Three consequences that are easy to get wrong, and were:
   and marks `Completed { withheld }` so no later event overwrites the
   explanation.
 
+### Why an excluded app's DELETE still travels, and a local-only one's does not
+
+These look like the same case and are not, so do not "fix" the first to match
+the second.
+
+A `local_only` row is withheld from the instant it is inserted. No peer has ever
+seen it, so no peer needs its delete, and minting a tombstone would announce the
+identity and timing of a dictation we withheld on purpose.
+
+An excluded app's rows are different: the exclusion list is mutable and applies
+from the moment it is set. A row captured before the app was excluded has
+ALREADY replicated. Filtering its delete would strand it on the peer for ever,
+which is the opposite of what the user asked for when they excluded the app.
+
+So the rule is: withhold a delete only for a row that was never sendable.
+
+### The two platforms are not equally safe, and the difference is real
+
+On macOS, `secure_input_active()` reports the OS-wide secure input flag and the
+accessibility probe can identify a password field, so all three `FieldSecrecy`
+answers are reachable.
+
+On Windows, `secure_input_active()` is hardcoded false and
+`focused_field_is_secure()` does not see WinUI `PasswordBox` or Chromium
+`<input type=password>`. So `FieldSecrecy::Unknown` there means full
+replication, and a browser password dictation is stored and replicated. Both
+halves are documented at their definitions. This section exists because the rest
+of this document reads as though the platforms were symmetrical.
+
 ### Other things that are load-bearing
 
 - **Turn-taking.** The dialler writes first, the acceptor reads first. A

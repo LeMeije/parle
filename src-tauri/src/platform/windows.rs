@@ -511,6 +511,7 @@ pub fn inject_text(
     keep_on_clipboard: bool,
     restore: bool,
     press_enter: bool,
+    view: super::FieldView,
 ) -> InjectionOutcome {
     // A genuinely SECURE FIELD: hand it over concealed and let the user paste.
     //
@@ -521,7 +522,7 @@ pub fn inject_text(
     // put it in Parle's own LAN-only history, and this function handed the same
     // string to Windows Cloud Clipboard, which uploads it to Microsoft and
     // syncs it to the user's other machines.
-    if focused_field_is_secure() == Some(true) {
+    if view.is_secure == Some(true) {
         write_clipboard_excluded(text);
         return InjectionOutcome {
             method: InjectionMethod::ClipboardOnly,
@@ -546,7 +547,7 @@ pub fn inject_text(
     // pair was added to close. `read_clipboard_unless_excluded` forty lines
     // away already brackets its own read for the same reason.
     let seq_before = unsafe { GetClipboardSequenceNumber() };
-    let previous = read_clipboard();
+    let mut previous = read_clipboard();
     let mut previous_excluded = clipboard_is_excluded();
     if unsafe { GetClipboardSequenceNumber() } != seq_before {
         // The text and the marking may belong to different content. Marking is
@@ -554,8 +555,14 @@ pub fn inject_text(
         // uploads a secret to Microsoft and pushes it to the user's other
         // machines.
         previous_excluded = true;
+        // And DROP the text. Correcting the marking while keeping the payload
+        // republishes content that is no longer what the user has, over
+        // whatever they copied in the window. `read_clipboard_unless_excluded`
+        // answers this same signal with `return None`: the bracket borrowed
+        // that mechanism and not its conclusion.
+        previous = None;
     }
-    write_clipboard(text);
+    write_clipboard_inner(text, view.conceal);
     // The number the WRITER recorded, not a fresh read.
     //
     // `write_clipboard_inner` reads the sequence number inside its clipboard
@@ -576,16 +583,43 @@ pub fn inject_text(
     }
 
     if !keep_on_clipboard && restore {
-        if let Some(prev) = previous {
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(restore_delay_ms));
-                // Restore only if nobody else wrote to the clipboard meanwhile.
-                let seq_now = unsafe { GetClipboardSequenceNumber() };
-                if seq_now == seq_after_write {
-                    write_clipboard_inner(&prev, previous_excluded);
+        // The OLDEST original is carried across chained dictations, exactly as
+        // macOS does it.
+        //
+        // Without this, a second dictation inside `restore_delay_ms` snapshots
+        // the FIRST dictation's transcript as "the user's previous clipboard",
+        // and its thread is the one whose sequence number matches. The user's
+        // real clipboard is gone and a Parle transcript is put back in its
+        // place, re-marked from a probe of Parle's own unmarked write. macOS
+        // fixed this and the fix never crossed.
+        {
+            let mut pending = PENDING_RESTORE.lock();
+            if pending.is_none() {
+                if let Some(prev) = previous {
+                    *pending = Some((prev, previous_excluded));
                 }
-            });
+            }
         }
+        let generation = RESTORE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(restore_delay_ms));
+            // Only the LAST dictation in a chain restores, and only if nobody
+            // else has written the clipboard since our write.
+            if RESTORE_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                return;
+            }
+            let seq_now = unsafe { GetClipboardSequenceNumber() };
+            if seq_now != seq_after_write {
+                return;
+            }
+            let taken = PENDING_RESTORE.lock().take();
+            if let Some((prev, excluded)) = taken {
+                write_clipboard_inner(&prev, excluded);
+            }
+        });
+    } else if keep_on_clipboard {
+        // The transcript is meant to stay; drop any pending restore.
+        *PENDING_RESTORE.lock() = None;
     }
     InjectionOutcome { method: InjectionMethod::ClipboardPaste, manual_paste_required: false }
 }
@@ -713,6 +747,12 @@ pub fn write_clipboard_marked(text: &str, concealed: bool) {
 /// Self-capture is suppressed by identity, matching macOS. Marking every write
 /// with the exclusion formats also worked and told Win+V and Cloud Clipboard to
 /// discard the row the user had just deliberately pressed Copy on.
+/// The oldest clipboard a chain of dictations displaced, and its marking.
+static PENDING_RESTORE: parking_lot::Mutex<Option<(String, bool)>> =
+    parking_lot::Mutex::new(None);
+/// Only the newest scheduled restore may fire.
+static RESTORE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 static OUR_LAST_WRITE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Did WE write the clipboard's current contents?

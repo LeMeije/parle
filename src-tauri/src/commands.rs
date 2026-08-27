@@ -153,6 +153,10 @@ pub async fn paste_item(state: State<'_, Arc<AppState>>, app: AppHandle, id: i64
             s.paste.copy_to_clipboard,
             s.paste.restore_clipboard,
             s.paste.press_enter,
+            // The user picked this row out of their own history, so there is
+            // no dictation to classify. Nothing is concealed and no field is
+            // claimed to be known.
+            platform::FieldView::unknown(),
         )
     })
     .await

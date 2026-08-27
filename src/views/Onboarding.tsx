@@ -252,7 +252,10 @@ function TestStep({ onDone }: { onDone: () => void }) {
       if (e.kind === 'state_changed') setRecording(e.state === 'recording');
       if (e.kind === 'completed') {
         // Withheld rows are never rendered. The event reaches every window.
-        setResult(e.withheld ? '' : e.text);
+        // `null`, not `''`: this view renders empty as "No speech detected"
+        // and adds "Try again a little louder", which is an instruction to
+        // re-dictate a password.
+        setResult(e.withheld ? null : e.text);
         setFinishing(false);
       }
       if (e.kind === 'empty') {

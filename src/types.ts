@@ -218,3 +218,10 @@ export interface DownloadProgress {
   downloaded: number;
   total: number;
 }
+
+/// The paste chord, defined ONCE.
+///
+/// The HUD and the main window each carried their own literal and round 12
+/// fixed only one of them. A shared constant is the only thing that stops the
+/// two drifting apart again.
+export const PASTE_KEYS = navigator.userAgent.includes('Mac') ? '\u2318V' : 'Ctrl+V';
