@@ -121,6 +121,16 @@ pub fn sync_hud(app: &AppHandle, state: PipelineState) {
         #[cfg(target_os = "macos")]
         let _ = tray.set_icon_as_template(crate::tray_is_template(style));
     }
+    // "hidden": no overlay at all. The tray dot above is the whole indicator.
+    //
+    // Checked AFTER the tray update, deliberately: this mode leans on that dot
+    // entirely, so it must keep running even when nothing else is drawn.
+    if crate::overlay_style_of(app) == "hidden" {
+        if let Some(hud) = app.get_webview_window(HUD_LABEL) {
+            let _ = hud.hide();
+        }
+        return;
+    }
     let Some(hud) = app.get_webview_window(HUD_LABEL) else {
         return;
     };

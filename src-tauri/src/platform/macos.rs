@@ -141,10 +141,82 @@ pub fn request_microphone_access() {
 
 extern "C" {
     fn IsSecureEventInputEnabled() -> bool;
+    /// The current login session's dictionary, which carries
+    /// `kCGSSessionSecureInputPID`: the process holding secure input.
+    fn CGSessionCopyCurrentDictionary() -> core_foundation::dictionary::CFDictionaryRef;
 }
 
+/// Which process is holding secure event input, if we can tell.
+///
+/// `Some(0)` means nobody. `None` means the lookup failed and the caller should
+/// fall back to trusting the flag.
+fn secure_input_holder_pid() -> Option<i32> {
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
+
+    let raw = unsafe { CGSessionCopyCurrentDictionary() };
+    if raw.is_null() {
+        return None;
+    }
+    let dict: CFDictionary<CFString, CFType> =
+        unsafe { CFDictionary::wrap_under_create_rule(raw) };
+    let value = dict.find(CFString::new("kCGSSessionSecureInputPID"))?;
+    let number = value.downcast::<CFNumber>()?;
+    number.to_i32()
+}
+
+/// Test hook: what the holder lookup returns on this machine.
+pub fn secure_input_holder_pid_for_test() -> Option<i32> {
+    secure_input_holder_pid()
+}
+
+/// Is secure event input REALLY on, or is the flag stuck?
+///
+/// `IsSecureEventInputEnabled()` alone is not trustworthy. The flag is
+/// process-global and system-wide, and an application that exits or crashes
+/// without lowering it leaves it raised for the whole login session. Measured
+/// on the development Mac on 28/08/2026: the flag read TRUE with
+/// `kCGSSessionSecureInputPID` naming a process that no longer existed, so
+/// EVERY dictation took the keystrokes-blocked path, came back "copied, paste
+/// it yourself", and was classified `Unknown` and kept off the wire. The user
+/// reported exactly that, in ordinary fields that are not password fields, and
+/// the only cure was to log out.
+///
+/// Rounds 10 and 13 both predicted this state and both left it SPECULATIVE
+/// because neither could produce it on demand. It turns out not to be exotic at
+/// all: one crash is enough, and nothing ever clears it.
+///
+/// So the flag is treated as a CLAIM and the claim is checked. If the holder is
+/// gone, the flag is stale and secure input is not active. If the lookup fails
+/// we keep believing the flag, because refusing to protect a real password
+/// field is the worse error of the two.
 pub fn secure_input_active() -> bool {
-    unsafe { IsSecureEventInputEnabled() }
+    if !unsafe { IsSecureEventInputEnabled() } {
+        return false;
+    }
+    match secure_input_holder_pid() {
+        // Nobody holds it, yet the flag is up: stale.
+        Some(0) => false,
+        Some(pid) => {
+            // `kill(pid, 0)` tests for existence without signalling. EPERM
+            // means the process exists and is not ours, which still counts as
+            // alive; only ESRCH means it is gone.
+            let alive = unsafe { libc::kill(pid, 0) } == 0
+                || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+            if !alive {
+                tracing::warn!(
+                    "secure input is flagged on, but the process holding it ({pid}) is gone. \
+                     Treating it as off; macOS leaves this stuck when an app exits without \
+                     lowering it."
+                );
+            }
+            alive
+        }
+        // Could not read the session dictionary. Believe the flag.
+        None => true,
+    }
 }
 
 // -- Hotkey listener --------------------------------------------------------
@@ -491,24 +563,25 @@ pub fn inject_text(
         return InjectionOutcome { method: InjectionMethod::AxInsert, manual_paste_required: false };
     }
 
-    // Accessibility insertion did not take, and the OS will swallow a synthetic
-    // Cmd-V, so there is nothing left but to hand it over and say so.
-    if keystrokes_blocked {
-        // `view.conceal`, not `true`.
-        //
-        // Round 13 narrowed the identical write four lines above and left this
-        // one concealing unconditionally, including for a field the gate above
-        // has already established is ORDINARY. Its own test called this branch
-        // the common case rather than the exotic one. Concealing here also
-        // launders: the next dictation's `clipboard_is_concealed()` reads
-        // Parle's own mark back as the OS calling the row a secret, and
-        // `PENDING_RESTORE_CONCEALED` carries it into the restore.
-        write_clipboard_marked(text, view.conceal);
-        return InjectionOutcome {
-            method: InjectionMethod::ClipboardOnly,
-            manual_paste_required: true,
-        };
-    }
+    // Accessibility insertion did not take. TRY THE PASTE ANYWAY.
+    //
+    // This branch used to give up here whenever the flag was raised, on the
+    // stated ground that "the OS will suppress SYNTHETIC KEYSTROKES, so the
+    // Cmd-V path below cannot work". That premise was never tested, and the
+    // cost of acting on it is the product's core feature: reported from real
+    // use on 28/08/2026, with Claude.app holding secure event input
+    // system-wide, EVERY dictation into every ordinary field came back
+    // "copied, paste it yourself". Secure event input is a keystroke-READING
+    // restriction; whether it also blocks posting is an assumption.
+    //
+    // Trying costs nothing. If the paste is suppressed the text is still on the
+    // clipboard and the user pastes it by hand, which is exactly the outcome
+    // this early return produced. If it is not suppressed, the feature works.
+    // So the paste is attempted, and `manual_paste_required` still reports the
+    // raised flag so the user is told the chord in case it did not land.
+    //
+    // The one case that must NOT reach here is a known password field, and it
+    // does not: the gate at the top of this function returned for `Some(true)`.
 
     // Clipboard + Cmd-V.
     // Snapshot the MARKING as well as the text: `read_clipboard` reads the
@@ -516,7 +589,7 @@ pub fn inject_text(
     // secret, and the restore below has to put back what it found.
     let previous = read_clipboard();
     let previous_concealed = clipboard_is_concealed();
-    write_clipboard_marked(text, false);
+    write_clipboard_marked(text, view.conceal);
     let after_write = pasteboard_change_count();
     synth_cmd_v();
     if press_enter {
@@ -566,7 +639,12 @@ pub fn inject_text(
             }
         });
     }
-    InjectionOutcome { method: InjectionMethod::ClipboardPaste, manual_paste_required: false }
+    InjectionOutcome {
+        method: InjectionMethod::ClipboardPaste,
+        // The paste WAS attempted. This only says "we cannot be sure it
+        // landed", which is true exactly while the flag is raised.
+        manual_paste_required: keystrokes_blocked,
+    }
 }
 
 /// Is the element the user is actually typing into a SECURE text field?

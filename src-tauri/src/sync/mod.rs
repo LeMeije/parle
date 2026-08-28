@@ -83,6 +83,8 @@ mod adversarial_r13_plat;
 mod adversarial_r13_data;
 
 #[cfg(test)]
+mod adversarial_r14_live;
+#[cfg(test)]
 mod adversarial_r14_pair;
 
 #[cfg(test)]

@@ -513,7 +513,7 @@ fn r14_sec_e1_the_platform_reprobes_the_field_the_pipeline_already_sampled() {
     anchor(&mac, "letkeystrokes_blocked=secure_input_active();", "macos.rs inject_text");
     anchor(&win, "ifview.is_secure==Some(true){", "windows.rs inject_text");
     // ANCHOR 3: the unconcealed write on the fall-through path really is there.
-    anchor(&mac, "write_clipboard_marked(text,false);", "macos.rs inject_text");
+    anchor(&mac, "write_clipboard_marked(text,view.conceal);", "macos.rs inject_text");
     // ANCHOR 4: the pipeline's own concealment decision is evaluated only on
     // the branch where inject_text did not run. Both occurrences sit AFTER the
     // `inject_text(` call of their own path and inside the `else if` arm.
@@ -733,12 +733,19 @@ fn r14_sec_h1_a_local_only_dictation_is_never_told_to_paste() {
     // UNKNOWN, which is precisely the keep_local_only state.
     let inj = anchor(&mac, "pubfninject_text(", "macos.rs");
     let body = &mac[inj..];
-    let blocked =
-        anchor(body, "ifkeystrokes_blocked{write_clipboard_marked(text,view.conceal);", "macos.rs");
+    // INVERTED. The branch this anchored on no longer exists: when
+    // accessibility insertion does not take, the paste is ATTEMPTED rather than
+    // refused, so a local-only dictation lands in the field like any other and
+    // the outcome still reports the raised flag so the user is told the chord.
     assert!(
-        body[blocked..blocked + 220].contains("manual_paste_required:true"),
-        "ANCHOR MISSING: the keystrokes-blocked fallback no longer returns manual_paste_required"
+        !body.contains("ifkeystrokes_blocked{write_clipboard_marked"),
+        "inject_text still gives up without trying the paste whenever the global flag is \
+         raised, which is every field on the machine while any app holds secure input"
     );
+    // The outcome still REPORTS the raised flag, so the user is told the chord
+    // in case the attempted paste did not land. It is no longer a refusal to
+    // try, only an admission that we cannot confirm it worked.
+    anchor(body, "manual_paste_required:keystrokes_blocked,", "macos.rs");
 
     // CONTROL: the instruction exists and is the only one the product gives.
     anchor(
@@ -920,11 +927,24 @@ fn r14_sec_k1_the_keystrokes_blocked_fallback_conceals_a_known_ordinary_field() 
     // false for a known-ordinary field by construction. There is no longer a
     // second copy of the rule that could disagree with the first, which is
     // stronger than having the two agree.
+    // The second write is gone entirely: the fallback that concealed a known
+    // ordinary field was the give-up branch, and the give-up branch is what the
+    // paste-anyway change removed. Every remaining write takes `view.conceal`.
     let narrowed = anchor(&mac[inj..], "write_clipboard_marked(text,view.conceal);", "macos.rs");
-    let fallback = anchor(&mac[inj..], "ifkeystrokes_blocked{write_clipboard_marked(text,", "macos.rs");
+    let _ = narrowed;
+    // Exactly ONE hard-coded write survives, and it is the known-password-field
+    // gate, where concealing unconditionally is the whole point. Every other
+    // write takes the pipeline's decision.
+    assert_eq!(
+        mac[inj..].matches("write_clipboard_marked(text,true)").count(),
+        1,
+        "a clipboard write in inject_text hard-codes its concealment outside the \
+         known-secure gate, so the platform and the pipeline can disagree about one dictation"
+    );
     assert!(
-        fallback > narrowed,
-        "ANCHOR MISSING: the fallback no longer sits below the write round 13 narrowed"
+        !mac[inj..].contains("write_clipboard_marked(text,false)"),
+        "a clipboard write in inject_text hard-codes NOT concealing, which is the direction \
+         that leaks"
     );
 
     // THE CLAIM: the same rule must reach the second write.

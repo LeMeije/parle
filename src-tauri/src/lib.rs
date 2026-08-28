@@ -352,6 +352,13 @@ pub(crate) fn tray_style_of(app: &AppHandle) -> String {
         .unwrap_or_else(|| echokey_core::settings::default_tray_style().to_string())
 }
 
+/// The overlay style, for code that needs to know whether to draw one at all.
+pub(crate) fn overlay_style_of(app: &AppHandle) -> String {
+    app.try_state::<Arc<AppState>>()
+        .map(|s| s.settings.lock().overlay.style.clone())
+        .unwrap_or_else(|| "pill".to_string())
+}
+
 /// Whether this style is a macOS template image (the OS tints it itself).
 pub(crate) fn tray_is_template(style: &str) -> bool {
     matches!(style, "template") || (cfg!(target_os = "macos") && style == "auto")

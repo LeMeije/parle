@@ -85,6 +85,18 @@ const OVERLAY_STYLES: [string, string, React.ReactNode][] = [
       </>,
     ),
   ],
+  [
+    'hidden',
+    'None',
+    // A dashed outline with the menu-bar dot beside it: nothing is drawn on
+    // screen, and the tray icon's dot is the only thing that reports.
+    glyph(
+      <>
+        <rect x="0.9" y="5.4" width="9.6" height="5.2" rx="2.6" strokeDasharray="2 1.6" />
+        <circle cx="13.6" cy="8" r="1.5" fill="currentColor" stroke="none" />
+      </>,
+    ),
+  ],
 ];
 
 const LANGUAGES: [string, string][] = [
@@ -481,7 +493,14 @@ export default function SettingsView({
             ))}
           </select>
         </Field>
-        <Field label="Overlay style" hint="Cassette pairs beautifully with the Retro palette">
+        <Field
+          label="Overlay style"
+          hint={
+            s.overlay.style === 'hidden'
+              ? 'No overlay at all. While Parle is listening, the menu bar icon shows a dot in its corner, and that is the only indication.'
+              : 'Cassette pairs beautifully with the Retro palette'
+          }
+        >
           <div className="seg seg-icons">
             {OVERLAY_STYLES.map(([st, label, icon]) => (
               <button key={st} className={s.overlay.style === st ? 'active' : ''} onClick={() => set((d) => (d.overlay.style = st))}>

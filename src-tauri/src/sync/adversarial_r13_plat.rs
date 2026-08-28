@@ -169,10 +169,17 @@ fn r13_plat_every_clipboard_write_follows_the_snapshot() {
             // point of the setting, not data loss. Matched on the BRANCH, not
             // on the parameter name, and only within the twenty lines above the
             // write, so the function signature cannot excuse anything.
+            // BLANK LINES DROPPED before the window is taken. `code_of` strips
+            // comments to EMPTY LINES rather than removing them, so a long
+            // explanatory comment inside the branch still pushes the `if` that
+            // identifies it out of a fixed-line window while looking like
+            // nothing at all. Same trap as the refusal-arm window in the
+            // round-12 flow file, one layer down.
             let lookback: String = body[..w]
                 .lines()
                 .rev()
-                .take(20)
+                .filter(|l| !l.trim().is_empty())
+                .take(60)
                 .collect::<Vec<_>>()
                 .join("\n");
             if lookback.contains("if keep_on_clipboard {") {
@@ -205,13 +212,17 @@ fn r13_plat_every_clipboard_write_follows_the_snapshot() {
         "macos.rs: the keep_on_clipboard branch no longer writes the clipboard; the \
          exclusion rule in this test has no target and is silently widening it"
     );
-    // Four: the one `keep_on_clipboard` branch, plus the three manual-paste
-    // gates (macOS secure field, macOS keystrokes-blocked fallback, Windows
-    // secure field). Kept as an exact count so a FIFTH pre-snapshot write
-    // cannot slip in under either exclusion without this test saying so.
+    // THREE: the macOS secure-field gate, the macOS `keep_on_clipboard` write,
+    // and the Windows secure-field gate. The macOS keystrokes-blocked fallback
+    // that used to be a fourth is gone, removed when `inject_text` stopped
+    // refusing to try the paste under a raised global flag.
+    //
+    // Kept as an exact count, and it is what stops the widened lookback below
+    // from quietly excusing something it was not written for: a FOURTH
+    // pre-snapshot write cannot appear without this test saying so.
     assert_eq!(
-        excused, 4,
-        "the exclusions excused {excused} writes, not the four known branches; either a new \
+        excused, 3,
+        "the exclusions excused {excused} writes, not the three known branches; either a new \
          pre-snapshot write appeared or a rule is matching what it was not written for"
     );
     assert!(

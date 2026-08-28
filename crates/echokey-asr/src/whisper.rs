@@ -11,6 +11,41 @@ pub struct WhisperEngine {
     multilingual: bool,
 }
 
+/// How many threads to give whisper.cpp.
+///
+/// PERFORMANCE CORES ONLY on Apple Silicon, not the total core count.
+///
+/// This was `min(available_parallelism(), 8)`. On an Apple M4 that is 10 total
+/// cores but only FOUR performance cores and six efficiency cores, so it asked
+/// for eight threads and four of them landed on E-cores. whisper.cpp splits the
+/// work evenly across its threads and then waits for all of them, so the whole
+/// transcription proceeds at efficiency-core speed: the fast cores finish their
+/// share and idle while the slow ones grind. The effect is worst exactly when
+/// the machine is already busy, because the E-cores are then contended too.
+///
+/// Thread count does not affect the output, only how long it takes, so this
+/// costs no accuracy.
+fn default_threads() -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        // `hw.perflevel0.logicalcpu` is the performance-core count. It is
+        // absent on Intel Macs, where every core is the same and the total is
+        // the right answer.
+        if let Some(p) = std::process::Command::new("sysctl")
+            .args(["-n", "hw.perflevel0.logicalcpu"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<i32>().ok())
+        {
+            if p >= 1 {
+                return p.min(8);
+            }
+        }
+    }
+    (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as i32).min(8)
+}
+
 impl WhisperEngine {
     pub fn load(model_path: &Path, model_id: &str, multilingual: bool, use_gpu: bool) -> Result<Self, AsrError> {
         if !model_path.exists() {
@@ -53,9 +88,7 @@ impl AsrEngine for WhisperEngine {
         params.set_token_timestamps(true);
         params.set_no_context(true);
 
-        let threads = opts.threads.unwrap_or_else(|| {
-            (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as i32).min(8)
-        });
+        let threads = opts.threads.unwrap_or_else(default_threads);
         params.set_n_threads(threads);
 
         // Language: whisper wants a static-ish &str; map through known codes.
