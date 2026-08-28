@@ -18,7 +18,15 @@ use tauri::{AppHandle, Emitter, Manager};
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Where the app writes its log. Same directory as settings/history.
 fn log_path() -> Option<std::path::PathBuf> {
-    let dir = dirs_next_local()?.join("Parle");
+    // `data_dir()`, NOT a second hand-rolled copy of the same path.
+    //
+    // This used to build the path itself and `create_dir_all` it, and it runs
+    // FIRST at startup. That defeated the EchoKey-to-Parle migration outright:
+    // by the time `data_dir()` looked, the new directory already existed, so it
+    // skipped the rename and the app started on an empty history beside two
+    // gigabytes of models it could no longer see. Observed on the first launch
+    // after the rename, on the author's own machine.
+    let dir = parle_core::settings::data_dir();
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("parle.log"))
 }

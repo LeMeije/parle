@@ -625,7 +625,16 @@ pub fn data_dir() -> PathBuf {
     let base = dirs::data_dir();
     let base = base.unwrap_or_else(|| PathBuf::from("."));
     let new = base.join("Parle");
-    if new.exists() {
+    // "Has real data", not "exists".
+    //
+    // Existence alone was the wrong test: anything that creates the directory
+    // before this runs (a log file, an installer, the user) makes the migration
+    // skip and the app start on an empty history with the old one still on disk.
+    // What identifies a live data directory is the things only this app writes.
+    let occupied = |d: &PathBuf| {
+        d.join("history.db").exists() || d.join("settings.json").exists() || d.join("models").is_dir()
+    };
+    if occupied(&new) {
         return new;
     }
     // The literal pre-rename name. This one string must NOT be renamed with
@@ -634,7 +643,24 @@ pub fn data_dir() -> PathBuf {
     // the user's history and every downloaded model. (That is exactly what the
     // first pass of the rename did.)
     let old = base.join("EchoKey");
-    if old.exists() {
+    if occupied(&old) {
+        // If an empty `new` is already there, the rename would fail on most
+        // platforms, so its contents are moved across entry by entry instead.
+        // Nothing is ever overwritten and nothing is ever deleted: an entry
+        // that already exists in `new` is left alone, so the worst case is a
+        // file staying behind rather than one being destroyed.
+        if new.exists() {
+            if let Ok(entries) = std::fs::read_dir(&old) {
+                for e in entries.flatten() {
+                    let to = new.join(e.file_name());
+                    if !to.exists() {
+                        let _ = std::fs::rename(e.path(), to);
+                    }
+                }
+            }
+            tracing::info!("merged the EchoKey data directory into Parle");
+            return new;
+        }
         match std::fs::rename(&old, &new) {
             Ok(()) => {
                 tracing::info!(
