@@ -153,6 +153,12 @@ From `docs/WINDOWS_HANDOFF.md`, unchanged by this session:
 
 - Windows ASR benchmarks have never been run; `docs/BENCHMARKS.md` has M2 Metal
   numbers only and its Windows section is a prediction.
-- Win+V clipboard-history exclusion is implemented but unverified on hardware.
+- Win+V exclusion CHANGED and is unverified on hardware. An ordinary dictation
+  is no longer hidden from Win+V: marking every write as excluded also told
+  Windows to discard the row the user had just deliberately pressed Copy on.
+  Only content Parle judges secret is excluded now, so the old check
+  ("dictate, press Win+V, the transcript must not appear") would fail BY
+  DESIGN. What to verify instead: dictate into a password field and confirm
+  THAT transcript is absent from Win+V, while an ordinary dictation is present.
 - Parakeet on Windows unverified; a clean-account NSIS install is untested.
 - Linux has not been attempted.

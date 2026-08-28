@@ -24,11 +24,43 @@ Recorded because two of these are not obvious and both cost a build.
 | WebView2 | preinstalled on Windows 11. |
 
 `env.sh` at the repo root sets all of these. It is gitignored because the paths
-are machine-specific. **Source it before every cargo or tauri command:**
+are machine-specific, so a FRESH CLONE DOES NOT HAVE ONE: write it yourself
+before anything else. It needs `LIBCLANG_PATH`, `CUDA_PATH_V13_3` and whatever
+your machine needs on `PATH`. **Source it before every cargo or tauri command:**
 
 ```bash
 source ./env.sh
 ```
+
+## A fresh clone does not build until the sidecar is staged
+
+`cargo test` and `cargo build` fail on a clean checkout with:
+
+```
+resource path `binaries/parle-hook-<triple>` doesn't exist
+```
+
+The keyboard hook is a separate binary that Tauri expects to find already
+staged, and `cargo` does not run `beforeBuildCommand`, so nothing produces it
+on a plain `cargo` invocation. Run this once after cloning, and again whenever
+`crates/parle-hook` changes:
+
+```bash
+node scripts/build-hook.mjs
+```
+
+Then, in order:
+
+```bash
+npm install
+node scripts/build-hook.mjs
+source ./env.sh
+cargo test -p parle-core && cargo test -p parle-sync && cargo test -p parle --lib
+npm run tauri build
+```
+
+Do NOT run `cargo test --workspace` bare: it blows past a ten minute timeout.
+Run the three packages separately, as above.
 
 ## Verified on hardware
 
