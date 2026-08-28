@@ -1057,3 +1057,67 @@ textarea:focus {
   border-color: color-mix(in srgb, #c8922a 38%, transparent);
 }
 [data-mode='dark'] .backend-pill.cpu { color: #e2b56c; }
+
+/* Slider row: the control and its readout on one line. */
+.row-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+.row-inline input[type='range'] {
+  flex: 1;
+  min-width: 0;
+}
+.row-inline .mono {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  opacity: 0.75;
+  min-width: 34px;
+  text-align: right;
+}
+
+/* Add-a-local-model row under the model list. */
+.model-add {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+.model-add .hint {
+  margin: 0;
+  flex: 1;
+  min-width: 220px;
+}
+.pill.warn {
+  background: color-mix(in srgb, var(--warn, #c98a00) 16%, transparent);
+  color: var(--warn, #c98a00);
+}
+
+/* First-run language picker. */
+.ob-langs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin: 18px 0 12px;
+}
+.ob-lang {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  cursor: pointer;
+  text-align: left;
+}
+.ob-lang:hover { border-color: var(--accent); }
+.ob-lang.active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.ob-lang-name { font-weight: 600; }
+.ob-lang-en { font-size: 12px; opacity: 0.6; }

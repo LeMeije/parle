@@ -13,11 +13,15 @@ import {
   Trash2,
 } from 'lucide-react';
 import { api, onSyncStatus, onFocusPalette, onHistoryChanged, onPipelineEvent } from '../api';
+import { COPY_KEYS } from '../types';
 import type { HistoryItem } from '../types';
+import { t } from '../i18n';
+import { useT } from '../i18n/useT';
 
 type Filter = 'all' | 'transcription' | 'clipboard';
 
 export default function HistoryView() {
+  const t = useT();
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
   const [items, setItems] = useState<HistoryItem[]>([]);
@@ -60,15 +64,17 @@ export default function HistoryView() {
   }, []);
 
   function confirmDelete(item: HistoryItem): boolean {
+    // Whole sentences joined by a blank line, never fragments: each half is
+    // translated on its own so word order stays the translator's to choose.
     let where = '';
     if (!item.local_only) {
       if (pairedNames === null) {
-        where = '\n\nThis may also delete it from your paired devices.';
+        where = '\n\n' + t('history.mayAlsoDelete');
       } else if (pairedNames.length > 0) {
-        where = `\n\nThis also deletes it from ${pairedNames.join(', ')}.`;
+        where = '\n\n' + t('history.alsoDeletesFrom', { devices: pairedNames.join(', ') });
       }
     }
-    return window.confirm(`Delete this item? It cannot be undone.${where}`);
+    return window.confirm(t('history.deleteConfirm') + where);
   }
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -137,7 +143,7 @@ export default function HistoryView() {
         <input
           ref={inputRef}
           className="search"
-          placeholder="Search transcriptions and clipboard…  (↑↓ · Enter pastes · ⌘Enter copies)"
+          placeholder={t('history.searchPlaceholder', { copyKeys: COPY_KEYS })}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           autoFocus
@@ -145,24 +151,25 @@ export default function HistoryView() {
         <div className="seg">
           {(['all', 'transcription', 'clipboard'] as Filter[]).map((f) => (
             <button key={f} className={filter === f ? 'active' : ''} onClick={() => setFilter(f)}>
-              {f === 'all' ? 'All' : f === 'transcription' ? 'Dictations' : 'Clipboard'}
+              {f === 'all'
+                ? t('history.filter.all')
+                : f === 'transcription'
+                  ? t('history.filter.dictations')
+                  : t('history.filter.clipboard')}
             </button>
           ))}
         </div>
       </div>
 
       {gone && (
-        <div className="callout warn">
-          That item is no longer here. It was deleted on another device, so the list has been
-          refreshed.
-        </div>
+        <div className="callout warn">{t('history.gone')}</div>
       )}
 
       <div className="history-list" ref={listRef}>
         {items.length === 0 && (
           <div className="empty">
             <Mic size={28} strokeWidth={1.6} />
-            <p>{query ? 'No matches.' : 'Nothing here yet. Hold your hotkey and speak.'}</p>
+            <p>{query ? t('history.empty.noMatches') : t('history.empty.nothingYet')}</p>
           </div>
         )}
         {items.map((item, i) => (
@@ -208,8 +215,8 @@ export default function HistoryView() {
                   {/* A row that will never reach the other machine says so on a
                       feature whose whole promise is that it does. */}
                   {item.local_only && (
-                    <span className="badge" title="Parle could not rule out that this was a password field, so it is kept on this device and never sent to your other devices">
-                      this device only
+                    <span className="badge" title={t('history.localOnly.title')}>
+                      {t('history.localOnly.badge')}
                     </span>
                   )}
                   {item.duration_ms != null && <span>· {(item.duration_ms / 1000).toFixed(1)}s</span>}
@@ -220,14 +227,14 @@ export default function HistoryView() {
                   <TrimBadge item={item} onRestored={refresh} />
                 </div>
                 <div className="row-actions">
-                  <button className="cta" title="Paste into the previous app (Enter)" onClick={(e) => { e.stopPropagation(); api.pasteItem(item.id).catch(vanished); }}>
-                    <CornerDownLeft size={14} /> Paste
+                  <button className="cta" title={t('history.action.pasteTitle')} onClick={(e) => { e.stopPropagation(); api.pasteItem(item.id).catch(vanished); }}>
+                    <CornerDownLeft size={14} /> {t('history.action.paste')}
                   </button>
-                  <button className="cta" title="Copy (⌘Enter)" onClick={(e) => { e.stopPropagation(); api.copyItem(item.id).catch(vanished); }}>
-                    <Copy size={14} /> Copy
+                  <button className="cta" title={t('history.action.copyTitle', { copyKeys: COPY_KEYS })} onClick={(e) => { e.stopPropagation(); api.copyItem(item.id).catch(vanished); }}>
+                    <Copy size={14} /> {t('history.action.copy')}
                   </button>
                   <button
-                    title="Edit (feeds auto-learn)"
+                    title={t('history.action.editTitle')}
                     onClick={(e) => {
                       e.stopPropagation();
                       setEditing(item.id);
@@ -236,7 +243,7 @@ export default function HistoryView() {
                   >
                     <Pencil size={14} />
                   </button>
-                  <button title={item.pinned ? 'Unpin' : 'Pin'} onClick={(e) => { e.stopPropagation(); api.pinItem(item.id, !item.pinned).then(refresh).catch(vanished); }}>
+                  <button title={item.pinned ? t('history.action.unpin') : t('history.action.pin')} onClick={(e) => { e.stopPropagation(); api.pinItem(item.id, !item.pinned).then(refresh).catch(vanished); }}>
                     {item.pinned ? <PinOff size={14} /> : <Pin size={14} />}
                   </button>
                   {/* Confirmed, because a delete TRAVELS.
@@ -245,7 +252,7 @@ export default function HistoryView() {
                       irreversible and equally absorbing on the peer, was a
                       single unguarded click. The capability existed and had
                       simply not been applied to the riskier action. */}
-                  <button className="danger" title="Delete" onClick={(e) => { e.stopPropagation(); if (!confirmDelete(item)) return; api.deleteItem(item.id).then(refresh).catch(vanished); }}>
+                  <button className="danger" title={t('history.action.delete')} onClick={(e) => { e.stopPropagation(); if (!confirmDelete(item)) return; api.deleteItem(item.id).then(refresh).catch(vanished); }}>
                     <Trash2 size={14} />
                   </button>
                 </div>
@@ -261,6 +268,7 @@ export default function HistoryView() {
 /// Shows "n trimmed" for transcriptions whose cleanup removed spans; click to
 /// review and restore the raw transcript.
 function TrimBadge({ item, onRestored }: { item: HistoryItem; onRestored: () => void }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   if (item.kind !== 'transcription' || !item.meta || !item.raw_text) return null;
   let trimmed: { text: string; reason: string }[] = [];
@@ -277,14 +285,14 @@ function TrimBadge({ item, onRestored }: { item: HistoryItem; onRestored: () => 
     <>
       {trimmed.length > 0 && (
         <button className="badge badge-trim" onClick={(e) => { e.stopPropagation(); setOpen(!open); }}>
-          {trimmed.length} trimmed
+          {t('history.trimmedCount', { n: trimmed.length })}
         </button>
       )}
-      {lowConf > 0 && <span className="badge badge-warn">{lowConf} unsure</span>}
+      {lowConf > 0 && <span className="badge badge-warn">{t('history.unsureCount', { n: lowConf })}</span>}
       {open && (
         <span className="trim-review" onClick={(e) => e.stopPropagation()}>
-          {trimmed.map((t, i) => (
-            <s key={i}>{t.text}</s>
+          {trimmed.map((span, i) => (
+            <s key={i}>{span.text}</s>
           ))}
           <button
             className="badge badge-trim"
@@ -295,7 +303,7 @@ function TrimBadge({ item, onRestored }: { item: HistoryItem; onRestored: () => 
               });
             }}
           >
-            Restore raw
+            {t('history.restoreRaw')}
           </button>
         </span>
       )}
@@ -305,9 +313,9 @@ function TrimBadge({ item, onRestored }: { item: HistoryItem; onRestored: () => 
 
 function timeAgo(ms: number): string {
   const s = Math.floor((Date.now() - ms) / 1000);
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 60) return t('time.justNow');
+  if (s < 3600) return t('time.minutesAgo', { n: Math.floor(s / 60) });
+  if (s < 86400) return t('time.hoursAgo', { n: Math.floor(s / 3600) });
   const d = new Date(ms);
   return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }

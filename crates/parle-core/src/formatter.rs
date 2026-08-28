@@ -56,7 +56,17 @@ pub struct FormatOutput {
 
 /// Format a raw transcript. `segments` (optional) provide timing for
 /// pause-based paragraph breaks; raw must equal the joined segment texts.
-pub fn format(raw: &str, segments: &[Segment], cfg: &CleanupSettings, locale: &str) -> FormatOutput {
+/// `lang` is the SPOKEN language ("en", "fr", ...) or "auto"; `locale` is the
+/// spelling variant for English output. They are different questions and were
+/// conflated before: `locale` decides colour vs color, `lang` decides whether
+/// "euh" is a filler.
+pub fn format(
+    raw: &str,
+    segments: &[Segment],
+    cfg: &CleanupSettings,
+    locale: &str,
+    lang: &str,
+) -> FormatOutput {
     let raw: String = raw.nfc().collect();
     if !cfg.enabled {
         return FormatOutput { text: raw.trim().to_string(), trimmed: vec![] };
@@ -75,7 +85,7 @@ pub fn format(raw: &str, segments: &[Segment], cfg: &CleanupSettings, locale: &s
         trim_corrections(&mut tokens);
     }
     if cfg.remove_fillers {
-        remove_fillers(&mut tokens, cfg.remove_hedges);
+        remove_fillers(&mut tokens, cfg.remove_hedges, lang);
     }
     if cfg.locale_spelling && !locale.is_empty() {
         apply_locale_spelling(&mut tokens, locale);
@@ -425,16 +435,47 @@ fn same_kind(a: &str, b: &str) -> bool {
 // ---------------------------------------------------------------------------
 // Fillers
 
-const FILLERS: &[&str] = &["um", "uh", "uhm", "umm", "ah", "er", "erm", "hmm", "mhm", "mmm"];
-const HEDGES: &[&[&str]] = &[&["you", "know"], &["i", "mean"], &["sort", "of"], &["kind", "of"], &["basically"]];
+/// Filler sounds, per language.
+///
+/// These were English-only, which made "remove fillers" a toggle that did
+/// nothing at all for anyone dictating in another language. That went unnoticed
+/// until the interface was translated and a translator asked whether the
+/// example words in the hint should be localised: they should, and so should
+/// the words the engine actually matches.
+///
+/// The lists are the sounds a speaker of that language actually makes, not
+/// translations of the English ones. "Euh" is French hesitation; "um" is not.
+fn fillers_for(lang: &str) -> &'static [&'static str] {
+    match lang {
+        "fr" => &["euh", "heu", "hein", "bah", "ben", "hum", "mmm"],
+        "es" => &["eh", "em", "este", "esto", "mmm", "ehm"],
+        "de" => &["äh", "ähm", "öh", "hm", "hmm", "mhm", "tja"],
+        "pt" => &["é", "eh", "ahn", "hum", "hm", "né"],
+        // English, and the fallback for every language we have not tuned.
+        _ => &["um", "uh", "uhm", "umm", "ah", "er", "erm", "hmm", "mhm", "mmm"],
+    }
+}
 
-fn remove_fillers(tokens: &mut [Token], hedges: bool) {
+/// Hedge phrases, per language. Same reasoning as `fillers_for`.
+fn hedges_for(lang: &str) -> &'static [&'static [&'static str]] {
+    match lang {
+        "fr" => &[&["vous", "voyez"], &["tu", "vois"], &["je", "veux", "dire"], &["en", "fait"], &["du", "coup"]],
+        "es" => &[&["o", "sea"], &["sabes"], &["digamos"], &["en", "plan"], &["es", "decir"]],
+        "de" => &[&["sozusagen"], &["irgendwie"], &["ich", "meine"], &["also"], &["quasi"]],
+        "pt" => &[&["tipo"], &["sabe"], &["quer", "dizer"], &["ou", "seja"], &["na", "verdade"]],
+        _ => &[&["you", "know"], &["i", "mean"], &["sort", "of"], &["kind", "of"], &["basically"]],
+    }
+}
+
+fn remove_fillers(tokens: &mut [Token], hedges: bool, lang: &str) {
+    let fillers = fillers_for(lang);
+    let hedge_list = hedges_for(lang);
     let n = tokens.len();
     for i in 0..n {
         if tokens[i].kind != TokKind::Word || tokens[i].removed.is_some() {
             continue;
         }
-        if FILLERS.contains(&tokens[i].core().as_str()) {
+        if fillers.contains(&tokens[i].core().as_str()) {
             tokens[i].removed = Some(TrimReason::Filler);
         }
     }
@@ -442,7 +483,7 @@ fn remove_fillers(tokens: &mut [Token], hedges: bool) {
         let idx = live_word_indices(tokens);
         let mut k = 0;
         while k < idx.len() {
-            for phrase in HEDGES {
+            for phrase in hedge_list {
                 if marker_matches(tokens, &idx, k, phrase) {
                     // Hedge phrases at the very start of the text often carry
                     // meaning ("I mean it") — require a preceding word.
@@ -676,7 +717,7 @@ mod tests {
     use crate::settings::CleanupSettings;
 
     fn fmt(raw: &str) -> String {
-        format(raw, &[], &CleanupSettings::default(), "").text
+        format(raw, &[], &CleanupSettings::default(), "", "en").text
     }
 
     #[test]
@@ -731,7 +772,7 @@ mod tests {
 
     #[test]
     fn trims_reported_with_offsets() {
-        let out = format("um hello there", &[], &CleanupSettings::default(), "");
+        let out = format("um hello there", &[], &CleanupSettings::default(), "", "en");
         assert_eq!(out.text, "Hello there.");
         assert_eq!(out.trimmed.len(), 1);
         assert_eq!(out.trimmed[0].text, "um");
@@ -743,7 +784,7 @@ mod tests {
     fn locale_spelling_au() {
         let mut cfg = CleanupSettings::default();
         cfg.locale_spelling = true;
-        let out = format("my favorite color is gray", &[], &cfg, "en-AU");
+        let out = format("my favorite color is gray", &[], &cfg, "en-AU", "en");
         assert_eq!(out.text, "My favourite colour is grey.");
     }
 
@@ -751,7 +792,7 @@ mod tests {
     fn disabled_is_passthrough() {
         let mut cfg = CleanupSettings::default();
         cfg.enabled = false;
-        let out = format("um hello there", &[], &cfg, "");
+        let out = format("um hello there", &[], &cfg, "", "en");
         assert_eq!(out.text, "um hello there");
         assert!(out.trimmed.is_empty());
     }
@@ -763,7 +804,7 @@ mod tests {
             Segment { text: "Second thought entirely.".into(), start_ms: 5000, end_ms: 7000, confidence: 1.0 },
         ];
         let raw = "First thought here. Second thought entirely.";
-        let out = format(raw, &segs, &CleanupSettings::default(), "");
+        let out = format(raw, &segs, &CleanupSettings::default(), "", "en");
         assert_eq!(out.text, "First thought here.\n\nSecond thought entirely.");
     }
 
@@ -775,5 +816,70 @@ mod tests {
     #[test]
     fn existing_punctuation_not_doubled() {
         assert_eq!(fmt("Hello, world."), "Hello, world.");
+    }
+}
+
+#[cfg(test)]
+mod localised_cleanup_tests {
+    use super::*;
+    use crate::settings::CleanupSettings;
+
+    fn cfg() -> CleanupSettings {
+        let mut c = CleanupSettings::default();
+        c.enabled = true;
+        c.remove_fillers = true;
+        c.remove_hedges = true;
+        c
+    }
+
+    /// Cleanup must work in the language the user actually spoke.
+    ///
+    /// The filler and hedge lists were English-only, so every one of these
+    /// toggles did nothing at all for a French, Spanish, German or Portuguese
+    /// speaker. It went unnoticed for as long as the interface was English.
+    #[test]
+    fn fillers_are_removed_in_each_supported_language() {
+        // (language, input, the filler that must go, a word that must stay)
+        let cases = [
+            ("en", "um the meeting is at noon", "um", "meeting"),
+            ("fr", "euh la réunion est à midi", "euh", "réunion"),
+            ("es", "eh la reunión es a mediodía", "eh", "reunión"),
+            ("de", "ähm das Treffen ist um zwölf", "ähm", "Treffen"),
+            ("pt", "hum a reunião é ao meio-dia", "hum", "reunião"),
+        ];
+        for (lang, input, filler, keep) in cases {
+            let out = format(input, &[], &cfg(), "", lang);
+            let lower = out.text.to_lowercase();
+            assert!(
+                !lower.split_whitespace().any(|w| w.trim_matches(|c: char| !c.is_alphanumeric()) == filler),
+                "[{lang}] the filler {filler:?} survived cleanup: {:?}",
+                out.text
+            );
+            assert!(
+                lower.contains(&keep.to_lowercase()),
+                "[{lang}] cleanup ate a real word; {keep:?} is gone from {:?}",
+                out.text
+            );
+        }
+    }
+
+    /// The lists must be DIFFERENT per language, not one list under five names.
+    ///
+    /// Without this, a regression that quietly pointed every language back at
+    /// the English list would still pass the test above for English and fail
+    /// silently for everyone else.
+    #[test]
+    fn each_language_has_its_own_filler_list() {
+        let en = fillers_for("en");
+        for lang in ["fr", "es", "de", "pt"] {
+            assert_ne!(
+                fillers_for(lang),
+                en,
+                "{lang} is using the English filler list, so cleanup does nothing for it"
+            );
+        }
+        // And an unknown language falls back to English rather than to nothing,
+        // because no cleanup is worse than English cleanup on English text.
+        assert_eq!(fillers_for("ja"), en, "an untuned language must fall back to English");
     }
 }

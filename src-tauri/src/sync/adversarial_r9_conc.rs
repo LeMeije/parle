@@ -369,22 +369,42 @@ fn r9_clear_history_does_not_get_quadratically_slower() {
     assert_eq!(n_capped, 10_000, "the capped clear removed {n_capped} rows, not 10000");
 
     let ratio = bigger_us as f64 / small_us.max(1) as f64;
+    // REPORTED, not asserted on. The timings are useful to a human reading a
+    // failure and useless as a gate: this test failed in two of five full runs
+    // on a loaded machine and passed every time in isolation, which is what a
+    // wall-clock ratio always eventually does. The project's own rule, written
+    // after the last one of these, is to assert query SHAPE instead.
     eprintln!(
         "R9-1b Clear History: 250 rows = {small_us}us, 2000 rows = {bigger_us}us, \
          ratio {ratio:.1}x for 8x the rows (linear = 8x, quadratic = 64x); \
          10k rows (shipped default cap) = {capped_ms}ms"
     );
+
+    // THE ACTUAL GUARD. The quadratic form came back twice, both times because
+    // SQLite inlined the CTE and re-ran it per row. `MATERIALIZED` is what
+    // stops that, and its presence is a fact about the code rather than about
+    // how busy the machine was.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/parle-core/src/history.rs"),
+    )
+    .expect("history.rs is readable");
+    let clear = src
+        .split("pub fn clear(")
+        .nth(1)
+        .and_then(|s| s.split("\n    pub fn ").next())
+        .expect("clear() is in history.rs");
     assert!(
-        ratio < 20.0,
-        "R9-1b REGRESSION: 8x the rows cost {ratio:.1}x the time. Clear History is \
-         quadratic again. It runs on the MAIN thread, under the store mutex, in one \
-         unbounded transaction, and 10k rows is the shipped default cap."
+        clear.contains("WITH newest AS MATERIALIZED"),
+        "R9-1b REGRESSION: clear()'s newest-clock CTE lost its MATERIALIZED hint. Without it \
+         SQLite inlines the CTE and re-evaluates it per row, which is the quadratic form that \
+         has now come back twice. Clear History runs on the MAIN thread, under the store \
+         mutex, in one unbounded transaction, and 10k rows is the shipped default cap."
     );
-    assert!(
-        capped_ms < 3_000,
-        "R9-1b REGRESSION: clearing a full default history took {capped_ms}ms on the main \
-         thread. The app is frozen for that long and the user is offered Force Quit, which \
-         rolls the transaction back and leaves the history they asked to clear intact."
+    assert_eq!(
+        clear.matches("WITH newest AS MATERIALIZED").count(),
+        2,
+        "R9-1b: the kind-scoped and whole-history clears must BOTH carry the hint; one of \
+         them has lost it, and only one of the two paths is now safe"
     );
 }
 

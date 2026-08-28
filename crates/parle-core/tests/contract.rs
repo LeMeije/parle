@@ -42,7 +42,7 @@ fn formatter_contract() {
         }
         let cfg: CleanupSettings = serde_json::from_value(cfg).unwrap();
         let locale = case.locale.as_deref().unwrap_or("");
-        let out = formatter::format(&case.input, &[], &cfg, locale);
+        let out = formatter::format(&case.input, &[], &cfg, locale, "en");
         if out.text != case.expect {
             failures.push(format!(
                 "  {}: input={:?}\n    expect={:?}\n    got   ={:?}",

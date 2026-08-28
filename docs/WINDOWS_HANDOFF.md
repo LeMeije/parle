@@ -1,4 +1,4 @@
-# Parle — Windows status
+# Parle: Windows status
 
 The Windows platform layer is **built, installed, and in daily use** on the
 ASUS Zephyrus G14 2025 (Ryzen AI 9 370HX, 64 GB, RTX 5070 Ti). This file was
@@ -15,7 +15,7 @@ Recorded because two of these are not obvious and both cost a build.
 
 | Component | Version / note |
 |---|---|
-| Rust | stable, `x86_64-pc-windows-msvc`. `rustup-init` **prompts** — and so appears to hang — if MSVC is missing. Install Build Tools first. |
+| Rust | stable, `x86_64-pc-windows-msvc`. `rustup-init` **prompts**: and so appears to hang: if MSVC is missing. Install Build Tools first. |
 | VS Build Tools 2022 | "Desktop development with C++" (MSVC + Windows SDK). Required by whisper.cpp's cmake build. |
 | CMake | 4.4.2, on PATH. |
 | LLVM | Required by `bindgen`; `LIBCLANG_PATH` must point at `C:\Program Files\LLVM\bin` or the build fails with "Unable to find libclang". |
@@ -34,14 +34,14 @@ source ./env.sh
 
 - The workspace compiles clean. `platform/windows.rs` was written on the Mac
   against the researched API surface and compiled on Windows with **no
-  signature drift** — the anticipated HWND/BOOL/HGLOBAL churn did not happen.
+  signature drift**: the anticipated HWND/BOOL/HGLOBAL churn did not happen.
 - Full test suite green on Windows, including the shared contract vectors.
 - CUDA build, NSIS installer, install and run on this machine.
 - Core loop end to end: hold hotkey, speak, release, text lands in the target
   app, clipboard restored, history row created.
 - The HUD does not steal focus; the caret stays in the target app.
 - **Copilot key**: starts and stops dictation, and the Copilot app never opens.
-  This took a different architecture from the Mac plan — see below.
+  This took a different architecture from the Mac plan: see below.
 - Tray icon renders correctly (opaque squares and the white matte around the
   glyph were both real bugs, now fixed), with a distinct recording state and a
   user-selectable icon style.
@@ -51,7 +51,7 @@ source ./env.sh
 
 ## The Copilot key needed its own process
 
-The Mac-side plan — a `WH_KEYBOARD_LL` hook inside the app — is correct in
+The Mac-side plan: a `WH_KEYBOARD_LL` hook inside the app: is correct in
 principle and does not survive contact with a busy Tauri process. Windows
 silently removes any hook whose proc exceeds `LowLevelHooksTimeout` (~300 ms),
 and the app's own startup and transcription work were enough to trip it.
@@ -77,7 +77,7 @@ allocation-free.
 
 Note on a dead end, recorded so it is not re-investigated: F23 auto-repeat was
 suspected of defeating the press latch and a debounce was added for it. The
-logs showed a clean 1:1 press-to-event ratio and the debounce was reverted — it
+logs showed a clean 1:1 press-to-event ratio and the debounce was reverted: it
 added 75 ms of latency for a bug that did not exist.
 
 ## Still open
@@ -97,7 +97,7 @@ added 75 ms of latency for a bug that did not exist.
 - **Elevated windows**: UIPI means the hook and `SendInput` cannot reach apps
   running elevated. Accepted gap; not surfaced in the UI.
 - **LAN sync** is built and covered by tests including two-peer exchanges over
-  real sockets, but has never run between two physical machines — there is only
+  real sockets, but has never run between two physical machines: there is only
   one Windows box here. See `docs/SYNC_DESIGN.md`.
 - **Linux** has not been attempted.
 
@@ -113,5 +113,5 @@ icon data.
 
 `shared/formatter-test-vectors.json` and `shared/dictionary-test-vectors.json`
 are the spec; `cargo test -p parle-core` runs them. If Windows behaviour ever
-has to differ — it should not, the formatter and dictionary are pure Rust —
+has to differ: it should not, the formatter and dictionary are pure Rust , 
 change the vectors first and flag it.

@@ -1,4 +1,4 @@
-# Cross-machine sync — design and as-built
+# Cross-machine sync: design and as-built
 
 Requested 22/08/2026: install Parle on several machines and share the
 clipboard/dictation history between them, each entry tagged by the machine it
@@ -6,7 +6,7 @@ came from, so a dictation on the Mac is immediately pasteable on the Windows box
 
 **Status: built.** Covered by unit tests and by end-to-end tests that run the
 whole exchange between two stores over real sockets. It has **not** yet run
-between two physical machines — there is one Windows box here — so treat the
+between two physical machines: there is one Windows box here: so treat the
 first real pairing as the remaining acceptance test.
 
 ## Constraints (non-negotiable, from the product's trust wedge)
@@ -14,7 +14,7 @@ first real pairing as the remaining acceptance test.
 - No cloud, no relay servers, no accounts. LAN-local only.
 - End-to-end encrypted; pairing must be explicit and human-verified.
 - Password-manager exclusions and Concealed/Transient etiquette apply BEFORE
-  anything leaves the machine — never sync what we wouldn't even store.
+  anything leaves the machine: never sync what we wouldn't even store.
 - Paired keys live in the OS keychain, never in `settings.json`.
 
 ## As built
@@ -29,7 +29,7 @@ first real pairing as the remaining acceptance test.
   user asking for a fresh one, because refusing that was a free denial of
   service for anyone on the LAN and bought no security.
 - **Sessions**: Noise `NNpsk0_25519_ChaChaPoly_BLAKE2s` keyed by the paired
-  secret. Device identity is exchanged **inside** that session — see below.
+  secret. Device identity is exchanged **inside** that session: see below.
 - **Replication**: rows are identified across machines by
   `(source_machine, origin_id)`, where `origin_id` for a new local row is a
   random UUID, never the rowid, which restarts at 1 if `history.db` is rebuilt
@@ -165,8 +165,8 @@ of this document reads as though the platforms were symmetrical.
   works only while the data fits in the socket and Noise buffers; a first sync
   of any real size fills them and both peers block in `write` forever.
 - **Identity inside the session.** Sending it as plain frames after the key was
-  confirmed still let an on-path attacker relay the SPAKE2 messages verbatim —
-  never learning the key — and rewrite only the identity, so both machines
+  confirmed still let an on-path attacker relay the SPAKE2 messages verbatim , 
+  never learning the key: and rewrite only the identity, so both machines
   paired on a shared key filed under an attacker-chosen id and name.
 - **A wall-clock deadline, applied before the first byte.** A socket timeout
   bounds one syscall, and `read_exact` renews it on every byte that arrives, so

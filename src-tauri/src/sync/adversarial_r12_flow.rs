@@ -67,6 +67,65 @@ fn code_of(rel: &str) -> String {
         .join("\n")
 }
 
+/// The English text behind an i18n key, read out of `src/i18n/en.ts`.
+///
+/// THE i18n MOVE. The React UI now runs on a translation layer: every
+/// user-facing literal these surface tests used to grep for inside a `.tsx`
+/// file lives in `src/i18n/en.ts` under a dot-namespaced key, and the component
+/// holds a `t('key')` call. `en` is the fallback dictionary for every other
+/// language (`src/i18n/index.ts`), so this file is where the sentence a user
+/// actually reads is defined, and it is the honest place to assert on it.
+///
+/// A surface test that follows a string into the dictionary must anchor BOTH
+/// halves: the `t()` call in the component (or the string is rendered nowhere)
+/// and the value here (or the sentence has changed underneath it). This
+/// function panics rather than returning empty, so a guard still cannot find
+/// nothing and pass.
+fn en_string(key: &str) -> String {
+    dict_string("src/i18n/en.ts", key)
+}
+
+/// The same lookup against any shipped dictionary. Values wrap onto the line
+/// below their key in several of them, so this reads the string literal rather
+/// than the line.
+fn dict_string(dict: &str, key: &str) -> String {
+    let src = read_src(dict);
+    let needle = format!("'{key}':");
+    let at = src
+        .find(&needle)
+        .unwrap_or_else(|| panic!("i18n key {key:?} is no longer in {dict}"));
+    let rest = &src[at + needle.len()..];
+    let start = rest
+        .find(|c| c == '\'' || c == '"')
+        .unwrap_or_else(|| panic!("i18n key {key:?} has no string value in {dict}"));
+    let quote = rest[start..].chars().next().unwrap();
+    let mut out = String::new();
+    let mut esc = false;
+    for ch in rest[start + quote.len_utf8()..].chars() {
+        if esc {
+            out.push(ch);
+            esc = false;
+        } else if ch == '\\' {
+            esc = true;
+        } else if ch == quote {
+            return out;
+        } else {
+            out.push(ch);
+        }
+    }
+    panic!("i18n key {key:?}: unterminated string literal in {dict}")
+}
+
+/// Every shipped dictionary, English included. A chord or a glyph baked into a
+/// TRANSLATION is the same defect as one baked into a component.
+const DICTS: [&str; 5] = [
+    "src/i18n/en.ts",
+    "src/i18n/fr.ts",
+    "src/i18n/es.ts",
+    "src/i18n/de.ts",
+    "src/i18n/pt.ts",
+];
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -318,9 +377,18 @@ fn r12_flow_the_withheld_dictation_notice_is_overwritten_by_the_next_event() {
     // branch always fires; the replacement string never mentions History.
     // The replacement string is now platform-aware and no longer asserts a
     // cause it cannot know, so the anchor is the shape rather than the literal.
-    let replacement = "Copied. Press ${PASTE_KEYS} to paste";
+    //
+    // i18n MOVE. The sentence itself left `Hud.tsx` for `src/i18n/en.ts` under
+    // `hud.pasteInstruction`; the HUD holds the `t()` call and still passes the
+    // platform-derived chord in. Both halves are anchored, because either one
+    // going missing would take the message off the screen.
     assert!(
-        hud.contains(replacement),
+        hud.contains("t('hud.pasteInstruction', { keys: PASTE_KEYS })"),
+        "anchor lost: the replacement string changed"
+    );
+    assert_eq!(
+        en_string("hud.pasteInstruction"),
+        "Copied. Press {keys} to paste",
         "anchor lost: the replacement string changed"
     );
     let inject = mac
@@ -387,18 +455,52 @@ fn r12_flow_the_hud_tells_a_windows_user_to_press_command_v() {
         "the paste chord is not read from one place, so the two platforms can drift again"
     );
 
-    // And the same file uses ⌘ once more, in the search hint it renders, so
-    // this is a pattern rather than one slip.
+    // And the same file used ⌘ once more, in the search hint it renders and in
+    // the Copy button's title, so this was a pattern rather than one slip.
+    //
+    // i18n MOVE, AND AN INVERSION. Both labels left `History.tsx` for
+    // `src/i18n/en.ts` (`history.searchPlaceholder`, `history.action.copyTitle`)
+    // and the glyph itself left for `types.ts` as `COPY_KEYS`, the sibling of
+    // PASTE_KEYS above. So the anchor is no longer the ⌘Enter literal — it is
+    // the shared constant, the `{copyKeys}` hole the sentences leave for it,
+    // and the absence of any baked-in glyph. The property is unchanged: the
+    // chord a user is told to press must come from a platform branch.
+    assert!(
+        shared.contains("export const COPY_KEYS") && shared.contains("Ctrl+Enter"),
+        "anchor lost: the copy chord is not defined once in types.ts with a Windows branch"
+    );
     let history = read_src("src/views/History.tsx");
     assert!(
-        history.contains("⌘Enter"),
-        "anchor lost: History.tsx no longer carries the ⌘Enter hint"
+        history.contains("COPY_KEYS"),
+        "anchor lost: History.tsx no longer reads the shared copy chord"
     );
+    // The two sentences that carry it must take it as a parameter.
+    for key in ["history.searchPlaceholder", "history.action.copyTitle"] {
+        assert!(
+            history.contains(&format!("t('{key}', {{ copyKeys: COPY_KEYS }})")),
+            "anchor lost: History.tsx no longer feeds the shared chord into {key}"
+        );
+    }
+    // INVERTED. History.tsx used to label its shortcuts ⌘Enter on every
+    // platform, with no branch. Now nothing in the view, and nothing in ANY
+    // shipped dictionary, may bake the glyph into these two sentences: a chord
+    // hard-coded into a translation is the identical defect one file over.
     assert!(
-        !history.contains("IS_MAC") && !history.contains("navigator."),
+        !history.contains('\u{2318}'),
         "FINDING: History.tsx labels its keyboard shortcuts ⌘Enter on every \
          platform, with no branch"
     );
+    for dict in DICTS {
+        for key in ["history.searchPlaceholder", "history.action.copyTitle"] {
+            let value = dict_string(dict, key);
+            assert!(
+                value.contains("{copyKeys}") && !value.contains('\u{2318}'),
+                "FINDING: {dict} bakes a keyboard glyph into {key} instead of leaving the \
+                 {{copyKeys}} hole, so that language's users are told to press a key that \
+                 does not exist on their keyboard"
+            );
+        }
+    }
 }
 
 // ===========================================================================
@@ -1006,12 +1108,23 @@ fn r12_flow_a_reinstalled_peer_is_not_disambiguated_from_its_own_dead_pairing() 
 
     // And nothing anywhere flags a paired device that has never synced AND is
     // not currently visible as possibly gone for good.
+    //
+    // i18n MOVE. The label left `SettingsView.tsx` for `src/i18n/en.ts` under
+    // `sync.neverConnected`; the view holds the `t()` call. Both halves are
+    // anchored so the label cannot go missing from either end.
     assert!(
-        view.contains("Never connected"),
+        view.contains("t('sync.neverConnected')") && en_string("sync.neverConnected") == "Never connected",
         "anchor lost: the never-connected label is gone"
     );
+    // The explanation would now be written in the dictionary rather than in the
+    // component, so the absence has to be checked in both places or the finding
+    // could close without this test noticing.
+    let en = read_src("src/i18n/en.ts");
     assert!(
-        !view.contains("reinstall") && !view.contains("Reinstall"),
+        !view.contains("reinstall")
+            && !view.contains("Reinstall")
+            && !en.contains("reinstall")
+            && !en.contains("Reinstall"),
         "FINDING closed? the UI now explains the reinstall case"
     );
 }
@@ -1037,12 +1150,21 @@ fn r12_flow_deleting_one_row_is_unguarded_while_clearing_all_is_not() {
 
     // Anchor: the app DOES know how to warn about a cross-device destructive
     // action, so the absence below is a decision, not a missing capability.
+    //
+    // i18n MOVE. The Clear confirmation left `SettingsView.tsx` for
+    // `src/i18n/en.ts` under `settings.clearHistory.confirmWithDevices`; the
+    // view still chooses between that and the no-devices variant, and still
+    // computes the device names. So the CONTROL FLOW anchor stays in the view
+    // and the WORDING anchor follows the key.
+    let clear_with_devices = en_string("settings.clearHistory.confirmWithDevices");
     assert!(
-        settings.contains("This deletes every unpinned item on this device and on"),
+        settings.contains("t('settings.clearHistory.confirmWithDevices', { devices: confirmClear.join(', ') })")
+            && clear_with_devices.starts_with("This deletes every unpinned item on this device and on"),
         "anchor lost: the Clear confirmation changed"
     );
     assert!(
-        settings.contains("It cannot be undone."),
+        clear_with_devices.contains("It cannot be undone.")
+            && en_string("settings.clearHistory.confirm").contains("It cannot be undone."),
         "anchor lost: the Clear confirmation no longer says it is permanent"
     );
     assert!(
@@ -1057,33 +1179,61 @@ fn r12_flow_deleting_one_row_is_unguarded_while_clearing_all_is_not() {
     );
 
     // The finding: the delete button has no confirmation of any kind.
+    //
+    // i18n MOVE. The button's `title="Delete"` became `title={t('...')}`, so
+    // the anchor is the button's own class plus the translated title. The GUARD
+    // itself is control flow and has not moved: `if (!confirmDelete(item))
+    // return;` still sits between the click and `api.deleteItem`.
     let btn = hist
-        .split("className=\"danger\" title=\"Delete\"")
+        .split("className=\"danger\" title={t('history.action.delete')}")
         .nth(1)
         .expect("anchor lost: the delete button changed shape")
         .split("</button>")
         .next()
         .unwrap();
     assert!(
-        btn.contains("confirmDelete(item)"),
+        btn.contains("if (!confirmDelete(item)) return;"),
         "FINDING: the per-row delete has no confirmation of any kind, while clearing all \
          history is guarded by a callout naming every paired device. The delete travels, is \
          absorbing on the peer and cannot be undone"
     );
     // INVERTED. The confirmation has to SAY what a delete does, or it is a
     // speed bump rather than an explanation.
-    for phrase in ["cannot be undone", "paired"] {
+    //
+    // i18n MOVE. The sentences left `History.tsx` for `src/i18n/en.ts`, and
+    // `confirmDelete` now assembles them from three keys. Grepping the view for
+    // the phrases would be VACUOUS now — "paired" survives there only as the
+    // `pairedNames` variable, which no user ever reads — so each phrase is
+    // asserted against the dictionary value the view actually passes to
+    // `window.confirm`, and the view is checked for the call that renders it.
+    let confirm_keys = [
+        ("history.deleteConfirm", "cannot be undone"),
+        ("history.mayAlsoDelete", "paired devices"),
+    ];
+    for (key, phrase) in confirm_keys {
         assert!(
-            hist.contains(phrase),
+            hist.contains(&format!("t('{key}')")),
+            "anchor lost: History.tsx no longer renders {key} in its delete confirmation"
+        );
+        assert!(
+            en_string(key).contains(phrase),
             "FINDING: nothing in the History view says a delete travels to the other machine \
              or that it cannot be undone; it is a single unguarded click ('{phrase}' absent)"
         );
     }
+    // And when the paired devices ARE known, the confirmation names them, which
+    // is the whole point of the capability the Clear button already had.
+    assert!(
+        hist.contains("t('history.alsoDeletesFrom', { devices: pairedNames.join(', ') })")
+            && en_string("history.alsoDeletesFrom").contains("{devices}"),
+        "FINDING: the delete confirmation no longer names the machines it also deletes from"
+    );
 
     // The one message it DOES carry is the receiving end of the same action,
     // which proves the author knew deletes travel.
     assert!(
-        hist.contains("It was deleted on another device"),
+        hist.contains("t('history.gone')")
+            && en_string("history.gone").contains("It was deleted on another device"),
         "anchor lost: the vanished-row callout is gone"
     );
 }
@@ -1177,17 +1327,27 @@ fn r12_flow_excluding_an_app_leaves_everything_already_replicated_in_place() {
     assert_eq!(tombs, 0, "FINDING closed? excluding an app now writes a tombstone");
 
     // The claim the user reads.
+    //
+    // i18n MOVE. The hint left `SettingsView.tsx` for `src/i18n/en.ts` under
+    // `settings.excludedApps.hint`; the view holds `hint={t(...)}`. The claim
+    // is about the WORDING, so it follows the wording into the dictionary, and
+    // the view is checked for the call so the sentence is still rendered.
     let view = read_src("src/views/SettingsView.tsx");
+    assert!(
+        view.contains("hint={t('settings.excludedApps.hint')}"),
+        "anchor lost: the excluded-apps hint is no longer rendered"
+    );
+    let hint = en_string("settings.excludedApps.hint");
     // INVERTED. The rows already replicated genuinely are not recalled, which
     // the two assertions above prove; round 12 fixed the CLAIM rather than the
     // behaviour, because recall is a feature and the sentence was simply false.
     assert!(
-        !view.contains("Parle never sends a row from an excluded app to your other devices"),
+        !hint.contains("Parle never sends a row from an excluded app to your other devices"),
         "FINDING: the hint tells the user Parle never sends a row from an excluded app, and \
          everything sent before the entry was added stays on the peer for ever"
     );
     assert!(
-        view.contains("Anything already synced stays on them"),
+        hint.contains("Anything already synced stays on them"),
         "the hint no longer says what happens to rows that were already synced"
     );
 }
@@ -1249,13 +1409,20 @@ fn r12_flow_field_test_step_three_says_the_showing_machine_only_receives() {
         "anchor lost: the steps around it changed"
     );
     // The code is unambiguous that pairing is mutual and symmetric.
+    //
+    // i18n MOVE. Both sentences left `SettingsView.tsx` for `src/i18n/en.ts`
+    // (`sync.paired.hint`, `sync.pairNew.hint`); the view holds the `t()`
+    // calls. The point of these two anchors is that the tester is reading them
+    // on screen while reading the doc, so both the render and the wording are
+    // asserted.
     let view = read_src("src/views/SettingsView.tsx");
     assert!(
-        view.contains("Pairing is mutual."),
+        view.contains("t('sync.paired.hint')") && en_string("sync.paired.hint").contains("Pairing is mutual."),
         "anchor lost: the UI no longer says pairing is mutual"
     );
     assert!(
-        view.contains("Either machine can start."),
+        view.contains("t('sync.pairNew.hint')")
+            && en_string("sync.pairNew.hint").contains("Either machine can start."),
         "anchor lost: the UI no longer says either machine can start"
     );
     // INVERTED. The doc now reconciles itself with what the UI says two lines

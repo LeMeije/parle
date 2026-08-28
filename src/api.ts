@@ -27,6 +27,9 @@ export const api = {
 
   listModels: () => invoke<ModelRow[]>('list_models'),
   downloadModel: (modelId: string) => invoke<void>('download_model', { modelId }),
+  addCustomModel: (path: string, displayName: string, multilingual: boolean) =>
+    invoke<string>('add_custom_model', { path, displayName, multilingual }),
+  removeCustomModel: (modelId: string) => invoke<void>('remove_custom_model', { modelId }),
   cancelDownload: (modelId: string) => invoke<void>('cancel_download', { modelId }),
   deleteModel: (modelId: string) => invoke<void>('delete_model', { modelId }),
   selectModel: (modelId: string) => invoke<void>('select_model', { modelId }),

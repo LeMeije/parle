@@ -1,4 +1,4 @@
-# Parle — Product Specification
+# Parle: Product Specification
 
 On-device AI dictation + unified transcription/clipboard history for macOS and Windows 11.
 Local-first is the trust wedge: no telemetry, no cloud, ever. Beat OpenWhispr on weight
@@ -30,7 +30,7 @@ is non-commercial (clean-room reimplementation of its two ideas: silence warmup,
 5. If clipboard was used for injection, the previous clipboard contents are restored.
 6. Silence in -> nothing injected (min duration + VAD gate), but an empty-recording toast explains why.
 
-Target latencies (measured, not aspirational — benchmarks in `bench/`):
+Target latencies (measured, not aspirational: benchmarks in `bench/`):
 - hotkey press -> recording active: < 50 ms (audio stream pre-opened, model pre-warmed at startup)
 - release -> text injected (5 s utterance, recommended model): < 800 ms on M2, < 500 ms on the G14
 - idle RAM (tray resident, model warm): report actual numbers; minimise; model memory is the floor
@@ -41,7 +41,7 @@ Target latencies (measured, not aspirational — benchmarks in `bench/`):
 - Engines: whisper.cpp (Metal/CUDA/CPU) and sherpa-onnx Parakeet family, behind one Rust
   `AsrEngine` trait. Per-machine auto-selection on first launch; manual override in Settings.
 - Fallback chain: engine/model failure (load error, GPU OOM) degrades to next rung; the
-  recorded audio is NEVER discarded — it re-transcribes on the fallback.
+  recorded audio is NEVER discarded: it re-transcribes on the fallback.
 - Model manager: browse/download/delete/switch, with size/speed/accuracy/language labels,
   download progress, resumable downloads, size-window integrity check (engine load is the
   authoritative validation; per-file checksums are a deferred hardening item).
@@ -72,15 +72,15 @@ Target latencies (measured, not aspirational — benchmarks in `bench/`):
 
 ### Hotkeys
 - Fully configurable: chords, hold-to-talk, toggle, hybrid (hold, latch to toggle with extra tap/modifier).
-- macOS: Fn/Globe support, left/right modifier discrimination (CGEventTap), Right ⌥ default
+- macOS: Fn/Globe support, left/right modifier discrimination (CGEventTap), Fn default
   configurable. Windows: low-level hook; Copilot key remap (suppress default launch).
 - Coexistence: inspect only our own bindings, pass everything else through untouched.
   Windows: never swallow key-down while letting key-up escape (stuck-modifier bug).
-- AltGr trap: Right Alt is AltGr on many layouts — never default to it on Windows; default Right Ctrl.
+- AltGr trap: Right Alt is AltGr on many layouts: never default to it on Windows; default Right Ctrl.
 
 ### Output/injection
 - macOS: AX insertion first, clipboard+⌘V fallback, secure-input detection -> clipboard-only + toast.
-- Windows: SendInput Ctrl+V (UI Automation cannot insert at caret — TextPattern is read-only,
+- Windows: SendInput Ctrl+V (UI Automation cannot insert at caret: TextPattern is read-only,
   ValuePattern replaces whole fields). Clipboard restore after a safe delay.
 - Per-app paste behaviour overrides (e.g. plain Enter vs Shift+Enter apps later; v1: injection mode per app).
 
@@ -90,7 +90,7 @@ Target latencies (measured, not aspirational — benchmarks in `bench/`):
 - Themes: system light/dark + manual; accent colours; pastel + bold palettes; Retro 80s/90s theme
   (cassette reels spin while recording, VU meter) as a first-class option; selectable app icons.
 - 60 fps micro-interactions (motion library), Lucide icons.
-- Onboarding: polished first-run flow — mic permission, accessibility permission (mac), model
+- Onboarding: polished first-run flow: mic permission, accessibility permission (mac), model
   download with auto-recommendation, hotkey choice, test dictation playground.
 
 ### Voice commands (v1 scope: during dictation)
@@ -109,7 +109,7 @@ behaviour · updates.
 - GPU OOM mid-load -> fallback chain, audio preserved
 
 
-## v1 shipped vs deferred (kept honest — updated 21/08/2026)
+## v1 shipped vs deferred (kept honest: updated 21/08/2026)
 
 SHIPPED: core loop (hold/toggle/hybrid incl. other-key gesture abort), non-activating HUD with
 outcome messages + pill/cassette/minimal styles, live partial transcripts while speaking,

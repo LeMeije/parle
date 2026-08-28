@@ -5,7 +5,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, onLevel, onPartial, onPipelineEvent } from './api';
 import { PASTE_KEYS } from './types';
+import { applyLang } from './i18n/apply';
 import type { Settings } from './types';
+import { useT } from './i18n/useT';
 import './hud.css';
 
 const BAR_COUNT = 27;
@@ -22,17 +24,23 @@ const REEL_CUTS = [
 ];
 
 export default function Hud() {
+  const t = useT();
   const [state, setState] = useState<'recording' | 'transcribing' | 'idle'>('idle');
   const [partial, setPartial] = useState('');
   const [outcome, setOutcome] = useState<{ text: string; kind: 'ok' | 'error' } | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [settings, setSettings] = useState<Settings | null>(null);
+  // Mirrored into a ref because the level subscription below is registered
+  // once and would otherwise close over the settings as they were at mount,
+  // so changing the sensitivity would not take effect until the HUD remounted.
+  const settingsRef = useRef<Settings | null>(null);
+  settingsRef.current = settings;
   const barsRef = useRef<number[]>(new Array(BAR_COUNT).fill(0.05));
   const [, force] = useState(0);
   const envelopeRef = useRef(0);
 
   useEffect(() => {
-    api.getSettings().then(applyTheme).then(setSettings).catch(() => {});
+    api.getSettings().then((s) => { applyTheme(s); applyLang(s); return s; }).then(setSettings).catch(() => {});
     const un1 = onPipelineEvent((e) => {
       if (e.kind === 'state_changed') {
         setState(e.state === 'idle' ? 'idle' : e.state);
@@ -59,11 +67,11 @@ export default function Hud() {
         // gives. It also asserted "(secure field)" unconditionally, while the
         // same outcome is returned when the field is ordinary and merely a
         // password manager is running.
-        setOutcome({ text: `Copied. Press ${PASTE_KEYS} to paste`, kind: 'ok' });
+        setOutcome({ text: t('hud.pasteInstruction', { keys: PASTE_KEYS }), kind: 'ok' });
       }
       // Theme may have changed while the HUD was hidden.
       if (e.kind === 'state_changed' && e.state === 'recording') {
-        api.getSettings().then(applyTheme).then(setSettings).catch(() => {});
+        api.getSettings().then((s) => { applyTheme(s); applyLang(s); return s; }).then(setSettings).catch(() => {});
       }
     });
     const un2 = onLevel((u) => {
@@ -78,11 +86,19 @@ export default function Hud() {
       // speech near the bottom, and a 1.7 power then crushed what was left, so
       // the bars barely moved. A narrower window and a gentler curve put normal
       // speech across the middle of the range where it can actually be seen.
-      let v = (db + 50) / 30;
+      // SENSITIVITY shifts the window, it does not scale the bars.
+      //
+      // Scaling the drawn height would stretch what was already visible and
+      // leave quiet speech pinned at the floor. Moving the window in dB is what
+      // actually lifts a quiet microphone, a distant one, or a soft speaker
+      // into the part of the range the eye can read. 1.0 is the tuned default,
+      // 2.0 adds 20 dB of headroom, 0.5 takes 10 dB away.
+      const gainDb = ((settingsRef.current?.overlay.waveform_sensitivity ?? 1) - 1) * 20;
+      let v = (db + 50 + gainDb) / 30;
       v = Math.pow(Math.max(0, Math.min(1, v)), 1.15);
       // A touch of peak keeps plosives snappy.
       const peakDb = 20 * Math.log10(Math.max(u.peak, 1e-6));
-      const p = Math.max(0, Math.min(1, (peakDb + 46) / 32));
+      const p = Math.max(0, Math.min(1, (peakDb + 46 + gainDb) / 32));
       bars.push(Math.min(1, v * 0.85 + p * 0.3));
       if (bars.length > BAR_COUNT) bars.shift();
       force((n) => n + 1);
@@ -118,12 +134,12 @@ export default function Hud() {
       {style === 'minimal' ? (
         <div
           className="hud-min-inner"
-          title={state === 'recording' ? 'Recording. Click to stop' : 'Transcribing…'}
+          title={state === 'recording' ? t('hud.recordingClickToStop') : t('hud.transcribing')}
           onClick={() => (state === 'recording' ? api.stopRecording() : undefined)}
         >
           {state === 'transcribing' ? <Spinner /> : <span className="hud-dot" />}
           <span className="hud-time">{time}</span>
-          <button className="hud-cancel" title="Cancel (Esc)" onClick={(e) => { e.stopPropagation(); api.cancelRecording(); }}>
+          <button className="hud-cancel" title={t('hud.cancel')} onClick={(e) => { e.stopPropagation(); api.cancelRecording(); }}>
             ✕
           </button>
         </div>
@@ -138,14 +154,14 @@ export default function Hud() {
         <>
           <button
             className="hud-stop"
-            title={state === 'recording' ? 'Stop and paste' : 'Working…'}
+            title={state === 'recording' ? t('hud.stopAndPaste') : t('hud.working')}
             onClick={() => (state === 'recording' ? api.stopRecording() : undefined)}
           >
             {state === 'transcribing' ? <Spinner /> : <span className="hud-dot" />}
           </button>
           <div className="hud-center">
             {state === 'transcribing' ? (
-              <span className="hud-status">Transcribing…</span>
+              <span className="hud-status">{t('hud.transcribing')}</span>
             ) : (
               <Waveform bars={barsRef.current} />
             )}
@@ -153,7 +169,7 @@ export default function Hud() {
           </div>
           <div className="hud-right">
             <span className="hud-time">{time}</span>
-            <button className="hud-cancel" title="Cancel (Esc)" onClick={() => api.cancelRecording()}>
+            <button className="hud-cancel" title={t('hud.cancel')} onClick={() => api.cancelRecording()}>
               ✕
             </button>
           </div>
@@ -191,6 +207,7 @@ function Deck({
   envelope: number;
   time: string;
 }) {
+  const t = useT();
   // Same dB window as the pill waveform, quantised into discrete segments.
   const db = 20 * Math.log10(Math.max(envelope, 1e-6));
   const level = Math.min(1, Math.pow(Math.max(0, (db + 50) / 30), 1.15));
@@ -221,14 +238,14 @@ function Deck({
           })}
         </div>
         <div className={`deck-label${recording ? '' : ' working'}`}>
-          {recording ? 'REC' : 'PROC'} <span className="deck-time">{time}</span>
+          {recording ? t('hud.deck.rec') : t('hud.deck.proc')} <span className="deck-time">{time}</span>
         </div>
       </div>
       <Reel variant={variant} spinning={recording} rewinding={!recording} slow />
       {variant === 'cassette' && <span className="deck-stripe" />}
       <button
         className="deck-cancel"
-        title="Cancel (Esc)"
+        title={t('hud.cancel')}
         onClick={(e) => {
           e.stopPropagation();
           api.cancelRecording();

@@ -3,7 +3,7 @@
 ## Stack decision (performance-justified)
 Tauri 2 + Rust core + React/Vite UI. Rejected Electron (OpenWhispr's exploitable weakness: bundled
 Chromium + Node = 80-120 MB installers, 200-400 MB idle RAM). Rejected fully-native-per-platform (two
-UIs, two codebases; murmur proves the cost — its Windows side never shipped). Tauri gives one Rust core
+UIs, two codebases; murmur proves the cost: its Windows side never shipped). Tauri gives one Rust core
 where ALL hot paths live (audio, ASR, hotkeys, injection are pure native), with the webview only
 rendering UI. Idle footprint target: tens of MB + model memory; installers under 15 MB before models.
 
@@ -30,7 +30,7 @@ parle/
   the copy, never does IO.
 - Audio thread: drains the channel IN ORDER, resamples to 16 kHz mono f32, appends to the utterance
   buffer, computes RMS/peak levels (sent to HUD via tauri ipc::Channel at ~30 Hz).
-- ASR worker: exactly ONE inference worker drains a bounded chunk queue — ordering is structural, not
+- ASR worker: exactly ONE inference worker drains a bounded chunk queue: ordering is structural, not
   incidental. Partial-pass transcriptions stream to the HUD; final pass on stop.
 - Pipeline state machine (owned by `PipelineController`): Idle -> Starting -> Listening -> Finishing -> Idle,
   with Cancelled as an exit from any active state. Hotkey events are the only inputs that start/stop it.
@@ -58,7 +58,10 @@ progress events.
 
 ## Behavioural contract (Windows parity)
 shared/*.json test vectors are the spec for everything platform-independent (formatter, dictionary,
-fuzzy search ranking). Both platform builds run the same vectors in CI. Platform-specific behaviour is
+fuzzy search ranking). The same vectors are meant to run on both platforms;
+there is no CI in this repo yet, and the Windows build cannot be compiled on
+the author's Mac, so "Windows passes" is currently a claim rather than a
+measurement. Platform-specific behaviour is
 documented per-feature in docs/WINDOWS_HANDOFF.md with the murmur-derived lessons inlined.
 
 ## Key platform decisions (from docs/research/PLATFORM.md)
@@ -66,7 +69,10 @@ documented per-feature in docs/WINDOWS_HANDOFF.md with the murmur-derived lesson
   active tap, Accessibility) and WH_KEYBOARD_LL (Windows) for Fn/Globe, L/R modifiers, Copilot key.
 - HUD: tauri-nspanel (git v2.1) NonactivatingPanel on macOS; WS_EX_NOACTIVATE|TOPMOST|TOOLWINDOW on Windows.
 - Injection: macOS AX-selected-text fast path -> clipboard+CGEventPost Cmd-V fallback (restore ~700ms,
-  changeCount-checked, TransientType-marked); Windows clipboard+SendInput Ctrl-V (restore ~500ms,
+  changeCount-checked, marked Concealed only when the content is judged secret;
+  the earlier TransientType marking was reversed because it told every other
+  clipboard manager to bin the user's own copy); Windows clipboard+SendInput
+  Ctrl-V (restore 700ms,
   sequence-number-checked, monitor-excluded formats). Secure input detected -> clipboard-only + HUD hint.
 - History: rusqlite bundled SQLite, FTS5 external-content table, optional SQLCipher later (v1: OS-level
   file protection + retention controls; encryption-at-rest flag reserved in settings schema).

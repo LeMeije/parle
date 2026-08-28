@@ -4,6 +4,9 @@ import { useEffect, useState } from 'react';
 import { enable as enableAutostart, disable as disableAutostart } from '@tauri-apps/plugin-autostart';
 import { api, onSyncStatus } from '../api';
 import type { Settings, SyncStatus } from '../types';
+import { t } from '../i18n';
+import { useT } from '../i18n/useT';
+import { getLang, setLang, LANGUAGES as I18N_LANGUAGES, type Lang } from '../i18n';
 import iconDefault from '../assets/icons/default.png';
 import iconKeycap from '../assets/icons/keycap.png';
 import iconWaveform from '../assets/icons/waveform.png';
@@ -15,12 +18,14 @@ import trayLight from '../../src-tauri/icons/tray-light.png';
 import trayDark from '../../src-tauri/icons/tray-dark.png';
 import trayColor from '../../src-tauri/icons/tray-color.png';
 
+// [id, image, label key]. The label is a key, resolved at render so it
+// follows a language change.
 const APP_ICONS: [string, string, string][] = [
-  ['default', iconDefault, 'Parle'],
-  ['keycap', iconKeycap, 'Keycap'],
-  ['waveform', iconWaveform, 'Waveform'],
-  ['echo-rings', iconEchoRings, 'Echo rings'],
-  ['cassette', iconCassette, 'Cassette'],
+  ['default', iconDefault, 'settings.appIcon.default'],
+  ['keycap', iconKeycap, 'settings.appIcon.keycap'],
+  ['waveform', iconWaveform, 'settings.appIcon.waveform'],
+  ['echo-rings', iconEchoRings, 'settings.appIcon.echoRings'],
+  ['cassette', iconCassette, 'settings.appIcon.cassette'],
 ];
 
 // Inline glyphs for the overlay-style picker. Drawn in currentColor so they
@@ -39,10 +44,11 @@ const glyph = (children: React.ReactNode) => (
   </svg>
 );
 
+// [value, label key, glyph].
 const OVERLAY_STYLES: [string, string, React.ReactNode][] = [
   [
     'pill',
-    'Pill',
+    'settings.overlayStyle.pill',
     glyph(
       <>
         <rect x="0.9" y="4.6" width="14.2" height="6.8" rx="3.4" />
@@ -52,7 +58,7 @@ const OVERLAY_STYLES: [string, string, React.ReactNode][] = [
   ],
   [
     'cassette',
-    'Cassette',
+    'settings.overlayStyle.cassette',
     glyph(
       <>
         <rect x="0.9" y="3.4" width="14.2" height="9.2" rx="2" />
@@ -64,7 +70,7 @@ const OVERLAY_STYLES: [string, string, React.ReactNode][] = [
   ],
   [
     'metal',
-    'Metal',
+    'settings.overlayStyle.metal',
     glyph(
       <>
         <rect x="0.9" y="3.4" width="14.2" height="9.2" rx="2" />
@@ -77,7 +83,7 @@ const OVERLAY_STYLES: [string, string, React.ReactNode][] = [
   ],
   [
     'minimal',
-    'Minimal',
+    'settings.overlayStyle.minimal',
     glyph(
       <>
         <rect x="3.4" y="5.4" width="9.2" height="5.2" rx="2.6" />
@@ -87,7 +93,7 @@ const OVERLAY_STYLES: [string, string, React.ReactNode][] = [
   ],
   [
     'hidden',
-    'None',
+    'settings.overlayStyle.none',
     // A dashed outline with the menu-bar dot beside it: nothing is drawn on
     // screen, and the tray icon's dot is the only thing that reports.
     glyph(
@@ -99,23 +105,32 @@ const OVERLAY_STYLES: [string, string, React.ReactNode][] = [
   ],
 ];
 
+// Spoken (transcription) languages, distinct from the UI languages in
+// `src/i18n`. [code, label key]: the codes go to the engine, the labels are
+// resolved at render.
+// The INTERFACE languages, distinct from the SPOKEN ones below: someone can
+// run Parle in French and dictate in Japanese, and the spoken list is much
+// longer because the model supports far more languages than we have
+// translated.
+const UI_LANGUAGES = I18N_LANGUAGES;
+
 const LANGUAGES: [string, string][] = [
-  ['auto', 'Auto-detect'],
-  ['en', 'English'],
-  ['es', 'Spanish'],
-  ['fr', 'French'],
-  ['de', 'German'],
-  ['it', 'Italian'],
-  ['pt', 'Portuguese'],
-  ['nl', 'Dutch'],
-  ['ja', 'Japanese'],
-  ['ko', 'Korean'],
-  ['zh', 'Chinese'],
-  ['hi', 'Hindi'],
-  ['ar', 'Arabic'],
-  ['ru', 'Russian'],
-  ['pl', 'Polish'],
-  ['sv', 'Swedish'],
+  ['auto', 'settings.language.auto'],
+  ['en', 'settings.language.en'],
+  ['es', 'settings.language.es'],
+  ['fr', 'settings.language.fr'],
+  ['de', 'settings.language.de'],
+  ['it', 'settings.language.it'],
+  ['pt', 'settings.language.pt'],
+  ['nl', 'settings.language.nl'],
+  ['ja', 'settings.language.ja'],
+  ['ko', 'settings.language.ko'],
+  ['zh', 'settings.language.zh'],
+  ['hi', 'settings.language.hi'],
+  ['ar', 'settings.language.ar'],
+  ['ru', 'settings.language.ru'],
+  ['pl', 'settings.language.pl'],
+  ['sv', 'settings.language.sv'],
 ];
 
 const ACCENTS = ['#2b5cff', '#e0642f', '#178a50', '#8b5cf6', '#d5382f', '#0d9aa8', '#b06a00', '#d6336c'];
@@ -128,22 +143,22 @@ const IS_MAC = navigator.userAgent.includes('Mac');
 // for, so a white outline is never previewed on white.
 const TRAY_STYLES: [string, string, [string, 'light' | 'dark'][]][] = IS_MAC
   ? [
-      ['template', 'Monochrome', [[trayTemplate, 'light']]],
-      ['badge', 'Blue badge', [[trayBadge, 'light']]],
+      ['template', 'settings.tray.template', [[trayTemplate, 'light']]],
+      ['badge', 'settings.tray.badge', [[trayBadge, 'light']]],
     ]
   : [
-      ['badge', 'Blue badge', [[trayBadge, 'light']]],
+      ['badge', 'settings.tray.badge', [[trayBadge, 'light']]],
       [
         'auto',
-        'Auto: match taskbar',
+        'settings.tray.auto',
         [
           [trayDark, 'light'],
           [trayLight, 'dark'],
         ],
       ],
-      ['light', 'Outline light', [[trayLight, 'dark']]],
-      ['dark', 'Outline dark', [[trayDark, 'light']]],
-      ['color', 'Blue outline', [[trayColor, 'light']]],
+      ['light', 'settings.tray.light', [[trayLight, 'dark']]],
+      ['dark', 'settings.tray.dark', [[trayDark, 'light']]],
+      ['color', 'settings.tray.color', [[trayColor, 'light']]],
     ];
 
 const SPECIAL_KEYS = IS_MAC
@@ -184,6 +199,7 @@ export default function SettingsView({
   settings: Settings;
   onSave: (s: Settings) => Promise<void>;
 }) {
+  const t = useT();
   const [devices, setDevices] = useState<string[]>([]);
   const [perms, setPerms] = useState<{ accessibility: boolean; microphone: string } | null>(null);
 
@@ -205,8 +221,8 @@ export default function SettingsView({
     // Poll: permissions can change in System Settings while this page is open.
     const poll = () => api.permissionStatus().then(setPerms);
     poll();
-    const t = window.setInterval(poll, 2000);
-    return () => window.clearInterval(t);
+    const id = window.setInterval(poll, 2000);
+    return () => window.clearInterval(id);
   }, []);
 
   const s = settings;
@@ -247,12 +263,15 @@ export default function SettingsView({
   return (
     <div className="settings">
       <header className="view-head">
-        <h1>Settings</h1>
-        <p>Local-only. No telemetry, no cloud, ever.</p>
+        <h1>{t('settings.title')}</h1>
+        <p>{t('settings.subtitle')}</p>
       </header>
 
-      <Section title="Hotkeys">
-        <Field label="Dictation key" hint={IS_MAC ? 'Fn needs Accessibility permission' : 'Right Alt is AltGr on many layouts, so Right Ctrl is safer'}>
+      <Section title={t('settings.section.hotkeys')}>
+        <Field
+          label={t('settings.dictationKey.label')}
+          hint={IS_MAC ? t('settings.dictationKey.hintMac') : t('settings.dictationKey.hintWin')}
+        >
           <select
             value={isCustom ? CUSTOM : dictationKey}
             onChange={(e) => {
@@ -271,26 +290,26 @@ export default function SettingsView({
                 {keyLabel(k)}
               </option>
             ))}
-            <option value={CUSTOM}>Custom…</option>
+            <option value={CUSTOM}>{t('settings.dictationKey.custom')}</option>
           </select>
         </Field>
         {isCustom && (
-          <Field label="Custom binding" hint="Click, then press the key or combination you want. Esc cancels.">
+          <Field label={t('settings.customBinding.label')} hint={t('settings.customBinding.hint')}>
             <button
               className={`btn key-capture ${capturing ? 'listening' : ''}`}
               onClick={() => setCapturing(true)}
             >
-              {capturing ? 'Press a key combination…' : keyLabel(dictationKey)}
+              {capturing ? t('settings.customBinding.listening') : keyLabel(dictationKey)}
             </button>
           </Field>
         )}
         {isCustom && warning && <div className="callout warn">{warning}</div>}
         <Field
-          label="Gesture"
+          label={t('settings.gesture.label')}
           hint={
             s.hotkeys.dictation.mode === 'double_tap'
-              ? 'Double-tap starts, single tap stops. The key is never intercepted, so its normal system behaviour keeps working.'
-              : 'Hybrid: hold to talk; a quick tap latches until the next tap'
+              ? t('settings.gesture.hintDoubleTap')
+              : t('settings.gesture.hint')
           }
         >
           <div className="seg">
@@ -300,21 +319,27 @@ export default function SettingsView({
                 className={s.hotkeys.dictation.mode === m ? 'active' : ''}
                 onClick={() => set((d) => (d.hotkeys.dictation.mode = m))}
               >
-                {m === 'hold' ? 'Hold' : m === 'toggle' ? 'Toggle' : m === 'hybrid' ? 'Hybrid' : 'Double tap'}
+                {m === 'hold'
+                  ? t('settings.gesture.hold')
+                  : m === 'toggle'
+                    ? t('settings.gesture.toggle')
+                    : m === 'hybrid'
+                      ? t('settings.gesture.hybrid')
+                      : t('settings.gesture.doubleTap')}
               </button>
             ))}
           </div>
         </Field>
-        <Field label="Latch window" hint="Hybrid: taps shorter than this latch into toggle. Double tap: max gap between taps">
+        <Field label={t('settings.latch.label')} hint={t('settings.latch.hint')}>
           <NumberInput value={s.hotkeys.latch_ms} min={150} max={900} step={50} suffix="ms" onChange={(v) => set((d) => (d.hotkeys.latch_ms = v))} />
         </Field>
         <Toggle
-          label="Esc cancels recording"
-          hint="Off by default: Esc gets pressed for all sorts of unrelated reasons, and discarding a take you already spoke is worse than stopping it with your hotkey"
+          label={t('settings.escCancel.label')}
+          hint={t('settings.escCancel.hint')}
           value={s.hotkeys.cancel.enabled}
           onChange={(v) => set((d) => (d.hotkeys.cancel.enabled = v))}
         />
-        <Field label="History palette" hint="Chord shortcut for search">
+        <Field label={t('settings.historyPalette.label')} hint={t('settings.historyPalette.hint')}>
           <input
             className="key-input"
             value={s.hotkeys.history_palette.key}
@@ -323,116 +348,136 @@ export default function SettingsView({
         </Field>
         {!IS_MAC && (
           <Toggle
-            label="Suppress Copilot launch"
-            hint="When the Copilot key is bound (or this is on), the default Copilot app never opens"
+            label={t('settings.suppressCopilot.label')}
+            hint={t('settings.suppressCopilot.hint')}
             value={s.hotkeys.suppress_copilot}
             onChange={(v) => set((d) => (d.hotkeys.suppress_copilot = v))}
           />
         )}
         {perms && !perms.accessibility && IS_MAC && (
           <div className="callout warn">
-            Accessibility permission is missing — special keys and paste-at-cursor won't work. If you
-            already granted it and this warning stays, the entry went stale after a rebuild: use Repair.{' '}
-            <button onClick={() => api.requestAccessibility()}>Grant</button>
-            <button onClick={() => api.repairAccessibility()}>Repair permission</button>
-            <button onClick={() => api.openPermissionSettings('accessibility')}>Open System Settings</button>
+            {t('settings.accessibilityMissing')}{' '}
+            <button onClick={() => api.requestAccessibility()}>{t('common.grant')}</button>
+            <button onClick={() => api.repairAccessibility()}>{t('settings.repairPermission')}</button>
+            <button onClick={() => api.openPermissionSettings('accessibility')}>
+              {t('common.openSystemSettings')}
+            </button>
           </div>
         )}
       </Section>
 
-      <Section title="Language">
-        <Field label="Spoken language">
-          <select value={s.language.language} onChange={(e) => set((d) => (d.language.language = e.target.value))}>
-            {LANGUAGES.map(([code, name]) => (
-              <option key={code} value={code}>
-                {name}
+      <Section title={t('settings.section.language')}>
+        <Field label={t('settings.uiLanguage.label')} hint={t('settings.uiLanguage.hint')}>
+          <select
+            value={s.ui_language || getLang()}
+            onChange={(e) => {
+              const code = e.target.value as Lang;
+              // Applied IMMEDIATELY as well as saved, so the panel the user is
+              // looking at changes under them and they can see they picked the
+              // right one. Waiting for a reload would make it feel broken.
+              setLang(code);
+              set((d) => (d.ui_language = code));
+            }}
+          >
+            {UI_LANGUAGES.map((l) => (
+              <option key={l.code} value={l.code}>
+                {l.label}
               </option>
             ))}
           </select>
         </Field>
-        <Field label="Locale spelling" hint="Affects spelling of the output (colour vs color)">
+        <Field label={t('settings.spokenLanguage.label')}>
+          <select value={s.language.language} onChange={(e) => set((d) => (d.language.language = e.target.value))}>
+            {LANGUAGES.map(([code, labelKey]) => (
+              <option key={code} value={code}>
+                {t(labelKey)}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label={t('settings.localeSpelling.label')} hint={t('settings.localeSpelling.hint')}>
           <select value={s.language.locale} onChange={(e) => set((d) => (d.language.locale = e.target.value))}>
-            <option value="">No preference</option>
-            <option value="en-AU">English (Australia)</option>
-            <option value="en-GB">English (UK)</option>
-            <option value="en-US">English (US)</option>
+            <option value="">{t('settings.locale.none')}</option>
+            <option value="en-AU">{t('settings.locale.enAU')}</option>
+            <option value="en-GB">{t('settings.locale.enGB')}</option>
+            <option value="en-US">{t('settings.locale.enUS')}</option>
           </select>
         </Field>
         <Toggle
-          label="Apply locale spelling"
-          hint="Convert US spellings in the transcript to your locale"
+          label={t('settings.applyLocaleSpelling.label')}
+          hint={t('settings.applyLocaleSpelling.hint')}
           value={s.cleanup.locale_spelling}
           onChange={(v) => set((d) => (d.cleanup.locale_spelling = v))}
         />
         <Toggle
-          label="Translate to English"
-          hint="Speak any language, paste English"
+          label={t('settings.translate.label')}
+          hint={t('settings.translate.hint')}
           value={s.language.translate_to_english}
           onChange={(v) => set((d) => (d.language.translate_to_english = v))}
         />
       </Section>
 
-      <Section title="Cleanup">
-        <Toggle label="Smart cleanup" hint="Master switch for the deterministic cleanup tier" value={s.cleanup.enabled} onChange={(v) => set((d) => (d.cleanup.enabled = v))} />
-        <Toggle label="Remove filler words" hint="um, uh, er…" value={s.cleanup.remove_fillers} onChange={(v) => set((d) => (d.cleanup.remove_fillers = v))} />
-        <Toggle label="Remove hedges" hint="you know, sort of, I mean (more aggressive)" value={s.cleanup.remove_hedges} onChange={(v) => set((d) => (d.cleanup.remove_hedges = v))} />
+      <Section title={t('settings.section.cleanup')}>
+        <Toggle label={t('settings.smartCleanup.label')} hint={t('settings.smartCleanup.hint')} value={s.cleanup.enabled} onChange={(v) => set((d) => (d.cleanup.enabled = v))} />
+        <Toggle label={t('settings.removeFillers.label')} hint={t('settings.removeFillers.hint')} value={s.cleanup.remove_fillers} onChange={(v) => set((d) => (d.cleanup.remove_fillers = v))} />
+        <Toggle label={t('settings.removeHedges.label')} hint={t('settings.removeHedges.hint')} value={s.cleanup.remove_hedges} onChange={(v) => set((d) => (d.cleanup.remove_hedges = v))} />
         <Toggle
-          label="Trim self-corrections"
-          hint="“Thursday, no actually Wednesday” → “Wednesday”. Trimmed spans stay reviewable in History"
+          label={t('settings.trimSelfCorrections.label')}
+          hint={t('settings.trimSelfCorrections.hint')}
           value={s.cleanup.trim_self_corrections}
           onChange={(v) => set((d) => (d.cleanup.trim_self_corrections = v))}
         />
-        <Toggle label="Dictated punctuation" hint="“comma”, “new line”, “question mark”… (“literally comma” escapes)" value={s.cleanup.dictated_punctuation} onChange={(v) => set((d) => (d.cleanup.dictated_punctuation = v))} />
-        <Toggle label="Capitalise sentences" value={s.cleanup.capitalise_sentences} onChange={(v) => set((d) => (d.cleanup.capitalise_sentences = v))} />
-        <Toggle label="End with punctuation" value={s.cleanup.ensure_terminal_punctuation} onChange={(v) => set((d) => (d.cleanup.ensure_terminal_punctuation = v))} />
-        <Toggle label="Paragraph on long pause" value={s.cleanup.paragraph_on_long_pause} onChange={(v) => set((d) => (d.cleanup.paragraph_on_long_pause = v))} />
+        <Toggle label={t('settings.dictatedPunctuation.label')} hint={t('settings.dictatedPunctuation.hint')} value={s.cleanup.dictated_punctuation} onChange={(v) => set((d) => (d.cleanup.dictated_punctuation = v))} />
+        <Toggle label={t('settings.capitalise.label')} value={s.cleanup.capitalise_sentences} onChange={(v) => set((d) => (d.cleanup.capitalise_sentences = v))} />
+        <Toggle label={t('settings.terminalPunctuation.label')} value={s.cleanup.ensure_terminal_punctuation} onChange={(v) => set((d) => (d.cleanup.ensure_terminal_punctuation = v))} />
+        <Toggle label={t('settings.paragraphPause.label')} value={s.cleanup.paragraph_on_long_pause} onChange={(v) => set((d) => (d.cleanup.paragraph_on_long_pause = v))} />
       </Section>
 
-      <Section title="Dictionary">
-        <Toggle label="Enable dictionary" value={s.dictionary.enabled} onChange={(v) => set((d) => (d.dictionary.enabled = v))} />
-        <Toggle label="Bias recognition" hint="Feed your terms to the engine as a glossary" value={s.dictionary.bias_recognition} onChange={(v) => set((d) => (d.dictionary.bias_recognition = v))} />
-        <Toggle label="Fix close misspellings" value={s.dictionary.fuzzy_correct} onChange={(v) => set((d) => (d.dictionary.fuzzy_correct = v))} />
-        <Toggle label="Learn from my edits" hint="Single-word edits in History become correction pairs" value={s.dictionary.auto_learn} onChange={(v) => set((d) => (d.dictionary.auto_learn = v))} />
+      <Section title={t('settings.section.dictionary')}>
+        <Toggle label={t('settings.dictionary.enable')} value={s.dictionary.enabled} onChange={(v) => set((d) => (d.dictionary.enabled = v))} />
+        <Toggle label={t('settings.dictionary.bias.label')} hint={t('settings.dictionary.bias.hint')} value={s.dictionary.bias_recognition} onChange={(v) => set((d) => (d.dictionary.bias_recognition = v))} />
+        <Toggle label={t('settings.dictionary.fuzzy.label')} value={s.dictionary.fuzzy_correct} onChange={(v) => set((d) => (d.dictionary.fuzzy_correct = v))} />
+        <Toggle label={t('settings.dictionary.autoLearn.label')} hint={t('settings.dictionary.autoLearn.hint')} value={s.dictionary.auto_learn} onChange={(v) => set((d) => (d.dictionary.auto_learn = v))} />
       </Section>
 
-      <Section title="Output">
-        <Toggle label="Insert at cursor" hint="Types the result into the focused app" value={s.paste.inject} onChange={(v) => set((d) => (d.paste.inject = v))} />
-        <Toggle label="Copy to clipboard" value={s.paste.copy_to_clipboard} onChange={(v) => set((d) => (d.paste.copy_to_clipboard = v))} />
-        <Toggle label="Restore previous clipboard" hint="After paste-injection, put your old clipboard back" value={s.paste.restore_clipboard} onChange={(v) => set((d) => (d.paste.restore_clipboard = v))} />
-        <Field label="Restore delay" hint="Slow apps (Office, remote desktop) read the clipboard late">
+      <Section title={t('settings.section.output')}>
+        <Toggle label={t('settings.insertAtCursor.label')} hint={t('settings.insertAtCursor.hint')} value={s.paste.inject} onChange={(v) => set((d) => (d.paste.inject = v))} />
+        <Toggle label={t('settings.copyToClipboard.label')} value={s.paste.copy_to_clipboard} onChange={(v) => set((d) => (d.paste.copy_to_clipboard = v))} />
+        <Toggle label={t('settings.restoreClipboard.label')} hint={t('settings.restoreClipboard.hint')} value={s.paste.restore_clipboard} onChange={(v) => set((d) => (d.paste.restore_clipboard = v))} />
+        <Field label={t('settings.restoreDelay.label')} hint={t('settings.restoreDelay.hint')}>
           <NumberInput value={s.paste.restore_delay_ms} min={200} max={2000} step={100} suffix="ms" onChange={(v) => set((d) => (d.paste.restore_delay_ms = v))} />
         </Field>
         {IS_MAC && (
-          <Toggle label="Prefer direct insertion" hint="Try Accessibility text insertion before clipboard-paste" value={s.paste.prefer_ax_insert} onChange={(v) => set((d) => (d.paste.prefer_ax_insert = v))} />
+          <Toggle label={t('settings.preferAxInsert.label')} hint={t('settings.preferAxInsert.hint')} value={s.paste.prefer_ax_insert} onChange={(v) => set((d) => (d.paste.prefer_ax_insert = v))} />
         )}
         <Toggle
-          label="Press Enter after inserting"
-          hint="Sends the message right after pasting, handy for chat apps. Never fires on secure fields."
+          label={t('settings.pressEnter.label')}
+          hint={t('settings.pressEnter.hint')}
           value={s.paste.press_enter}
           onChange={(v) => set((d) => (d.paste.press_enter = v))}
         />
       </Section>
 
-      <Section title="Appearance">
-        <Field label="Theme">
+      <Section title={t('settings.section.appearance')}>
+        <Field label={t('settings.theme.label')}>
           <div className="seg">
             {(['system', 'light', 'dark'] as const).map((m) => (
               <button key={m} className={s.appearance.theme_mode === m ? 'active' : ''} onClick={() => set((d) => (d.appearance.theme_mode = m))}>
-                {m[0].toUpperCase() + m.slice(1)}
+                {t(`settings.theme.${m}`)}
               </button>
             ))}
           </div>
         </Field>
-        <Field label="Palette" hint="Pastel tints itself from your accent colour, so try it with the custom wheel">
+        <Field label={t('settings.palette.label')} hint={t('settings.palette.hint')}>
           <div className="seg">
-            {['paper', 'pastel', 'bold', 'retro'].map((p) => (
+            {(['paper', 'pastel', 'bold', 'retro'] as const).map((p) => (
               <button key={p} className={s.appearance.palette === p ? 'active' : ''} onClick={() => set((d) => (d.appearance.palette = p))}>
-                {p[0].toUpperCase() + p.slice(1)}
+                {t(`settings.palette.${p}`)}
               </button>
             ))}
           </div>
         </Field>
-        <Field label="Accent">
+        <Field label={t('settings.accent.label')}>
           <div className="accent-row">
             {ACCENTS.map((c) => (
               <button
@@ -442,7 +487,7 @@ export default function SettingsView({
                 onClick={() => set((d) => (d.appearance.accent = c))}
               />
             ))}
-            <label className="accent-custom" title="Custom colour">
+            <label className="accent-custom" title={t('settings.accent.custom')}>
               <input
                 type="color"
                 value={s.appearance.accent}
@@ -451,32 +496,32 @@ export default function SettingsView({
             </label>
           </div>
         </Field>
-        <Field label="App icon" hint="Applies immediately in-app; the Finder icon updates after a restart">
+        <Field label={t('settings.appIcon.label')} hint={t('settings.appIcon.hint')}>
           <div className="icon-picker">
-            {APP_ICONS.map(([id, src, name]) => (
+            {APP_ICONS.map(([id, src, labelKey]) => (
               <button
                 key={id}
                 className={`icon-choice ${s.appearance.app_icon === id ? 'active' : ''}`}
-                title={name}
+                title={t(labelKey)}
                 onClick={() => {
                   set((d) => (d.appearance.app_icon = id));
                   api.setAppIcon(id).then(setNeedsRestart).catch(() => {});
                 }}
               >
-                <img src={src} alt={name} draggable={false} />
+                <img src={src} alt={t(labelKey)} draggable={false} />
               </button>
             ))}
           </div>
         </Field>
         {needsRestart && (
           <div className="callout warn">
-            Icon updated. Restart to refresh the Finder and Dock icon.{' '}
-            <button onClick={() => api.restartApp()}>Restart Parle</button>
+            {t('settings.iconRestart')}{' '}
+            <button onClick={() => api.restartApp()}>{t('settings.restartParle')}</button>
           </div>
         )}
         <Field
-          label={IS_MAC ? 'Menu bar icon' : 'Tray icon'}
-          hint={IS_MAC ? 'Monochrome follows the menu bar; the badge keeps Parle’s colour' : 'Auto picks the outline that reads against your taskbar'}
+          label={IS_MAC ? t('settings.trayIcon.labelMac') : t('settings.trayIcon.labelWin')}
+          hint={IS_MAC ? t('settings.trayIcon.hintMac') : t('settings.trayIcon.hintWin')}
         >
           <span className="tray-preview">
             {trayPreview.map(([src, bg]) => (
@@ -486,42 +531,58 @@ export default function SettingsView({
             ))}
           </span>
           <select value={trayStyle} onChange={(e) => set((d) => (d.appearance.tray_style = e.target.value))}>
-            {TRAY_STYLES.map(([value, label]) => (
+            {TRAY_STYLES.map(([value, labelKey]) => (
               <option key={value} value={value}>
-                {label}
+                {t(labelKey)}
               </option>
             ))}
           </select>
         </Field>
         <Field
-          label="Overlay style"
+          label={t('settings.overlayStyle.label')}
           hint={
             s.overlay.style === 'hidden'
-              ? 'No overlay at all. While Parle is listening, the menu bar icon shows a dot in its corner, and that is the only indication.'
-              : 'Cassette pairs beautifully with the Retro palette'
+              ? t('settings.overlayStyle.hintHidden')
+              : t('settings.overlayStyle.hint')
           }
         >
           <div className="seg seg-icons">
-            {OVERLAY_STYLES.map(([st, label, icon]) => (
+            {OVERLAY_STYLES.map(([st, labelKey, icon]) => (
               <button key={st} className={s.overlay.style === st ? 'active' : ''} onClick={() => set((d) => (d.overlay.style = st))}>
                 {icon}
-                {label}
+                {t(labelKey)}
               </button>
             ))}
           </div>
         </Field>
-        <Toggle label="Show live transcript in overlay" value={s.overlay.show_partial_text} onChange={(v) => set((d) => (d.overlay.show_partial_text = v))} />
-        <Toggle label="Reduce motion" value={s.appearance.reduce_motion} onChange={(v) => set((d) => (d.appearance.reduce_motion = v))} />
+        <Field
+          label={t('settings.waveformSensitivity.label')}
+          hint={t('settings.waveformSensitivity.hint')}
+        >
+          <div className="row-inline">
+            <input
+              type="range"
+              min={0.5}
+              max={2}
+              step={0.1}
+              value={s.overlay.waveform_sensitivity}
+              onChange={(e) => set((d) => (d.overlay.waveform_sensitivity = Number(e.target.value)))}
+            />
+            <span className="mono">{s.overlay.waveform_sensitivity.toFixed(1)}x</span>
+          </div>
+        </Field>
+        <Toggle label={t('settings.showPartial.label')} value={s.overlay.show_partial_text} onChange={(v) => set((d) => (d.overlay.show_partial_text = v))} />
+        <Toggle label={t('settings.reduceMotion.label')} value={s.appearance.reduce_motion} onChange={(v) => set((d) => (d.appearance.reduce_motion = v))} />
       </Section>
 
-      <Section title="History & privacy">
-        <Toggle label="Capture clipboard" hint="Everything you copy, searchable. Password managers are excluded" value={s.history.clipboard_capture} onChange={(v) => set((d) => (d.history.clipboard_capture = v))} />
+      <Section title={t('settings.section.historyPrivacy')}>
+        <Toggle label={t('settings.clipboardCapture.label')} hint={t('settings.clipboardCapture.hint')} value={s.history.clipboard_capture} onChange={(v) => set((d) => (d.history.clipboard_capture = v))} />
         {/* Narrowing this deletes rows outright and writes NO tombstone, so the
             peer never re-offers them: they are gone from this machine for good
             even while the other one still has them. Widening is safe and is
             repaired automatically (set_retention_days clears the receipts), so
             only the narrowing direction is confirmed. */}
-        <Field label="Keep items for">
+        <Field label={t('settings.retention.label')}>
           <select
             value={s.history.retention_days}
             onChange={(e) => {
@@ -529,32 +590,27 @@ export default function SettingsView({
               const current = s.history.retention_days;
               // 0 is "forever", so it is the WIDEST window, not the narrowest.
               const narrowing = next !== 0 && (current === 0 || next < current);
-              if (
-                narrowing &&
-                !window.confirm(
-                  'Items older than that will be deleted from this device and cannot be brought back, even from a paired device. Continue?'
-                )
-              ) {
+              if (narrowing && !window.confirm(t('settings.retention.confirmNarrow'))) {
                 return;
               }
               set((d) => (d.history.retention_days = next));
             }}
           >
-            <option value={0}>Forever</option>
-            <option value={90}>90 days</option>
-            <option value={30}>30 days</option>
-            <option value={7}>7 days</option>
-            <option value={1}>1 day</option>
+            <option value={0}>{t('settings.retention.forever')}</option>
+            <option value={90}>{t('settings.retention.d90')}</option>
+            <option value={30}>{t('settings.retention.d30')}</option>
+            <option value={7}>{t('settings.retention.d7')}</option>
+            <option value={1}>{t('settings.retention.d1')}</option>
           </select>
         </Field>
-        <Field label="Excluded apps" hint="One per line: bundle id on Mac, exe name on Windows. This list is per device, so add the entry on each machine. From the moment you add an entry, Parle stops sending rows from that app to your other devices. Anything already synced stays on them.">
+        <Field label={t('settings.excludedApps.label')} hint={t('settings.excludedApps.hint')}>
           <textarea
             className="excluded-apps"
             value={s.history.excluded_apps.join('\n')}
             onChange={(e) => set((d) => (d.history.excluded_apps = e.target.value.split('\n').map((x) => x.trim()).filter(Boolean)))}
           />
         </Field>
-        <Field label="Danger zone">
+        <Field label={t('settings.dangerZone.label')}>
           {confirmClear === null ? (
             <button
               className="btn danger"
@@ -565,21 +621,13 @@ export default function SettingsView({
                   .catch(() => setConfirmClear([]));
               }}
             >
-              Clear all unpinned history
+              {t('settings.clearHistory.button')}
             </button>
           ) : (
             <div className="callout warn">
-              {confirmClear.length > 0 ? (
-                <>
-                  This deletes every unpinned item on this device and on{' '}
-                  {confirmClear.join(', ')}. Pinned items stay. It cannot be undone.
-                </>
-              ) : (
-                <>
-                  This deletes every unpinned item on this device. Pinned items stay. It
-                  cannot be undone.
-                </>
-              )}{' '}
+              {confirmClear.length > 0
+                ? t('settings.clearHistory.confirmWithDevices', { devices: confirmClear.join(', ') })
+                : t('settings.clearHistory.confirm')}{' '}
               <button
                 className="btn danger"
                 onClick={() => {
@@ -587,9 +635,9 @@ export default function SettingsView({
                   api.clearHistory().then(() => window.location.reload());
                 }}
               >
-                Clear it
+                {t('settings.clearHistory.clearIt')}
               </button>{' '}
-              <button onClick={() => setConfirmClear(null)}>Keep it</button>
+              <button onClick={() => setConfirmClear(null)}>{t('common.keepIt')}</button>
             </div>
           )}
         </Field>
@@ -597,10 +645,10 @@ export default function SettingsView({
 
       <SyncSection sync={s.sync} />
 
-      <Section title="Audio">
-        <Field label="Microphone">
+      <Section title={t('settings.section.audio')}>
+        <Field label={t('settings.microphone.label')}>
           <select value={s.audio.input_device} onChange={(e) => set((d) => (d.audio.input_device = e.target.value))}>
-            <option value="">System default</option>
+            <option value="">{t('settings.microphone.systemDefault')}</option>
             {devices.map((d) => (
               <option key={d} value={d}>
                 {d}
@@ -608,20 +656,22 @@ export default function SettingsView({
             ))}
           </select>
         </Field>
-        <Field label="Ignore recordings shorter than">
+        <Field label={t('settings.minDuration.label')}>
           <NumberInput value={s.audio.min_duration_ms} min={100} max={2000} step={100} suffix="ms" onChange={(v) => set((d) => (d.audio.min_duration_ms = v))} />
         </Field>
         {perms && perms.microphone === 'denied' && (
           <div className="callout warn">
-            Microphone access is denied.{' '}
-            <button onClick={() => api.openPermissionSettings('microphone')}>Open System Settings</button>
+            {t('settings.microphoneDenied')}{' '}
+            <button onClick={() => api.openPermissionSettings('microphone')}>
+              {t('common.openSystemSettings')}
+            </button>
           </div>
         )}
       </Section>
 
-      <Section title="General">
+      <Section title={t('settings.section.general')}>
         <Toggle
-          label="Launch at login"
+          label={t('settings.launchAtLogin.label')}
           value={s.launch_at_login}
           onChange={async (v) => {
             try {
@@ -633,11 +683,12 @@ export default function SettingsView({
             set((d) => (d.launch_at_login = v));
           }}
         />
-        <Toggle label="Pre-warm model at startup" hint="Uses memory while idle, makes the first dictation instant" value={s.models.prewarm} onChange={(v) => set((d) => (d.models.prewarm = v))} />
+        <Toggle label={t('settings.prewarm.label')} hint={t('settings.prewarm.hint')} value={s.models.prewarm} onChange={(v) => set((d) => (d.models.prewarm = v))} />
       </Section>
 
       <footer className="settings-footer">
-        Parle · on-device dictation · <span className="faint">nothing ever leaves this machine</span>
+        Parle · {t('settings.footer.tagline')} ·{' '}
+        <span className="faint">{t('settings.footer.note')}</span>
       </footer>
     </div>
   );
@@ -728,6 +779,7 @@ function NumberInput({
 // still be landing), so failures surface inline instead of blanking the panel.
 
 function SyncSection({ sync }: { sync: Settings['sync'] }) {
+  const t = useT();
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -813,8 +865,8 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
   useEffect(() => {
     if (!expiresAt) return;
     setNow(Date.now());
-    const t = window.setInterval(() => setNow(Date.now()), 500);
-    return () => window.clearInterval(t);
+    const id = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(id);
   }, [expiresAt]);
 
   async function setEnabled(v: boolean) {
@@ -848,9 +900,7 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
       const st = await api.syncStatus();
       setStatus(st);
       if (st.device_name !== next) {
-        setActionError(
-          `Saved as "${st.device_name}". A device name cannot contain "=" or hidden characters, and is trimmed to fit.`
-        );
+        setActionError(t('sync.nameSanitised', { name: st.device_name }));
       }
     } catch (e) {
       setActionError(errText(e));
@@ -927,9 +977,9 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
 
   if (loadError) {
     return (
-      <Section title="Sync">
+      <Section title={t('sync.section')}>
         <div className="sync-block">
-          <div className="callout error">Sync isn’t available right now. {loadError}</div>
+          <div className="callout error">{t('sync.unavailable', { error: loadError })}</div>
         </div>
       </Section>
     );
@@ -937,9 +987,9 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
 
   if (!status) {
     return (
-      <Section title="Sync">
+      <Section title={t('sync.section')}>
         <div className="sync-block">
-          <span className="sync-empty">Checking sync…</span>
+          <span className="sync-empty">{t('sync.checking')}</span>
         </div>
       </Section>
     );
@@ -949,10 +999,10 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
   const selected = unpaired.find((p) => p.id === peerId) ?? null;
 
   return (
-    <Section title="Sync">
+    <Section title={t('sync.section')}>
       <Toggle
-        label="Sync with my other devices"
-        hint="Off unless you turn it on. Your Mac and PC talk straight to each other over your local network, end-to-end encrypted, with no account and nothing uploaded anywhere. While it is on, Parle announces this device's name to other machines on the same network so they can find it."
+        label={t('sync.enable.label')}
+        hint={t('sync.enable.hint')}
         value={status.enabled}
         onChange={setEnabled}
       />
@@ -967,7 +1017,7 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
       {actionError && (
         <div className="sync-block">
           <div className="callout error">
-            {actionError} <button onClick={() => setActionError(null)}>Dismiss</button>
+            {actionError} <button onClick={() => setActionError(null)}>{t('common.dismiss')}</button>
           </div>
         </div>
       )}
@@ -977,7 +1027,7 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
           <div className="callout warn">
             {status.error}{' '}
             <button onClick={() => setEnabled(true)} disabled={busy}>
-              Try again
+              {t('sync.tryAgain')}
             </button>
           </div>
         </div>
@@ -985,11 +1035,11 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
 
       {status.enabled && (
         <>
-          <Field label="This device" hint="The name the other machine sees while pairing.">
+          <Field label={t('sync.thisDevice.label')} hint={t('sync.thisDevice.hint')}>
             <input
               className="sync-name-input"
               value={nameDraft ?? status.device_name}
-              placeholder="Name this device"
+              placeholder={t('sync.thisDevice.placeholder')}
               onChange={(e) => setNameDraft(e.target.value)}
               onBlur={() => commitName(status.device_name)}
               onKeyDown={(e) => {
@@ -998,17 +1048,17 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
               }}
             />
           </Field>
-          <Field label="Device ID" hint="This install’s identity. It never leaves your network.">
+          <Field label={t('sync.deviceId.label')} hint={t('sync.deviceId.hint')}>
             <code className="sync-device-id">{status.device_id}</code>
           </Field>
 
           <div className="sync-block">
             <div className="field-label">
-              <span>Paired devices</span>
-              <small>Only these machines can see your history. Pairing is mutual.</small>
+              <span>{t('sync.paired.label')}</span>
+              <small>{t('sync.paired.hint')}</small>
             </div>
             {status.paired.length === 0 ? (
-              <span className="sync-empty">No devices paired yet. Pair one below to start syncing.</span>
+              <span className="sync-empty">{t('sync.paired.none')}</span>
             ) : (
               <div className="sync-list">
                 {status.paired.map((d) => (
@@ -1035,9 +1085,9 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
                       </span>
                       <span className="sync-device-meta">
                         {d.last_sync_ok
-                          ? `Synced ${agoLabel(d.last_sync_ok)}`
+                          ? t('sync.syncedAgo', { when: agoLabel(d.last_sync_ok) })
                           : d.online
-                            ? 'Visible on the network, but nothing has synced yet'
+                            ? t('sync.visibleNotSynced')
                             : lastSeenLabel(d.last_seen)}
                       </span>
                     </span>
@@ -1049,20 +1099,17 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
                             device stays there. Someone unpairing a laptop they
                             have just handed back needs to know that is not a
                             wipe. */}
-                        <span>
-                          Unpair {d.name}? It stops syncing and needs a new code to come back. Anything
-                          already on {d.name} stays there.
-                        </span>
+                        <span>{t('sync.unpairConfirm', { name: d.name })}</span>
                         <button className="btn ghost" onClick={() => setConfirmUnpair(null)}>
-                          Keep it
+                          {t('common.keepIt')}
                         </button>
                         <button className="btn danger" onClick={() => unpair(d.id)}>
-                          Unpair
+                          {t('sync.unpair')}
                         </button>
                       </span>
                     ) : (
                       <button className="btn ghost" onClick={() => setConfirmUnpair(d.id)}>
-                        Unpair
+                        {t('sync.unpair')}
                       </button>
                     )}
                   </div>
@@ -1073,13 +1120,13 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
 
           <div className="sync-block">
             <div className="field-label">
-              <span>Pair a new device</span>
-              <small>Either machine can start. Read the six digits aloud or type them across.</small>
+              <span>{t('sync.pairNew.label')}</span>
+              <small>{t('sync.pairNew.hint')}</small>
             </div>
             <div className="seg">
               {(['show', 'enter'] as const).map((m) => (
                 <button key={m} className={direction === m ? 'active' : ''} onClick={() => setDirection(m)}>
-                  {m === 'show' ? 'Show a code' : 'Enter a code'}
+                  {m === 'show' ? t('sync.direction.show') : t('sync.direction.enter')}
                 </button>
               ))}
             </div>
@@ -1096,26 +1143,24 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
                   </div>
                   <div className="sync-countdown">
                     {remaining > 0
-                      ? `Type it on the other device. Expires in ${fmtCountdown(remaining)}`
-                      : 'This code has expired.'}
+                      ? t('sync.code.typeOnOther', { time: fmtCountdown(remaining) })
+                      : t('sync.code.expired')}
                   </div>
                   {remaining > 0 ? (
                     <button className="btn" onClick={cancelPairing}>
-                      Cancel
+                      {t('common.cancel')}
                     </button>
                   ) : (
                     <button className="btn primary" onClick={startPairing}>
-                      Show a new code
+                      {t('sync.code.showNew')}
                     </button>
                   )}
                 </div>
               ) : (
                 <div className="sync-showing">
-                  <span className="sync-empty">
-                    Parle shows six digits here; type them into the other machine to confirm it’s really yours.
-                  </span>
+                  <span className="sync-empty">{t('sync.code.explain')}</span>
                   <button className="btn primary" onClick={startPairing}>
-                    Show a code
+                    {t('sync.direction.show')}
                   </button>
                 </div>
               )
@@ -1124,36 +1169,28 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
                 {unpaired.length === 0 ? (
                   <span className="sync-empty">
                     {!status.scanning ? (
-                      <>
-                        Not searching for devices right now. Open Parle on the other machine, turn Sync on
-                        there too and make sure both are on the same network.
-                      </>
+                      t('sync.peers.notSearching')
                     ) : searchedAWhile ? (
                       <>
-                        Still nothing after a while. Check that Parle is open on the other machine with Sync
-                        turned on, and that both are on the same network.{' '}
+                        {t('sync.peers.stillNothing')}{' '}
                         {IS_MAC ? (
                           <>
-                            If that all looks right, macOS may be blocking Parle from seeing the local
-                            network, which looks exactly like this.{' '}
+                            {t('sync.peers.macBlocked')}{' '}
                             <button onClick={() => api.openPermissionSettings('local-network')}>
-                              Open Local Network settings
+                              {t('sync.peers.openLocalNetwork')}
                             </button>
                           </>
                         ) : (
                           <>
-                            If that all looks right, Windows Firewall may be blocking Parle.{' '}
+                            {t('sync.peers.winBlocked')}{' '}
                             <button onClick={() => api.openPermissionSettings('local-network')}>
-                              Open firewall settings
+                              {t('sync.peers.openFirewall')}
                             </button>
                           </>
                         )}
                       </>
                     ) : (
-                      <>
-                        Looking for devices on this network… Open Parle on the other machine and turn Sync on
-                        there too.
-                      </>
+                      t('sync.peers.looking')
                     )}
                   </span>
                 ) : (
@@ -1201,7 +1238,7 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
                     disabled={!selected || code.length !== 6 || pairBusy}
                     onClick={() => selected && pair(selected.id)}
                   >
-                    {pairBusy ? 'Pairing…' : 'Pair'}
+                    {pairBusy ? t('sync.pairing') : t('sync.pair')}
                   </button>
                 </div>
                 {pairError && <div className="callout error">{pairError}</div>}
@@ -1214,21 +1251,19 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
               clears every receipt so the peers re-offer theirs. The hint says so
               only when there is actually a paired device to re-send to. */}
           <Toggle
-            label="Sync dictations"
+            label={t('sync.dictations.label')}
             hint={
               status.paired.length > 0
-                ? 'Everything you dictate shows up in History on both machines. Turning this back on re-sends your history to your paired devices, which can take a moment.'
-                : 'Everything you dictate shows up in History on both machines'
+                ? t('sync.dictations.hintPaired')
+                : t('sync.dictations.hint')
             }
             value={kinds.dictations}
             onChange={(v) => saveKinds({ ...kinds, dictations: v })}
           />
           <Toggle
-            label="Sync clipboard"
+            label={t('sync.clipboard.label')}
             hint={
-              status.paired.length > 0
-                ? 'Copy on one machine, paste on the other. Turning this back on re-sends your history to your paired devices, which can take a moment.'
-                : 'Copy on one machine, paste on the other'
+              status.paired.length > 0 ? t('sync.clipboard.hintPaired') : t('sync.clipboard.hint')
             }
             value={kinds.clipboard}
             onChange={(v) => saveKinds({ ...kinds, clipboard: v })}
@@ -1245,7 +1280,7 @@ function errText(e: unknown): string {
   if (typeof e === 'string') return e;
   if (e instanceof Error) return e.message;
   if (e && typeof e === 'object' && 'message' in e) return String((e as { message: unknown }).message);
-  return 'Something went wrong.';
+  return t('sync.genericError');
 }
 
 // Timestamps may arrive as epoch seconds or milliseconds; accept both.
@@ -1255,7 +1290,7 @@ function toMillis(t: number): number {
 
 function fmtCountdown(secs: number): string {
   const m = Math.floor(secs / 60);
-  return m > 0 ? `${m}:${String(secs % 60).padStart(2, '0')}` : `${secs}s`;
+  return m > 0 ? `${m}:${String(secs % 60).padStart(2, '0')}` : t('time.secondsShort', { n: secs });
 }
 
 /// "just now", "5m ago", "3h ago", "12 Mar". The bare phrase, so callers can
@@ -1263,38 +1298,38 @@ function fmtCountdown(secs: number): string {
 function agoLabel(at: number): string {
   const ms = toMillis(at);
   const s = Math.floor((Date.now() - ms) / 1000);
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 60) return t('time.justNow');
+  if (s < 3600) return t('time.minutesAgo', { n: Math.floor(s / 60) });
+  if (s < 86400) return t('time.hoursAgo', { n: Math.floor(s / 3600) });
   return new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }
 
 function lastSeenLabel(at: number | null): string {
-  if (at == null) return 'Never connected';
-  return `Last seen ${agoLabel(at)}`;
+  if (at == null) return t('sync.neverConnected');
+  return t('sync.lastSeen', { when: agoLabel(at) });
 }
 
 function keyLabel(k: string): string {
   if (k.includes('+')) return k.split('+').map(chordPartLabel).join(' + ');
   const map: Record<string, string> = {
-    Fn: '🌐 Fn / Globe',
-    RightCommand: 'Right ⌘',
-    LeftCommand: 'Left ⌘',
-    RightOption: 'Right ⌥',
-    LeftOption: 'Left ⌥',
-    RightControl: 'Right ⌃',
-    LeftControl: 'Left ⌃',
-    CopilotKey: 'Copilot key',
-    RightCtrl: 'Right Ctrl',
-    LeftCtrl: 'Left Ctrl',
-    RightShift: 'Right Shift',
-    LeftShift: 'Left Shift',
-    LeftAlt: 'Left Alt',
-    RightAlt: 'Right Alt',
-    RightWin: 'Right Win',
-    LeftWin: 'Left Win',
+    Fn: 'keys.fn',
+    RightCommand: 'keys.rightCommand',
+    LeftCommand: 'keys.leftCommand',
+    RightOption: 'keys.rightOption',
+    LeftOption: 'keys.leftOption',
+    RightControl: 'keys.rightControl',
+    LeftControl: 'keys.leftControl',
+    CopilotKey: 'keys.copilot',
+    RightCtrl: 'keys.rightCtrl',
+    LeftCtrl: 'keys.leftCtrl',
+    RightShift: 'keys.rightShift',
+    LeftShift: 'keys.leftShift',
+    LeftAlt: 'keys.leftAlt',
+    RightAlt: 'keys.rightAlt',
+    RightWin: 'keys.rightWin',
+    LeftWin: 'keys.leftWin',
   };
-  return map[k] ?? k;
+  return map[k] ? t(map[k]) : k;
 }
 
 function chordPartLabel(part: string): string {
@@ -1325,11 +1360,8 @@ function bindingFromEvent(e: KeyboardEvent): string | null {
 }
 
 function bindingWarning(key: string): string | null {
-  if (key === 'LeftCtrl' || key === 'LeftControl')
-    return 'Left Ctrl drives most keyboard shortcuts, so binding it will fire during normal use.';
-  if (key === 'LeftShift')
-    return 'Left Shift is pressed constantly while typing, so expect false triggers.';
-  if (key === 'RightAlt' || key === 'RightOption')
-    return 'Right Alt is AltGr on many layouts, so it types accented characters. Right Ctrl is safer.';
+  if (key === 'LeftCtrl' || key === 'LeftControl') return t('settings.bindingWarning.leftCtrl');
+  if (key === 'LeftShift') return t('settings.bindingWarning.leftShift');
+  if (key === 'RightAlt' || key === 'RightOption') return t('settings.bindingWarning.rightAlt');
   return null;
 }

@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link2, Mic, Square } from 'lucide-react';
 import { api, onLevel, onPartial, onPipelineEvent } from '../api';
+import { useT } from '../i18n/useT';
 
 const BAR_COUNT = 48;
 
@@ -14,6 +15,7 @@ interface Mark {
 }
 
 export default function ComposeView() {
+  const t = useT();
   const [state, setState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
   const [elapsed, setElapsed] = useState(0);
   const [partial, setPartial] = useState('');
@@ -73,10 +75,10 @@ export default function ComposeView() {
   }, []);
 
   async function insert(text: string) {
-    const t = text.trim();
-    if (!t) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
     try {
-      await api.insertMark(t);
+      await api.insertMark(trimmed);
       setDraft('');
     } catch (e) {
       setError(String(e));
@@ -89,11 +91,8 @@ export default function ComposeView() {
   return (
     <div className="compose">
       <header className="view-head">
-        <h1>Compose</h1>
-        <p>
-          Dictate here and paste links or text mid-sentence — each insert is pinned to the exact moment
-          you added it and spliced into the final text, byte-exact.
-        </p>
+        <h1>{t('compose.title')}</h1>
+        <p>{t('compose.intro')}</p>
       </header>
 
       <div className="compose-stage">
@@ -110,11 +109,15 @@ export default function ComposeView() {
             disabled={state === 'transcribing'}
           >
             {recording ? <Square size={14} /> : <Mic size={14} />}
-            {recording ? 'Stop' : state === 'transcribing' ? 'Transcribing…' : 'Start dictation'}
+            {recording
+              ? t('compose.stop')
+              : state === 'transcribing'
+                ? t('compose.transcribing')
+                : t('compose.start')}
           </button>
           <span className="compose-time">{time}</span>
-          {recording && <span className="pill accent">recording</span>}
-          {state === 'transcribing' && <span className="pill">processing</span>}
+          {recording && <span className="pill accent">{t('compose.recording')}</span>}
+          {state === 'transcribing' && <span className="pill">{t('compose.processing')}</span>}
         </div>
 
         {recording && partial && <div className="compose-partial">{partial}</div>}
@@ -122,7 +125,7 @@ export default function ComposeView() {
         <div className="mark-input">
           <input
             ref={inputRef}
-            placeholder={recording ? 'Paste a link or type, Enter pins it to this moment…' : 'Start dictating to insert links and text'}
+            placeholder={recording ? t('compose.markPlaceholder.recording') : t('compose.markPlaceholder.idle')}
             value={draft}
             disabled={!recording}
             onChange={(e) => setDraft(e.target.value)}
@@ -136,7 +139,7 @@ export default function ComposeView() {
             }}
           />
           <button className="btn" disabled={!recording || !draft.trim()} onClick={() => insert(draft)}>
-            <Link2 size={14} /> Insert
+            <Link2 size={14} /> {t('compose.insert')}
           </button>
         </div>
 
@@ -154,16 +157,16 @@ export default function ComposeView() {
         {error && <div className="callout error">{error}</div>}
         {result !== null && (
           <div className="compose-result">
-            {result || 'No speech detected.'}
+            {result || t('compose.noSpeech')}
           </div>
         )}
         {result && (
           <div className="compose-controls">
             <button className="btn" onClick={() => navigator.clipboard.writeText(result)}>
-              Copy result
+              {t('compose.copyResult')}
             </button>
             <span className="faint" style={{ fontSize: 12 }}>
-              Also inserted at your cursor and saved to History.
+              {t('compose.alsoInserted')}
             </span>
           </div>
         )}

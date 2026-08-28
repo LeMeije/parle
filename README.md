@@ -1,7 +1,7 @@
 # Parle
 
 On-device AI dictation + unified transcription/clipboard history for macOS and
-Windows 11. Hold a key, speak, release — your words appear where your cursor
+Windows 11. Hold a key, speak, release: your words appear where your cursor
 is. **Everything runs locally. No telemetry, no cloud, ever.**
 
 Tauri 2 + Rust core + React UI. whisper.cpp (Metal on macOS, CUDA on Windows)
@@ -9,34 +9,37 @@ behind a fallback ladder that never loses a recording.
 
 ## Feature highlights
 
-- **Hold / toggle / hybrid hotkey** — hold to talk, or a quick tap latches
+- **Hold / toggle / hybrid hotkey**: hold to talk, or a quick tap latches
   recording on (tap again to stop). Fn/Globe on macOS, Right Ctrl or the
   **Copilot key** on Windows (default launch suppressed), left/right modifiers
   discriminated, chords supported.
-- **Non-focus-stealing HUD** — live waveform, elapsed time, streaming partial
+- **Non-focus-stealing HUD**: live waveform, elapsed time, streaming partial
   transcript, click to stop, Esc to cancel. Never takes keyboard focus, so
   paste-at-cursor always works. Retro cassette style included.
-- **Paste + copy + history, simultaneously** — text is inserted at the cursor
+- **Paste + copy + history, simultaneously**: text is inserted at the cursor
   (AX insertion fast path on macOS, clipboard+paste fallback with your previous
   clipboard restored), copied, and saved to history. Nothing is ever lost:
   even a total engine failure saves the audio as a recoverable WAV.
-- **Smart cleanup (deterministic, per-rule toggles)** — fillers, stutters,
+- **Smart cleanup (deterministic, per-rule toggles)**: fillers, stutters,
   self-corrections ("Thursday no actually Wednesday" -> "Wednesday") with
   trimmed spans reviewable and restorable in History, dictated punctuation
   with a "literally" escape, capitalisation, paragraph-on-pause, en-AU/GB/US
   locale spelling.
-- **Custom dictionary** — terms + "heard as" corrections, engine biasing plus
+- **Custom dictionary**: terms + "heard as" corrections, engine biasing plus
   fuzzy post-correction that never inserts words you didn't say, false-match
   warnings, optional auto-learning from your history edits.
-- **Model manager** — download/switch/delete whisper models with speed and
+- **Model manager**: download/switch/delete whisper models with speed and
   accuracy ratings; per-machine auto-recommendation on first launch;
   automatic fallback down the ladder on load failure or OOM.
-- **Clipboard manager** — everything you copy, fuzzy-searchable alongside
+- **Clipboard manager**: everything you copy, fuzzy-searchable alongside
   dictations (Raycast-style palette), pinning, editing, source-app tags.
   Password managers excluded by default; transient/concealed clipboard types
-  respected; injected transcripts are kept out of Windows clipboard history.
-- **Correction surfacing** — low-confidence words flagged per item.
-- **Themes** — Paper / Pastel / Bold / Retro palettes, light/dark/system,
+  respected. An injected transcript is NOT hidden from Win+V: it used to be,
+  and marking every write as excluded also told Windows to discard the row the
+  user had deliberately pressed Copy on. Only content Parle judges secret is
+  excluded now.
+- **Correction surfacing**: low-confidence words flagged per item.
+- **Themes**: Paper / Pastel / Bold / Retro palettes, light/dark/system,
   accent colours, reduced motion; spinning cassette reels while recording if
   you want them.
 
@@ -51,18 +54,22 @@ cargo test --workspace     # 74 tests incl. behavioural contract vectors
 ```
 
 Dev note: sign dev builds with one stable certificate or macOS TCC forgets the
-Accessibility grant on every rebuild — see HUMAN_TASKS.md §2.
+Accessibility grant on every rebuild: see HUMAN_TASKS.md §2.
 
-Internal crate names and the bundle identifier still read `parle`, the
-project's original name; only the product name changed.
+The project was called EchoKey before it was called Parle. Nothing internal
+carries the old name any more: crates, modules, the mDNS service and the bundle
+identifier were all renamed on 28/08/2026. The single deliberate exception is
+`data_dir()` in `parle-core`, which still knows the old folder name because that
+is the directory it migrates users FROM.
 
 ## Build (Windows)
 
-Status: code-complete against researched APIs but **not yet compiled on Windows** —
-the Copilot-key, Win+V-exclusion and injection behaviour above describe the written
-implementation, pending first-build verification.
+Status: built and in use on Windows (see `docs/WINDOWS_HANDOFF.md`). Note that
+`windows.rs` cannot be compiled from the author's Mac: cross-compiling `ring`
+needs a Windows C toolchain, so changes made from macOS are reviewed by reading
+rather than by the compiler, and must be built on Windows before being trusted.
 
-See **docs/WINDOWS_HANDOFF.md** — full toolchain list, verification checklist,
+See **docs/WINDOWS_HANDOFF.md**: full toolchain list, verification checklist,
 and a copy-paste Claude Code pickup prompt.
 
 ## Repo map
@@ -82,11 +89,11 @@ docs                   PRODUCT · ARCHITECTURE · BENCHMARKS · WINDOWS_HANDOFF 
 
 See docs/BENCHMARKS.md. Headline (MacBook Air-class M2, Metal): 10 s of live
 microphone audio transcribed in **382 ms** (base-q5_1, warm); 6.1 s fixture in
-**240 ms**. Idle footprint is the model + tens of MB — no bundled Chromium.
+**240 ms**. Idle footprint is the model + tens of MB: no bundled Chromium.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). Use it, modify it, ship it, commercially or not;
+MIT: see [LICENSE](LICENSE). Use it, modify it, ship it, commercially or not;
 just keep the copyright notice.
 
 Third-party work this builds on, and how each was used, is recorded in

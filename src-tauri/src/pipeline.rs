@@ -523,11 +523,20 @@ impl Pipeline {
                 confidence: s.confidence,
             })
             .collect();
+        // The DETECTED language when the user is on auto, so cleanup works for
+        // whatever they actually spoke rather than for whatever the setting
+        // happens to say.
+        let spoken_lang = if settings.language.language == "auto" {
+            asr.detected_language.clone().unwrap_or_else(|| "en".to_string())
+        } else {
+            settings.language.language.clone()
+        };
         let formatted = formatter::format(
             &raw_text,
             &segments,
             &settings.cleanup,
             &settings.language.locale,
+            &spoken_lang,
         );
 
         // Dictionary post-correction.
@@ -803,7 +812,26 @@ impl Pipeline {
                         if !is_last_piece {
                             piece_cfg.ensure_terminal_punctuation = false;
                         }
-                        let formatted = formatter::format(&raw, &segs, &piece_cfg, &settings.language.locale);
+                        let formatted =
+                            // PER PIECE: a mark-splice can cross languages, and
+                            // each piece is detected on its own, so the filler
+                            // list follows the piece rather than the take.
+                            {
+                                let piece_lang = if settings.language.language == "auto" {
+                                    out.detected_language
+                                        .clone()
+                                        .unwrap_or_else(|| "en".to_string())
+                                } else {
+                                    settings.language.language.clone()
+                                };
+                                formatter::format(
+                                    &raw,
+                                    &segs,
+                                    &piece_cfg,
+                                    &settings.language.locale,
+                                    &piece_lang,
+                                )
+                            };
                         let (text, _) = if settings.dictionary.enabled {
                             dict.apply(&formatted.text, settings.dictionary.fuzzy_correct)
                         } else {

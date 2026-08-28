@@ -65,6 +65,48 @@ fn anchor(hay: &str, needle: &str, what: &str) -> usize {
         .unwrap_or_else(|| panic!("ANCHOR MISSING in {what}: {needle:?}"))
 }
 
+/// The English text behind an i18n key, read out of `src/i18n/en.ts`.
+///
+/// THE i18n MOVE. The React UI now runs on a translation layer: every
+/// user-facing literal these surface tests used to grep for inside a `.tsx`
+/// file lives in `src/i18n/en.ts` under a dot-namespaced key, and the component
+/// holds a `t('key')` call. `en` is the fallback dictionary for every other
+/// language (`src/i18n/index.ts`), so this file is where the sentence a user
+/// actually reads is defined, and it is the honest place to assert on it.
+///
+/// A surface test that follows a string into the dictionary must anchor BOTH
+/// halves: the `t()` call in the component (or the sentence is rendered
+/// nowhere) and the value here (or the sentence has changed underneath it).
+/// This panics rather than returning empty, so a guard still cannot find
+/// nothing and pass.
+fn en_string(key: &str) -> String {
+    let src = read_src("src/i18n/en.ts");
+    let needle = format!("'{key}':");
+    let at = src
+        .find(&needle)
+        .unwrap_or_else(|| panic!("ANCHOR MISSING in src/i18n/en.ts: key {key:?}"));
+    let rest = &src[at + needle.len()..];
+    let start = rest
+        .find(|c| c == '\'' || c == '"')
+        .unwrap_or_else(|| panic!("i18n key {key:?} has no string value in src/i18n/en.ts"));
+    let quote = rest[start..].chars().next().unwrap();
+    let mut out = String::new();
+    let mut esc = false;
+    for ch in rest[start + quote.len_utf8()..].chars() {
+        if esc {
+            out.push(ch);
+            esc = false;
+        } else if ch == '\\' {
+            esc = true;
+        } else if ch == quote {
+            return out;
+        } else {
+            out.push(ch);
+        }
+    }
+    panic!("i18n key {key:?}: unterminated string literal in src/i18n/en.ts")
+}
+
 fn tr(text: &str) -> TranscriptionResult {
     TranscriptionResult {
         raw_text: text.to_string(),
@@ -212,8 +254,26 @@ fn r14_sec_a2_a_withheld_dictation_is_reported_as_a_microphone_failure() {
     anchor(&c, "if(e.kind==='completed'&&e.withheld)setResult(", "Compose.tsx");
     anchor(&o, "setResult(e.withheld?", "Onboarding.tsx");
     // ANCHOR 2: the empty string is the "nothing was heard" sentinel in both.
-    anchor(&c, "{result||'Nospeechdetected.'}", "Compose.tsx");
-    anchor(&o, "{result||'Nospeechdetected.Tryagainalittlelouder.'}", "Onboarding.tsx");
+    //
+    // i18n MOVE. Both sentences left the views for `src/i18n/en.ts`
+    // (`compose.noSpeech`, `onboarding.test.noSpeech`), so the anchor is the
+    // `t()` call in the `result || …` position PLUS the English value. Both
+    // halves matter here: the call proves the empty string still falls through
+    // to the microphone-failure message, and the value proves that message is
+    // still the one that blames the microphone — which is the entire premise
+    // of this finding, and the reason `''` must not be the withheld value.
+    anchor(&c, "{result||t('compose.noSpeech')}", "Compose.tsx");
+    anchor(&o, "{result||t('onboarding.test.noSpeech')}", "Onboarding.tsx");
+    assert_eq!(
+        en_string("compose.noSpeech"),
+        "No speech detected.",
+        "ANCHOR MISSING: Compose no longer reports the empty string as a microphone failure"
+    );
+    assert_eq!(
+        en_string("onboarding.test.noSpeech"),
+        "No speech detected. Try again a little louder.",
+        "ANCHOR MISSING: Onboarding no longer tells the user to try again a little louder"
+    );
     // ANCHOR 3: `result === null` is the free value that means "no dictation
     // yet", so a third state was available and was not used.
     anchor(&c, "{result!==null&&(", "Compose.tsx");
@@ -227,11 +287,17 @@ fn r14_sec_a2_a_withheld_dictation_is_reported_as_a_microphone_failure() {
     );
 
     // THE CLAIM: withheld must not collapse onto the microphone-failure value.
+    //
+    // The i18n layer opened a second door onto the same defect: a withheld
+    // dictation can now be pointed straight at the microphone-failure KEY
+    // without ever mentioning the empty string, so both forms are refused.
     let mut offenders: Vec<&str> = vec![];
-    if c.contains("e.withheld)setResult('')") {
+    if c.contains("e.withheld)setResult('')") || c.contains("e.withheld)setResult(t('compose.noSpeech')") {
         offenders.push("src/views/Compose.tsx");
     }
-    if o.contains("setResult(e.withheld?'':") {
+    if o.contains("setResult(e.withheld?'':")
+        || o.contains("setResult(e.withheld?t('onboarding.test.noSpeech'):")
+    {
         offenders.push("src/views/Onboarding.tsx");
     }
     assert!(
@@ -748,10 +814,22 @@ fn r14_sec_h1_a_local_only_dictation_is_never_told_to_paste() {
     anchor(body, "manual_paste_required:keystrokes_blocked,", "macos.rs");
 
     // CONTROL: the instruction exists and is the only one the product gives.
+    //
+    // i18n MOVE. The sentence left `App.tsx` for `src/i18n/en.ts` under
+    // `app.toast.pasteInstruction`; the toast holds the `t()` call and still
+    // passes the platform-derived `PASTE_KEYS` in. Anchor the call in the
+    // manual-paste position, then the English value, because an instruction
+    // that no longer instructs would leave the finding open while the call
+    // site still looked right.
     anchor(
         &app,
-        "e.injection?.manual_paste_required?`Copied.Press${PASTE_KEYS}topaste`",
+        "e.injection?.manual_paste_required?t('app.toast.pasteInstruction',{keys:PASTE_KEYS})",
         "App.tsx",
+    );
+    assert_eq!(
+        en_string("app.toast.pasteInstruction"),
+        "Copied. Press {keys} to paste",
+        "ANCHOR MISSING: the main window's paste instruction no longer tells the user to paste"
     );
     anchor(&hud, "e.injection?.manual_paste_required", "Hud.tsx");
 
@@ -981,19 +1059,34 @@ fn r14_sec_k2_the_main_window_still_claims_a_secure_field_it_cannot_see() {
     // CONTROL: the sibling was fixed, in this repo, so the correct wording
     // exists and the rule is satisfiable.
     // Round 14 hoisted the chord into types.ts so the two surfaces share one.
+    //
+    // i18n MOVE. Both surfaces' sentences left their components for
+    // `src/i18n/en.ts` (`hud.pasteInstruction`, `app.toast.pasteInstruction`),
+    // while the chord stayed a `PASTE_KEYS` interpolation. So the control is
+    // now: the HUD renders the key, and the HUD's ENGLISH TEXT is free of the
+    // unconditional secure-field claim. Checking only the component would be
+    // vacuous, because the component no longer contains any wording at all.
     anchor(&squashed("src/types.ts"), "exportconstPASTE_KEYS=", "types.ts");
-    anchor(&hud, "text:`Copied.Press${PASTE_KEYS}topaste`", "Hud.tsx");
+    anchor(&hud, "text:t('hud.pasteInstruction',{keys:PASTE_KEYS})", "Hud.tsx");
+    let hud_text = en_string("hud.pasteInstruction");
     assert!(
-        !hud.contains("(securefield)"),
+        !hud.contains("(securefield)")
+            && !hud_text.contains("secure field")
+            && hud_text.contains("{keys}"),
         "ANCHOR MISSING: the HUD has regained the unconditional secure-field claim; the \
          control for this test is stale"
     );
-    // ANCHOR: App.tsx is the other surface that renders this outcome.
+    // ANCHOR: App.tsx is the other surface that renders this outcome, and it
+    // renders it through a key.
     anchor(&app, "e.injection?.manual_paste_required?", "App.tsx");
+    anchor(&app, "t('app.toast.pasteInstruction',{keys:PASTE_KEYS})", "App.tsx");
 
-    // THE CLAIM.
+    // THE CLAIM. It follows the literal into the dictionary: the sentence the
+    // main window shows must not assert a field it cannot see, and must name a
+    // key. Both halves of the sentence round 12 fixed in the HUD.
+    let app_text = en_string("app.toast.pasteInstruction");
     assert!(
-        !app.contains("'Copied.Presspastetoinsert(securefield)'"),
+        !app_text.contains("secure field") && app_text.contains("{keys}"),
         "App.tsx tells the user \"Copied. Press paste to insert (secure field)\". \
          `manual_paste_required` is returned on the `keystrokes_blocked` fallback too, where \
          the field may be known ORDINARY and only a password manager is raising the global \

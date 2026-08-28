@@ -1,6 +1,9 @@
 // Mirrors of the Rust types crossing the IPC boundary.
 
 export interface Settings {
+  /** UI language, or "" until the user has chosen one. Separate from the
+   *  transcription language: French interface, English dictation is common. */
+  ui_language: string;
   version: number;
   onboarding_complete: boolean;
   models: {
@@ -67,6 +70,8 @@ export interface Settings {
     position: string;
     style: string;
     show_partial_text: boolean;
+    /** 0.5 to 2.0. Shifts the level window rather than scaling the bars. */
+    waveform_sensitivity: number;
   };
   paste: {
     inject: boolean;
@@ -125,6 +130,8 @@ export interface ModelRow {
   multilingual: boolean;
   downloaded: boolean;
   active: boolean;
+  /** Added by the user from their own disk: removable, never downloadable. */
+  custom: boolean;
 }
 
 export interface DictEntry {
@@ -224,4 +231,9 @@ export interface DownloadProgress {
 /// The HUD and the main window each carried their own literal and round 12
 /// fixed only one of them. A shared constant is the only thing that stops the
 /// two drifting apart again.
+/// The copy chord, defined ONCE, for the same reason as PASTE_KEYS: History
+/// hard-coded the Command glyph and told every Windows user to press a key
+/// their keyboard does not have.
+export const COPY_KEYS = navigator.userAgent.includes('Mac') ? '\u2318Enter' : 'Ctrl+Enter';
+
 export const PASTE_KEYS = navigator.userAgent.includes('Mac') ? '\u2318V' : 'Ctrl+V';

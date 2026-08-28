@@ -3,8 +3,10 @@ import { AudioLines, BookA, Cpu, History as HistoryIcon, Settings as SettingsIco
 import appIcon from './assets/icon.png';
 import { api, onPipelineEvent } from './api';
 import { PASTE_KEYS } from './types';
+import { applyLang } from './i18n/apply';
 import type { PipelineEvent, Settings } from './types';
 import { onFocusPalette } from './api';
+import { useT } from './i18n/useT';
 import HistoryView from './views/History';
 import ComposeView from './views/Compose';
 import ModelsView from './views/Models';
@@ -16,6 +18,7 @@ import './app.css';
 type Tab = 'history' | 'compose' | 'dictionary' | 'models' | 'settings';
 
 export default function App() {
+  const t = useT();
   const [settings, setSettings] = useState<Settings | null>(null);
   const [tab, setTab] = useState<Tab>('compose');
   const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'error' } | null>(null);
@@ -24,6 +27,7 @@ export default function App() {
   const reload = useCallback(() => {
     api.getSettings().then((s) => {
       applyTheme(s);
+      applyLang(s);
       setSettings(s);
     });
   }, []);
@@ -42,7 +46,7 @@ export default function App() {
         // instruction.
         if (e.withheld && !e.injection?.manual_paste_required) return;
         if (e.withheld) {
-          showToast(`Copied. Press ${PASTE_KEYS} to paste`, 'ok');
+          showToast(t('app.toast.pasteInstruction', { keys: PASTE_KEYS }), 'ok');
           return;
         }
         const preview = e.text.length > 42 ? e.text.slice(0, 42) + '…' : e.text;
@@ -53,10 +57,10 @@ export default function App() {
             // identical literal here. It named no key on either platform, and
             // asserted "(secure field)" on a path where the field may be known
             // ordinary and only a password manager is running.
-            ? `Copied. Press ${PASTE_KEYS} to paste`
+            ? t('app.toast.pasteInstruction', { keys: PASTE_KEYS })
             : e.injection
-              ? `Inserted "${preview}"`
-              : `Copied "${preview}"`,
+              ? t('app.toast.inserted', { text: preview })
+              : t('app.toast.copied', { text: preview }),
           'ok',
         );
       }
@@ -102,18 +106,18 @@ export default function App() {
           <span>Parle</span>
         </div>
         <nav>
-          <NavItem icon={<AudioLines size={17} />} label="Compose" active={tab === 'compose'} onClick={() => setTab('compose')} />
-          <NavItem icon={<HistoryIcon size={17} />} label="History" active={tab === 'history'} onClick={() => setTab('history')} />
-          <NavItem icon={<BookA size={17} />} label="Dictionary" active={tab === 'dictionary'} onClick={() => setTab('dictionary')} />
-          <NavItem icon={<Cpu size={17} />} label="Models" active={tab === 'models'} onClick={() => setTab('models')} />
-          <NavItem icon={<SettingsIcon size={17} />} label="Settings" active={tab === 'settings'} onClick={() => setTab('settings')} />
+          <NavItem icon={<AudioLines size={17} />} label={t('app.nav.compose')} active={tab === 'compose'} onClick={() => setTab('compose')} />
+          <NavItem icon={<HistoryIcon size={17} />} label={t('app.nav.history')} active={tab === 'history'} onClick={() => setTab('history')} />
+          <NavItem icon={<BookA size={17} />} label={t('app.nav.dictionary')} active={tab === 'dictionary'} onClick={() => setTab('dictionary')} />
+          <NavItem icon={<Cpu size={17} />} label={t('app.nav.models')} active={tab === 'models'} onClick={() => setTab('models')} />
+          <NavItem icon={<SettingsIcon size={17} />} label={t('app.nav.settings')} active={tab === 'settings'} onClick={() => setTab('settings')} />
         </nav>
         <button
           className={`record-btn ${recording ? 'recording' : ''}`}
           onClick={() => (recording ? api.stopRecording() : api.startRecording())}
         >
           <span className="record-dot" />
-          {recording ? 'Stop dictation' : 'Start dictation'}
+          {recording ? t('app.record.stop') : t('app.record.start')}
         </button>
       </aside>
       <main className="content">
