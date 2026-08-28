@@ -88,6 +88,26 @@ impl ClipboardMonitor {
                                 return (macos::frontmost_app(), None);
                             }
                             let event = match macos::read_clipboard() {
+                                // RE-CHECK the change count before believing
+                                // the text.
+                                //
+                                // `clipboard_is_concealed()` and
+                                // `read_clipboard()` are two separate
+                                // NSPasteboard queries with no session between
+                                // them, so a password manager writing in the gap
+                                // has its secret read under a judgement made
+                                // about the PREVIOUS content. Windows brackets
+                                // its equivalent pair with
+                                // `GetClipboardSequenceNumber` and says why;
+                                // macOS has no clipboard lock, but it has the
+                                // same counter, so the same guard applies.
+                                Some(_) if macos::pasteboard_change_count() != now => {
+                                    tracing::debug!(
+                                        "clipboard changed while we were reading it; \
+                                         discarding the capture"
+                                    );
+                                    None
+                                }
                                 Some(text) if !text.trim().is_empty() => {
                                     let (app_id, app_name) = prev_app.clone();
                                     Some(PlatformEvent::ClipboardChanged { text, app_id, app_name })

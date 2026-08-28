@@ -40,29 +40,33 @@ def draw_icon(size: int, recording: bool, rgb=(0, 0, 0)) -> Image.Image:
     cx = S / 2
     stroke = S * 0.075
 
-    # Capsule body.
-    body_w = S * 0.21
-    body_top = S * 0.21
-    body_bot = S * 0.50
+    # Capsule body. Proportioned against the APP ICON, which is the shape
+    # people will recognise this as a smaller copy of: narrow and tall, with a
+    # stem short enough that the capsule is clearly the subject. An earlier
+    # version was wider and shorter with a long stem, and read as a figure
+    # rather than a microphone.
+    body_w = S * 0.175
+    body_top = S * 0.195
+    body_bot = S * 0.525
     m.rounded_rectangle([cx - body_w / 2, body_top, cx + body_w / 2, body_bot],
                         radius=body_w / 2, fill=255)
 
     # Cradle: a shallow U hugging the body, drawn as the lower half of an
     # ellipse so its ends rise to either side of the capsule.
-    cradle_w = S * 0.44
-    cradle_h = S * 0.30
-    cradle_cy = S * 0.47
+    cradle_w = S * 0.40
+    cradle_h = S * 0.26
+    cradle_cy = S * 0.495
     m.arc([cx - cradle_w / 2, cradle_cy - cradle_h / 2,
            cx + cradle_w / 2, cradle_cy + cradle_h / 2],
           start=0, end=180, fill=255, width=int(stroke))
 
-    # Stem, from the bottom of the cradle to the base.
+    # Stem: SHORT. Just enough to join the cradle to the base.
     stem_top = cradle_cy + cradle_h / 2 - stroke * 0.5
-    stem_bot = S * 0.78
+    stem_bot = S * 0.735
     m.rectangle([cx - stroke / 2, stem_top, cx + stroke / 2, stem_bot], fill=255)
 
     # Base bar.
-    base_w = S * 0.30
+    base_w = S * 0.29
     m.rounded_rectangle([cx - base_w / 2, stem_bot - stroke / 2,
                          cx + base_w / 2, stem_bot + stroke / 2],
                         radius=stroke / 2, fill=255)

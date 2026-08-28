@@ -10,6 +10,17 @@ pub const SETTINGS_VERSION: u32 = 2;
 #[serde(default)]
 pub struct Settings {
     pub version: u32,
+    /// UI language: "en" | "fr" | "es" | "de" | "pt", or "" until first run.
+    ///
+    /// Distinct from the TRANSCRIPTION language below: someone can run the
+    /// interface in French and dictate in English, and plenty do. Picking one
+    /// on first run seeds the other, and after that they move independently.
+    ///
+    /// Empty rather than "en" by default, so first run can tell "the user has
+    /// not chosen" apart from "the user chose English" and offer the picker
+    /// exactly once.
+    #[serde(default)]
+    pub ui_language: String,
     /// Shipped exclusions this install has ALREADY been offered.
     ///
     /// The union that adds newly shipped password managers has to fire for
@@ -57,6 +68,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             version: SETTINGS_VERSION,
+            ui_language: String::new(),
             // A fresh install starts with every shipped default already ON, so
             // it has been offered all of them.
             excluded_defaults_seen: default_excluded_apps(),
@@ -127,6 +139,34 @@ pub struct ModelSettings {
     pub backend: String,
     /// Pre-load and warm the model at app startup.
     pub prewarm: bool,
+    /// Models the user pointed at themselves, on disk, outside the registry.
+    ///
+    /// Kept in settings rather than copied into the models directory, so a
+    /// 3 GB file the user already has is not duplicated and stays wherever
+    /// they keep it. The consequence is that the file can move or be deleted
+    /// behind our back, which is why loading one has to fail gracefully rather
+    /// than assume it is there.
+    #[serde(default)]
+    pub custom: Vec<CustomModel>,
+}
+
+/// A whisper.cpp model file the user supplied.
+///
+/// Whisper GGUF/GGML only, not Parakeet: a Parakeet model is a directory of
+/// several ONNX files with names we would have to guess at, and guessing wrong
+/// gives the user a confusing failure instead of a clear one. A single `.bin`
+/// is something they can point at unambiguously.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CustomModel {
+    /// `custom:<something stable>`, so it can never collide with a registry id.
+    pub id: String,
+    pub display_name: String,
+    /// Absolute path to the model file, as the user chose it.
+    pub path: String,
+    /// Whether to let the user pick a language for this model. Assumed true:
+    /// an English-only model simply ignores the setting, whereas assuming
+    /// English-only would hide the language picker for a multilingual model.
+    pub multilingual: bool,
 }
 
 impl Default for ModelSettings {
@@ -136,6 +176,7 @@ impl Default for ModelSettings {
             fallback_chain: Vec::new(),
             backend: "auto".into(),
             prewarm: true,
+            custom: Vec::new(),
         }
     }
 }
@@ -407,7 +448,12 @@ fn default_excluded_apps() -> Vec<String> {
         (&["com.markmcguill.strongbox.mac"], &[]),
         // Authenticators. The threat this feature names is "passwords, tokens
         // and 2FA codes", and there was not one authenticator in the list.
-        (&["com.authy.authy-mac", "com.beemdevelopment.Aegis"], &["Authy Desktop.exe"]),
+        // Aegis is ANDROID ONLY and its application id was sitting here as
+        // though it were a macOS bundle id. That is precisely what the rule
+        // above forbids: a fabricated identifier protects nothing and makes a
+        // test assert coverage that does not exist. Removed rather than
+        // replaced, because inventing a substitute would repeat the mistake.
+        (&["com.authy.authy-mac"], &["Authy Desktop.exe"]),
     ];
     EXCLUDED
         .iter()
@@ -458,11 +504,29 @@ pub struct OverlaySettings {
     /// that dot has to be legible on its own.
     pub style: String,
     pub show_partial_text: bool,
+    /// How readily the waveform reacts to quiet speech. 0.5 to 2.0, 1.0 default.
+    ///
+    /// Applied as a dB offset on the level window rather than a multiplier on
+    /// the bar height, so raising it lifts quiet speech into view instead of
+    /// just stretching whatever was already visible. A quiet microphone, a
+    /// distant one, or a soft speaker all need the same thing: the window
+    /// moved, not the picture scaled.
+    #[serde(default = "default_waveform_sensitivity")]
+    pub waveform_sensitivity: f32,
+}
+
+pub fn default_waveform_sensitivity() -> f32 {
+    1.0
 }
 
 impl Default for OverlaySettings {
     fn default() -> Self {
-        Self { position: "bottom-center".into(), style: "pill".into(), show_partial_text: true }
+        Self {
+            position: "bottom-center".into(),
+            style: "pill".into(),
+            show_partial_text: true,
+            waveform_sensitivity: default_waveform_sensitivity(),
+        }
     }
 }
 
@@ -774,6 +838,17 @@ pub struct SyncSettings {
     /// Human-facing name shown when pairing and on synced rows.
     pub device_name: String,
     pub sync_dictations: bool,
+    /// OFF by default, deliberately.
+    ///
+    /// A dictation is something the user chose to say to Parle. The clipboard
+    /// is everything they copy all day, including passwords, card numbers and
+    /// other people's private messages, and most of it they never think about.
+    /// Sending that to a second machine has to be something they turn ON with
+    /// their eyes open, not something they discover later.
+    ///
+    /// Widening a sync kind is already handled: the debt machinery re-offers
+    /// history when the user switches this on, so defaulting to off costs them
+    /// nothing but a toggle.
     pub sync_clipboard: bool,
     /// Devices we have paired with. The KEY for each lives in the OS keychain,
     /// never here — this is only the roster needed to show a list and to know
@@ -813,7 +888,7 @@ impl Default for SyncSettings {
             device_id: String::new(),
             device_name: String::new(),
             sync_dictations: true,
-            sync_clipboard: true,
+            sync_clipboard: false,
             paired: Vec::new(),
             resend_owed: Vec::new(),
         }

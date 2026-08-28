@@ -165,7 +165,10 @@ fn capture_previous_app(app: &AppHandle) {
     let state = app.state::<std::sync::Arc<crate::state::AppState>>();
     let (bundle_id, _) = crate::platform::imp::frontmost_app();
     if let Some(id) = bundle_id {
-        if id != "com.novaire.parle" {
+        // `is_self`, not a bundle-id literal. On Windows the frontmost app is
+        // an exe name, so this never matched and Parle stored ITSELF as the
+        // paste target every time the palette opened.
+        if !crate::platform::is_self(Some(id.as_str())) {
             *state.previous_app.lock() = Some(id);
         }
     }

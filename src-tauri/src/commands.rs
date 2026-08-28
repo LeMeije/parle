@@ -37,9 +37,16 @@ pub async fn set_settings(state: State<'_, Arc<AppState>>, app: AppHandle, setti
         // the frontend type, an ABSENT) sync subtree would deserialise to
         // defaults and silently wipe device_id — orphaning every history row
         // stamped with it and invalidating every pairing.
+        //
+        // `models.custom` is server-owned for the same reason: the dedicated
+        // add/remove commands are what mutate it, and a UI blob that does not
+        // carry it would deserialise to an empty list and silently forget every
+        // model the user had added.
         let owned_sync = guard.sync.clone();
+        let owned_custom = guard.models.custom.clone();
         *guard = settings.clone();
         guard.sync = owned_sync;
+        guard.models.custom = owned_custom;
         guard.save(&settings_path()).map_err(err)?;
     }
     // apply_settings queues engine reconfiguration on the serial worker, so
@@ -137,7 +144,11 @@ pub async fn paste_item(state: State<'_, Arc<AppState>>, app: AppHandle, id: i64
             std::thread::sleep(std::time::Duration::from_millis(50));
             let (front, _) = platform::imp::frontmost_app();
             match front.as_deref() {
-                Some("com.novaire.parle") | None => continue,
+                // Same fix: on Windows this compared an exe name against a
+                // bundle id, so EVERY app passed and the loop broke after one
+                // tick regardless of what actually had focus.
+                other if crate::platform::is_self(other.as_deref()) => continue,
+                None => continue,
                 Some(f) => {
                     if target.as_deref().map(|t| t == f).unwrap_or(true) {
                         break; // the right app (or at least not us) is frontmost
@@ -203,6 +214,9 @@ pub struct ModelRow {
     pub multilingual: bool,
     pub downloaded: bool,
     pub active: bool,
+    /// The user added this one from their own disk; it is not from the
+    /// registry, so it can be removed but never downloaded or re-downloaded.
+    pub custom: bool,
 }
 
 #[tauri::command]
@@ -232,8 +246,111 @@ pub fn list_models(state: State<'_, Arc<AppState>>) -> Vec<ModelRow> {
             multilingual: m.multilingual,
             downloaded: download::is_downloaded(&dir, m),
             active: m.id == active,
+            custom: false,
         })
+        .chain(state.settings.lock().models.custom.iter().map(|c| ModelRow {
+            id: c.id.clone(),
+            display_name: c.display_name.clone(),
+            backend: if cfg!(target_os = "macos") {
+                "Metal GPU".to_string()
+            } else if cfg!(feature = "cuda") {
+                "CUDA GPU".to_string()
+            } else {
+                "CPU".to_string()
+            },
+            size_bytes: std::fs::metadata(&c.path).map(|m| m.len()).unwrap_or(0),
+            // Unknown for a file we did not publish, and saying so honestly
+            // beats inventing a rating the user would take as measured.
+            speed: 0,
+            accuracy: 0,
+            multilingual: c.multilingual,
+            // "Downloaded" means usable, and for a local file that is simply
+            // whether it is still there.
+            downloaded: std::path::Path::new(&c.path).is_file(),
+            active: c.id == active,
+            custom: true,
+        }))
         .collect()
+}
+
+/// Add a whisper.cpp model file the user chose from their own disk.
+///
+/// The file is NOT copied into the models directory. A whisper model runs to
+/// gigabytes and the user already has it somewhere they chose; duplicating it
+/// would silently eat the same space again. The trade is that the file can move
+/// afterwards, which `EngineManager` reports as a missing model rather than a
+/// crash.
+#[tauri::command]
+pub fn add_custom_model(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+    display_name: String,
+    multilingual: bool,
+) -> Result<String> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.is_file() {
+        return Err(err("that path is not a file"));
+    }
+    // A whisper.cpp model begins with the magic "ggml" (0x67676d6c). Checking
+    // it here turns "the app transcribes nothing and you cannot tell why" into
+    // "that is not a whisper model", at the moment the user can still fix it.
+    let mut magic = [0u8; 4];
+    {
+        use std::io::Read;
+        let mut f = std::fs::File::open(&p).map_err(|e| err(&format!("could not read it: {e}")))?;
+        f.read_exact(&mut magic).map_err(|_| err("that file is too small to be a model"))?;
+    }
+    if &magic != b"ggml" {
+        return Err(err(
+            "that is not a whisper.cpp model. Parle needs a GGML .bin file, the kind whisper.cpp \
+             publishes. A PyTorch .pt or a Core ML package will not work.",
+        ));
+    }
+
+    let name = if display_name.trim().is_empty() {
+        p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Local model".into())
+    } else {
+        display_name.trim().to_string()
+    };
+    // The id is derived from the PATH, so adding the same file twice replaces
+    // the entry instead of stacking duplicates the user then has to clean up.
+    let id = format!("custom:{}", stable_hash(&path));
+
+    let mut s = state.settings.lock();
+    s.models.custom.retain(|c| c.id != id);
+    s.models.custom.push(parle_core::settings::CustomModel {
+        id: id.clone(),
+        display_name: name,
+        path: path.clone(),
+        multilingual,
+    });
+    s.save(&settings_path()).map_err(err)?;
+    drop(s);
+    state.apply_settings_engine_only();
+    Ok(id)
+}
+
+/// Forget a user-supplied model. The file itself is never touched.
+#[tauri::command]
+pub fn remove_custom_model(state: State<'_, Arc<AppState>>, model_id: String) -> Result<()> {
+    let mut s = state.settings.lock();
+    s.models.custom.retain(|c| c.id != model_id);
+    if s.models.active_model == model_id {
+        s.models.active_model.clear();
+    }
+    s.models.fallback_chain.retain(|f| f != &model_id);
+    s.save(&settings_path()).map_err(err)?;
+    drop(s);
+    state.apply_settings_engine_only();
+    Ok(())
+}
+
+/// A short, stable, filesystem-safe digest of a string.
+fn stable_hash(s: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    format!("{:016x}", h.finish())
 }
 
 #[tauri::command]

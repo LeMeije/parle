@@ -108,6 +108,7 @@ pub fn run() {
             hud::show_main(app);
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
@@ -115,6 +116,8 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
+            commands::add_custom_model,
+            commands::remove_custom_model,
             commands::set_settings,
             commands::sync_status,
             commands::sync_set_enabled,
@@ -231,6 +234,20 @@ pub fn run() {
             // Windows has no equivalent convention, and hiding a window that the
             // config already created visible produces a show-then-hide flash on
             // every launch. Leave it up; closing it sends the app to the tray.
+            // Windows DOES have the login case, though. Autostart registers
+            // with `--hidden` and nothing read it, so a tray app popped a
+            // 980x700 window at every boot while macOS started silently. A
+            // launch the USER asked for still shows the window, so the
+            // show-then-hide flash the comment above describes never happens.
+            #[cfg(not(target_os = "macos"))]
+            if state.settings.lock().onboarding_complete
+                && std::env::args().any(|a| a == "--hidden")
+            {
+                if let Some(main) = handle.get_webview_window(hud::MAIN_LABEL) {
+                    let _ = main.hide();
+                }
+            }
+
             #[cfg(target_os = "macos")]
             if state.settings.lock().onboarding_complete {
                 if let Some(main) = handle.get_webview_window(hud::MAIN_LABEL) {

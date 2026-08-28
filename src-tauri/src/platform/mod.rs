@@ -132,6 +132,49 @@ impl FieldView {
     }
 }
 
+/// Is `app_id` US?
+///
+/// Cross-platform because the ANSWER is platform-specific and the QUESTION is
+/// not. `frontmost_app()` returns a bundle id on macOS and an exe file name on
+/// Windows, so a single hard-coded comparison against the bundle id was simply
+/// always false on Windows. Two features were dead there because of it: the
+/// guard that stops a dictation pasting into Parle's own search box, and the
+/// "paste back into the app you came from" flow, which recorded Parle itself
+/// as the target every time.
+pub fn is_self(app_id: Option<&str>) -> bool {
+    match app_id {
+        Some(id) => {
+            #[cfg(target_os = "macos")]
+            {
+                id == "com.novaire.parle"
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|e| e.file_name().map(|f| f.to_string_lossy().to_string()))
+                    .map(|exe| exe.eq_ignore_ascii_case(id))
+                    .unwrap_or(false)
+            }
+        }
+        // No id at all: on macOS that happens for our own windows in some
+        // states, so fall back to "are we running from the bundle".
+        None => {
+            #[cfg(target_os = "macos")]
+            {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|e| e.to_str().map(|p| p.contains("Parle.app")))
+                    .unwrap_or(false)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                false
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct InjectionOutcome {
     pub method: InjectionMethod,

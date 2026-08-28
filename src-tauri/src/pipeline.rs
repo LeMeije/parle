@@ -1005,12 +1005,7 @@ fn find_word_boundary(haystack: &str, word: &str) -> Option<usize> {
 /// own Compose window would be absurd — the result panel and clipboard cover it.
 fn frontmost_is_self() -> bool {
     let (app_id, _) = platform::imp::frontmost_app();
-    app_id.as_deref() == Some("com.novaire.parle")
-        || std::env::current_exe()
-            .ok()
-            .and_then(|e| e.to_str().map(|p| p.contains("Parle.app")))
-            .map(|in_bundle| in_bundle && app_id.is_none())
-            .unwrap_or(false)
+    platform::is_self(app_id.as_deref())
 }
 
 /// A speech stretch or a verbatim inserted mark, in speaking order.

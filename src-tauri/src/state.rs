@@ -103,9 +103,22 @@ impl AppState {
         let engine = Arc::new(Mutex::new(EngineManager::new(models_dir(), use_gpu)));
         {
             let s = settings.lock();
-            engine
-                .lock()
-                .configure(&s.models.active_model, &s.models.fallback_chain);
+            let mut g = engine.lock();
+            // The user's own model files are handed over at STARTUP too, not
+            // only when they add one, or a restart would forget them and the
+            // active model would fall back to the registry chain.
+            g.set_custom(
+                s.models
+                    .custom
+                    .iter()
+                    .map(|c| parle_asr::manager::CustomModelSpec {
+                        id: c.id.clone(),
+                        path: std::path::PathBuf::from(&c.path),
+                        multilingual: c.multilingual,
+                    })
+                    .collect(),
+            );
+            g.configure(&s.models.active_model, &s.models.fallback_chain);
         }
 
         // Event sink: route pipeline events to all windows.
@@ -295,6 +308,31 @@ impl AppState {
     }
 
     /// (Re)apply settings: gestures, native bindings, clipboard monitor.
+    /// Push model configuration to the engine without touching anything else.
+    ///
+    /// The add/remove custom-model commands change what the engine can load and
+    /// nothing about the window, tray or shortcuts, so they do not need the full
+    /// `apply_settings` and should not pay for it mid-dictation.
+    pub fn apply_settings_engine_only(&self) {
+        let s = self.settings.lock().clone();
+        let specs: Vec<parle_asr::manager::CustomModelSpec> = s
+            .models
+            .custom
+            .iter()
+            .map(|c| parle_asr::manager::CustomModelSpec {
+                id: c.id.clone(),
+                path: std::path::PathBuf::from(&c.path),
+                multilingual: c.multilingual,
+            })
+            .collect();
+        let engine = self.engine.clone();
+        std::thread::spawn(move || {
+            let mut g = engine.lock();
+            g.set_custom(specs);
+            g.configure(&s.models.active_model, &s.models.fallback_chain);
+        });
+    }
+
     pub fn apply_settings(&self, _app: &AppHandle) {
         let s = self.settings.lock().clone();
         // Tray style is a live setting: repaint it now rather than at next launch.

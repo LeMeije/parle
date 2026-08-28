@@ -251,6 +251,14 @@ impl Supervisor {
             if !read_exact(evt, &mut frame) {
                 return Err("helper pipe closed".into());
             }
+            if frame[0] == wire::EV_ABORT {
+                // The user chorded the bound key. Cancel rather than record,
+                // which is what macOS has always done.
+                if tx.send(PlatformEvent::AbortGesture).is_err() {
+                    return Err("dispatcher gone".into());
+                }
+                continue;
+            }
             if frame[0] != wire::EV_HOTKEY {
                 tracing::warn!("ignoring unknown event tag {:#04x}", frame[0]);
                 continue;
@@ -610,6 +618,13 @@ pub fn inject_text(
             }
             let seq_now = unsafe { GetClipboardSequenceNumber() };
             if seq_now != seq_after_write {
+                // CLEAR the pending restore, as macOS does on the same branch.
+                //
+                // Leaving it parked meant the next dictation saw `is_none()`
+                // as false, skipped snapshotting the user's CURRENT clipboard,
+                // and then restored the stale one over whatever they had copied
+                // in between. Bailing out must not leave a booby trap behind.
+                *PENDING_RESTORE.lock() = None;
                 return;
             }
             let taken = PENDING_RESTORE.lock().take();
@@ -888,7 +903,12 @@ impl ClipboardMonitor {
                 .spawn(move || {
                     let mut last = unsafe { GetClipboardSequenceNumber() };
                     while !stop.load(Ordering::SeqCst) {
-                        std::thread::sleep(std::time::Duration::from_millis(400));
+                        // 150 ms, matching macOS. The Mac was tightened from 400 deliberately: a
+            // wide window makes the app ATTRIBUTION wrong, because the frontmost
+            // app is sampled after the change is noticed. `GetClipboardSequenceNumber`
+            // is cheaper than NSPasteboard's changeCount, so there is no reason
+            // for Windows to be the slow one.
+            std::thread::sleep(std::time::Duration::from_millis(150));
                         if !enabled.load(Ordering::SeqCst) {
                             last = unsafe { GetClipboardSequenceNumber() };
                             continue;

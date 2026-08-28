@@ -89,6 +89,10 @@ mod win {
     static SUPPRESS_COPILOT: AtomicBool = AtomicBool::new(true);
     static LSHIFT_DOWN: AtomicBool = AtomicBool::new(false);
     static LWIN_DOWN: AtomicBool = AtomicBool::new(false);
+    /// A bound dictation modifier is physically held. Mirrors the macOS
+    /// listener's flag of the same name; any other key going down during that
+    /// window means the user is chording, not dictating.
+    static BOUND_MOD_HELD: AtomicBool = AtomicBool::new(false);
     /// While true, we are mid-chord and swallowing the Copilot F23 events.
     static COPILOT_ACTIVE: AtomicBool = AtomicBool::new(false);
     /// The connected pipe, as a raw handle (HANDLE is not Sync).
@@ -269,8 +273,15 @@ mod win {
 
         // -- Bare modifier bindings (L/R discriminated by vkCode). ------------
         let key = vk_to_wire(vk);
+        // A key going down while a BOUND modifier is held means the user is
+        // chording, not dictating. macOS sends AbortGesture here and Windows
+        // sent nothing, so an accidental Right Ctrl + C began a recording.
+        if is_down && BOUND_MOD_HELD.load(Ordering::SeqCst) && bindings.binding_for(key).is_none() {
+            send_abort();
+        }
         if key != KEY_NONE {
             if let Some((id, swallow)) = bindings.binding_for(key) {
+                BOUND_MOD_HELD.store(is_down, Ordering::SeqCst);
                 // Auto-repeat suppression for held modifiers: Windows repeats
                 // key-down; forward only transitions.
                 send_event(id, phase);
@@ -309,6 +320,13 @@ mod win {
     fn send_event(id: u8, phase: u8) {
         if let Some(tx) = EVENT_TX.get() {
             let _ = tx.try_send(encode_hotkey(id, phase));
+        }
+    }
+
+    /// Tell the app the gesture was a chord, so it cancels rather than records.
+    fn send_abort() {
+        if let Some(tx) = EVENT_TX.get() {
+            let _ = tx.try_send(parle_hook::encode_abort());
         }
     }
 

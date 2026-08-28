@@ -26,6 +26,14 @@ pub const PIPE_PREFIX: &str = r"\\.\pipe\parle-hook-";
 pub const EVENT_FRAME: usize = 4;
 /// `[EV_HOTKEY, hotkey id, key phase, 0]`
 pub const EV_HOTKEY: u8 = 0x01;
+/// `[EV_ABORT, 0, 0, 0]`: a bound modifier was held and another key went down,
+/// so the gesture was a chord (Right Ctrl + C) rather than a dictation.
+///
+/// macOS has always sent this. Windows did not, so holding the dictation key
+/// and pressing anything else started a recording the Mac would have cancelled.
+/// With Right Ctrl as the shipped Windows default that fires on any accidental
+/// chord.
+pub const EV_ABORT: u8 = 0x02;
 
 // -- app -> helper -----------------------------------------------------------
 
@@ -147,6 +155,10 @@ pub fn encode_flag(tag: u8, on: bool) -> [u8; CMD_FRAME] {
 
 pub fn encode_hotkey(id: u8, phase: u8) -> [u8; EVENT_FRAME] {
     [EV_HOTKEY, id, phase, 0]
+}
+
+pub fn encode_abort() -> [u8; EVENT_FRAME] {
+    [EV_ABORT, 0, 0, 0]
 }
 
 #[cfg(test)]

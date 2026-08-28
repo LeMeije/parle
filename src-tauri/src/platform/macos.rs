@@ -402,8 +402,20 @@ fn handle_event(
             if keycode == KVK_ESCAPE {
                 if is_recording {
                     if let Some(ci) = bindings.cancel.as_ref() {
-                        if *ci == NativeKey::Escape && phase == KeyPhase::Down {
-                            let _ = tx.send(PlatformEvent::Hotkey { id: HotkeyId::Cancel, phase });
+                        if *ci == NativeKey::Escape {
+                            // BOTH EDGES are swallowed, not just the down.
+                            //
+                            // The rule this file and the Windows hook both
+                            // state is "never swallow a key-down and let its
+                            // key-up escape": an app that receives a keyUp for
+                            // a keyDown it never saw is left with inconsistent
+                            // state. Windows followed the rule and macOS did
+                            // not. The event is only SENT on the down edge, so
+                            // cancelling still happens exactly once.
+                            if phase == KeyPhase::Down {
+                                let _ =
+                                    tx.send(PlatformEvent::Hotkey { id: HotkeyId::Cancel, phase });
+                            }
                             return true; // consume Escape only while recording
                         }
                     }

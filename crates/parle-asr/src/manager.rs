@@ -12,6 +12,17 @@ pub struct EngineManager {
     engine: Option<Box<dyn AsrEngine>>,
     active_model: String,
     fallback_chain: Vec<String>,
+    /// Models the user supplied from their own disk, checked BEFORE the
+    /// registry so a custom id can never be shadowed by one.
+    custom: Vec<CustomModelSpec>,
+}
+
+/// A user-supplied model, owned rather than `&'static` like `ModelInfo`.
+#[derive(Debug, Clone)]
+pub struct CustomModelSpec {
+    pub id: String,
+    pub path: PathBuf,
+    pub multilingual: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -28,6 +39,7 @@ impl EngineManager {
             engine: None,
             active_model: String::new(),
             fallback_chain: Vec::new(),
+            custom: Vec::new(),
         }
     }
 
@@ -37,6 +49,21 @@ impl EngineManager {
         }
         self.active_model = active_model.to_string();
         self.fallback_chain = fallback_chain.to_vec();
+    }
+
+    /// The user's own model files. Replacing the list drops a loaded custom
+    /// engine, because the path behind it may have just changed.
+    pub fn set_custom(&mut self, custom: Vec<CustomModelSpec>) {
+        let changed = custom.len() != self.custom.len()
+            || custom.iter().zip(self.custom.iter()).any(|(a, b)| {
+                a.id != b.id || a.path != b.path || a.multilingual != b.multilingual
+            });
+        if changed {
+            if self.active_model.starts_with("custom:") {
+                self.engine = None;
+            }
+            self.custom = custom;
+        }
     }
 
     pub fn status(&self) -> EngineStatus {
@@ -74,6 +101,30 @@ impl EngineManager {
         }
         let mut last_err = AsrError::LoadFailed("no models configured".into());
         for id in self.candidates() {
+            // The user's own files first: a custom id is namespaced with
+            // `custom:` so it cannot collide, and checking here means a missing
+            // FILE reports as a missing model rather than an unknown id.
+            if let Some(spec) = self.custom.iter().find(|c| c.id == id).cloned() {
+                if !spec.path.exists() {
+                    last_err = AsrError::ModelMissing(format!(
+                        "{} (the file is no longer at {})",
+                        id,
+                        spec.path.display()
+                    ));
+                    continue;
+                }
+                match self.load_custom(&spec) {
+                    Ok(engine) => {
+                        self.engine = Some(engine);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::error!("custom model {id} failed to load: {e}");
+                        last_err = e;
+                        continue;
+                    }
+                }
+            }
             let Some(info) = registry::by_id(&id) else {
                 last_err = AsrError::LoadFailed(format!("unknown model id {id}"));
                 continue;
@@ -97,6 +148,25 @@ impl EngineManager {
             }
         }
         Err(last_err)
+    }
+
+    /// Load a user-supplied whisper.cpp model file.
+    fn load_custom(&self, spec: &CustomModelSpec) -> Result<Box<dyn AsrEngine>, AsrError> {
+        #[cfg(feature = "whisper")]
+        {
+            let engine = crate::whisper::WhisperEngine::load(
+                &spec.path,
+                &spec.id,
+                spec.multilingual,
+                self.use_gpu,
+            )?;
+            Ok(Box::new(engine))
+        }
+        #[cfg(not(feature = "whisper"))]
+        {
+            let _ = spec;
+            Err(AsrError::EngineUnavailable("whisper feature disabled".into()))
+        }
     }
 
     fn load_model(&self, info: &ModelInfo) -> Result<Box<dyn AsrEngine>, AsrError> {

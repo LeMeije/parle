@@ -37,6 +37,7 @@ parle-core = { path = "../crates/parle-core" }
 parle-sync = { path = "../crates/parle-sync" }
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 parle-audio = { path = "../crates/parle-audio" }
+tauri-plugin-dialog = "2.7.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 parle-asr = { path = "../crates/parle-asr", features = ["metal", "parakeet"] }
