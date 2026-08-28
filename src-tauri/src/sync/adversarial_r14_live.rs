@@ -95,3 +95,52 @@ fn r14_live_the_cancel_key_has_a_path_that_does_not_need_the_tap() {
          registered (swallowing Escape system-wide) or never"
     );
 }
+
+/// A launch the USER asked for must show the window, on BOTH platforms.
+///
+/// Reported from real use on macOS: double-clicking the app made the Dock icon
+/// bounce and then apparently nothing happened. The window was created visible
+/// by the config and hidden a moment later on every onboarded launch, so it
+/// flashed and vanished and the only sign the app was running was a menu bar
+/// icon nobody was looking for. It read as "the app is broken".
+///
+/// Windows had already been gated on the `--hidden` flag that autostart passes.
+/// macOS had not, so the two platforms answered the same question differently.
+/// This pins the answer rather than the mechanism: hiding at startup must be
+/// conditional on the system having asked for the launch.
+#[test]
+fn r14_live_a_user_launch_shows_the_window_on_both_platforms() {
+    let lib = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
+    )
+    .expect("lib.rs is readable");
+    let code: String = lib
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // PREMISE: autostart still passes the flag, or there is nothing to gate on.
+    assert!(
+        code.contains("\"--hidden\""),
+        "premise: autostart no longer registers with --hidden, so nothing distinguishes a \
+         login launch from a launch the user asked for"
+    );
+
+    // THE CLAIM: the startup hide is gated on it, and NOT behind a
+    // platform cfg that lets one OS hide unconditionally.
+    let hides: Vec<&str> = code
+        .lines()
+        .filter(|l| l.contains("main.hide()"))
+        .collect();
+    assert!(!hides.is_empty(), "nothing hides the main window at startup any more");
+    assert!(
+        code.contains("let launched_by_system = std::env::args().any(|a| a == \"--hidden\");"),
+        "the startup hide is not gated on whether the system asked for this launch, so a user \
+         double-clicking the app sees the window flash up and vanish"
+    );
+    assert!(
+        code.contains("if state.settings.lock().onboarding_complete && launched_by_system {"),
+        "the hide condition has changed shape; check it still requires a system launch"
+    );
+}

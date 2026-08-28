@@ -228,32 +228,28 @@ pub fn run() {
                     .prune(s.history.retention_days, s.history.max_items);
             }
 
-            // macOS: onboarded launches start quietly in the menu bar (no
-            // window, no Dock tile). The Dock/Cmd-Tab presence follows the main
-            // window: Regular while visible, Accessory when hidden (see hud.rs).
+            // A launch the USER asked for SHOWS THE WINDOW. Only a launch the
+            // system asked for starts quietly.
             //
-            // Windows has no equivalent convention, and hiding a window that the
-            // config already created visible produces a show-then-hide flash on
-            // every launch. Leave it up; closing it sends the app to the tray.
-            // Windows DOES have the login case, though. Autostart registers
-            // with `--hidden` and nothing read it, so a tray app popped a
-            // 980x700 window at every boot while macOS started silently. A
-            // launch the USER asked for still shows the window, so the
-            // show-then-hide flash the comment above describes never happens.
-            #[cfg(not(target_os = "macos"))]
-            if state.settings.lock().onboarding_complete
-                && std::env::args().any(|a| a == "--hidden")
-            {
+            // macOS hid the window on every onboarded launch, so double-clicking
+            // the app bounced the Dock icon and then appeared to do nothing:
+            // the window flashed up and vanished, and the only evidence the app
+            // had started was a small menu bar icon the user was not looking
+            // for. Reported from real use, and it read as "the app is broken".
+            //
+            // Autostart registers with `--hidden`, which is the signal that
+            // this launch is the login one. Windows was already gated on it and
+            // macOS was not, so the two platforms disagreed about the same
+            // question. They no longer do.
+            let launched_by_system = std::env::args().any(|a| a == "--hidden");
+            if state.settings.lock().onboarding_complete && launched_by_system {
                 if let Some(main) = handle.get_webview_window(hud::MAIN_LABEL) {
                     let _ = main.hide();
                 }
-            }
-
-            #[cfg(target_os = "macos")]
-            if state.settings.lock().onboarding_complete {
-                if let Some(main) = handle.get_webview_window(hud::MAIN_LABEL) {
-                    let _ = main.hide();
-                }
+                // The Dock and Cmd-Tab presence follows the main window:
+                // Accessory while it is hidden, Regular once it is shown
+                // again (see hud.rs).
+                #[cfg(target_os = "macos")]
                 let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
 
