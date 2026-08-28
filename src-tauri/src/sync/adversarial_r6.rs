@@ -9,8 +9,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::{RemoteItem, Store};
-use echokey_sync::{PairedKey, Session};
+use parle_core::history::{RemoteItem, Store};
+use parle_sync::{PairedKey, Session};
 use parking_lot::Mutex;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -499,7 +499,7 @@ fn r6_widening_retention_never_refetches_what_the_narrow_window_refused() {
 // of parking the suite. If this one ever hangs again, that is where to look.
 #[test]
 fn r6_clear_history_loses_deletes_when_a_peer_tombstone_arrives_first() {
-    let over = echokey_core::history::MAX_TOMBSTONES_PER_SOURCE as usize + 50;
+    let over = parle_core::history::MAX_TOMBSTONES_PER_SOURCE as usize + 50;
     let a = store_for(A);
     let b = store_for(B);
     let base = now_ms() - 10_000_000;

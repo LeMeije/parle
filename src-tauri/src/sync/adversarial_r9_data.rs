@@ -10,8 +10,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::{RemoteItem, Store, MAX_CLOCK_SKEW_MS};
-use echokey_sync::{PairedKey, Session};
+use parle_core::history::{RemoteItem, Store, MAX_CLOCK_SKEW_MS};
+use parle_sync::{PairedKey, Session};
 use parking_lot::Mutex;
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;

@@ -1,7 +1,7 @@
 //! Windows platform layer.
 //!
 //! Hotkeys: the WH_KEYBOARD_LL hook does NOT live here. It lives in the
-//! `parle-hook` helper process (crates/echokey-hook) and this module supervises
+//! `parle-hook` helper process (crates/parle-hook) and this module supervises
 //! it. A hook proc must return within LowLevelHooksTimeout (~300 ms) or Windows
 //! bypasses it and delivers the key natively — which for the Copilot chord
 //! means the shell launches Copilot. The proc is trivial, but its thread still
@@ -29,7 +29,7 @@ use super::{
 };
 use crate::hotkey_logic::KeyPhase;
 use crossbeam_channel::Sender;
-use echokey_hook as wire;
+use parle_hook as wire;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Arc;
@@ -108,7 +108,7 @@ impl HotkeyListener {
         });
         let sup = inner.clone();
         std::thread::Builder::new()
-            .name("echokey-hook-sup".into())
+            .name("parle-hook-sup".into())
             .spawn(move || sup.run(tx))
             .expect("spawn hook supervisor");
         Self { inner }
@@ -884,7 +884,7 @@ impl ClipboardMonitor {
             let stop = stop.clone();
             let enabled = enabled.clone();
             std::thread::Builder::new()
-                .name("echokey-clipboard".into())
+                .name("parle-clipboard".into())
                 .spawn(move || {
                     let mut last = unsafe { GetClipboardSequenceNumber() };
                     while !stop.load(Ordering::SeqCst) {
@@ -1288,7 +1288,7 @@ pub fn activate_app(_bundle_id: &str) -> bool {
 
 // -- Machine info -------------------------------------------------------------
 
-/// Installed physical RAM in MB, via GlobalMemoryStatusEx. echokey-asr keeps
+/// Installed physical RAM in MB, via GlobalMemoryStatusEx. parle-asr keeps
 /// itself free of the `windows` dependency, so the real value is measured here
 /// and published to its registry at startup (see registry::set_total_ram_mb).
 pub fn total_ram_mb() -> Option<u64> {

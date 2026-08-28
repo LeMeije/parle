@@ -19,7 +19,7 @@ first real pairing as the remaining acceptance test.
 
 ## As built
 
-- **Discovery**: mDNS `_echokey._tcp` via `mdns-sd`. Records are unsigned, so
+- **Discovery**: mDNS `_parle._tcp` via `mdns-sd`. Records are unsigned, so
   the address in one is only a hint: we refuse to dial anything that is not a
   private or link-local address, and the Noise handshake is what actually
   establishes trust.

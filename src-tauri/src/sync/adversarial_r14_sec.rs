@@ -22,8 +22,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::Store;
-use echokey_core::types::TranscriptionResult;
+use parle_core::history::Store;
+use parle_core::types::TranscriptionResult;
 use std::path::{Path, PathBuf};
 
 use crate::pipeline::PipelineEvent;

@@ -24,7 +24,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
 The Tauri sidecar is not built by `cargo test`, so a fresh checkout fails to
-build `echokey` with "resource path `binaries/parle-hook-<triple>` doesn't
+build `parle` with "resource path `binaries/parle-hook-<triple>` doesn't
 exist" until you stage it once:
 
 ```bash
@@ -43,7 +43,7 @@ on any new machine.
 ### 1. mDNS discovery works, VERIFIED 27/08/2026
 
 ```bash
-cargo test -p echokey-sync --test mdns_field_check -- --ignored --nocapture
+cargo test -p parle-sync --test mdns_field_check -- --ignored --nocapture
 ```
 
 Two independent `Discovery` instances found each other on the real LAN
@@ -66,7 +66,7 @@ Local Network** if discovery finds nothing.
 ### 2. The keychain is silent, VERIFIED 27/08/2026
 
 ```bash
-cargo test -p echokey --test keychain_field_check -- --ignored --nocapture
+cargo test -p parle --test keychain_field_check -- --ignored --nocapture
 ```
 
 Store, read, re-read and delete against the real login keychain: first read

@@ -1,7 +1,7 @@
 // Builds the parle-hook helper and stages it as a Tauri sidecar.
 //
 // The helper is the process that owns the WH_KEYBOARD_LL hook (see
-// crates/echokey-hook). `tauri build` only compiles the `echokey` package, so
+// crates/parle-hook). `tauri build` only compiles the `parle` package, so
 // the helper has to be built separately and dropped where the bundler expects
 // external binaries: src-tauri/binaries/parle-hook-<target-triple>[.exe].
 // Tauri installs it next to the app binary with the triple stripped, which is
@@ -28,7 +28,7 @@ function hostTriple() {
 const triple = hostTriple();
 const exeSuffix = process.platform === "win32" ? ".exe" : "";
 
-execFileSync("cargo", ["build", "--release", "-p", "echokey-hook", "--bin", "parle-hook"], {
+execFileSync("cargo", ["build", "--release", "-p", "parle-hook", "--bin", "parle-hook"], {
   cwd: repoRoot,
   stdio: "inherit",
 });

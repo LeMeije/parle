@@ -32,8 +32,8 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 
-use echokey_core::history::{RemoteItem, RemoteTombstone, Store};
-use echokey_sync::{DeviceId, ItemKind, Session, SessionError, SyncItem, SyncMessage, Tombstone, Watermark, PROTOCOL_VERSION};
+use parle_core::history::{RemoteItem, RemoteTombstone, Store};
+use parle_sync::{DeviceId, ItemKind, Session, SessionError, SyncItem, SyncMessage, Tombstone, Watermark, PROTOCOL_VERSION};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -44,8 +44,8 @@ use std::sync::Arc;
 /// exchange — replication was dead for anyone with more than 256 rows above the
 /// peer's watermark, which is essentially every real user on a first sync. The
 /// assert below makes that a build error rather than a silent runtime failure.
-const PAGE: usize = echokey_sync::MAX_BATCH_LEN;
-const _: () = assert!(PAGE <= echokey_sync::MAX_BATCH_LEN);
+const PAGE: usize = parle_sync::MAX_BATCH_LEN;
+const _: () = assert!(PAGE <= parle_sync::MAX_BATCH_LEN);
 /// Ceiling for the widened re-fetch when a whole page shares one millisecond.
 /// Hard stop on a single exchange, so a peer cannot keep us here forever.
 const MAX_BATCHES: usize = 64;
@@ -76,7 +76,7 @@ const MAX_EXCHANGE_MESSAGES: usize = 1024;
 /// asserted a clock was inside a day when the rule under test is a two-minute
 /// window, so they would have passed against a cursor parked twenty-three hours
 /// in the future, the exact failure the tight window exists to prevent.
-const MAX_SKEW_MS: i64 = echokey_core::history::MAX_CLOCK_SKEW_MS;
+const MAX_SKEW_MS: i64 = parle_core::history::MAX_CLOCK_SKEW_MS;
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -613,13 +613,13 @@ fn serve<S: Read + Write>(
                 // inside the SQL, so LIMIT counts rows we will actually send.
                 // See `Store::set_excluded_apps` for why it lives there.
                 .filter(|r| {
-                    let ok = r.text.len() <= echokey_sync::MAX_ITEM_TEXT_BYTES;
+                    let ok = r.text.len() <= parle_sync::MAX_ITEM_TEXT_BYTES;
                     if !ok {
                         oversized_here += 1;
                         tracing::warn!(
                             "sync: not sending a {} byte item; the limit is {}",
                             r.text.len(),
-                            echokey_sync::MAX_ITEM_TEXT_BYTES
+                            parle_sync::MAX_ITEM_TEXT_BYTES
                         );
                     }
                     ok
@@ -923,7 +923,7 @@ fn drain<S: Read + Write>(
                     // every local write sets `created_at = now` and
                     // `updated_at >= created_at`.
                     let created_ceiling =
-                        crate::sync::manager::now_ms() + echokey_core::history::MAX_CLOCK_SKEW_MS;
+                        crate::sync::manager::now_ms() + parle_core::history::MAX_CLOCK_SKEW_MS;
                     if it.created_at > created_ceiling || it.created_at <= 0 {
                         stats.ignored += 1;
                         continue;
@@ -1099,7 +1099,7 @@ fn drain<S: Read + Write>(
                         set.insert(t.source_device.as_str().to_string());
                     }
                     match outcome {
-                        echokey_core::history::ApplyOutcome::Ignored => stats.ignored += 1,
+                        parle_core::history::ApplyOutcome::Ignored => stats.ignored += 1,
                         _ => stats.applied_tombstones += 1,
                     }
                 }
@@ -1263,7 +1263,7 @@ fn apply_item(
         .apply_remote_item(peer_id, &r)
         .map_err(|e| ReplicateError::Store(e.to_string()))?;
     match outcome {
-        echokey_core::history::ApplyOutcome::Ignored => stats.ignored += 1,
+        parle_core::history::ApplyOutcome::Ignored => stats.ignored += 1,
         _ => stats.applied_items += 1,
     }
     Ok(())
@@ -1398,7 +1398,7 @@ mod tests {
         let big: Vec<u32> = (0..20_000).collect();
         for chunk in big.chunks(PAGE) {
             assert!(
-                chunk.len() <= echokey_sync::MAX_BATCH_LEN,
+                chunk.len() <= parle_sync::MAX_BATCH_LEN,
                 "every chunk must be acceptable to the wire"
             );
         }
@@ -1411,8 +1411,8 @@ mod tests {
     // exchange twice over a genuine TCP pair, which is the only way the
     // write/write deadlock and the watermark desync were ever going to show up.
 
-    use echokey_core::history::{RemoteItem, Store};
-    use echokey_sync::{PairedKey, Session};
+    use parle_core::history::{RemoteItem, Store};
+    use parle_sync::{PairedKey, Session};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
@@ -1691,8 +1691,8 @@ mod tests {
 #[cfg(test)]
 mod adversarial {
     use super::*;
-    use echokey_core::history::{RemoteItem, RemoteTombstone, Store};
-    use echokey_sync::{PairedKey, Session};
+    use parle_core::history::{RemoteItem, RemoteTombstone, Store};
+    use parle_sync::{PairedKey, Session};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
@@ -1896,8 +1896,8 @@ mod adversarial {
 #[cfg(test)]
 mod adversarial_convergence {
     use super::*;
-    use echokey_core::history::{RemoteItem, RemoteTombstone, Store};
-    use echokey_sync::{PairedKey, Session};
+    use parle_core::history::{RemoteItem, RemoteTombstone, Store};
+    use parle_sync::{PairedKey, Session};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
@@ -2431,9 +2431,9 @@ mod adversarial_convergence {
 #[cfg(test)]
 mod adversarial_round3 {
     use super::*;
-    use echokey_core::history::MAX_TOMBSTONES_PER_SOURCE;
-    use echokey_core::history::{RemoteItem, RemoteTombstone, Store};
-    use echokey_sync::{DeviceId, ItemKind, PairedKey, Session, SyncItem, SyncMessage, PROTOCOL_VERSION};
+    use parle_core::history::MAX_TOMBSTONES_PER_SOURCE;
+    use parle_core::history::{RemoteItem, RemoteTombstone, Store};
+    use parle_sync::{DeviceId, ItemKind, PairedKey, Session, SyncItem, SyncMessage, PROTOCOL_VERSION};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
@@ -2851,8 +2851,8 @@ mod adversarial_round3 {
 #[cfg(test)]
 mod adversarial_round3_authority {
     use super::*;
-    use echokey_core::history::{RemoteTombstone, Store};
-    use echokey_sync::{
+    use parle_core::history::{RemoteTombstone, Store};
+    use parle_sync::{
         DeviceId, ItemKind, PairedKey, Session, SyncItem, SyncMessage, Tombstone, Watermark,
         PROTOCOL_VERSION,
     };
@@ -3090,7 +3090,7 @@ mod adversarial_round3_authority {
         // has stopped mattering.
         let left = store.lock().tombstone_count(B).unwrap();
         assert!(
-            left <= echokey_core::history::MAX_TOMBSTONES_PER_SOURCE,
+            left <= parle_core::history::MAX_TOMBSTONES_PER_SOURCE,
             "{left} peer-authored tombstones survive, past the cap"
         );
     }
@@ -3102,8 +3102,8 @@ mod adversarial_round3_authority {
 #[cfg(test)]
 mod adversarial_round3_authority_check {
     use super::*;
-    use echokey_core::history::Store;
-    use echokey_sync::{
+    use parle_core::history::Store;
+    use parle_sync::{
         DeviceId, ItemKind, PairedKey, Session, SyncItem, SyncMessage, Tombstone, PROTOCOL_VERSION,
     };
     use std::net::{TcpListener, TcpStream};
@@ -3257,8 +3257,8 @@ mod adversarial_round3_authority_check {
 #[cfg(test)]
 mod adversarial_r3_lifecycle {
     use super::*;
-    use echokey_core::history::Store;
-    use echokey_sync::{PairedKey, Session};
+    use parle_core::history::Store;
+    use parle_sync::{PairedKey, Session};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
@@ -3307,7 +3307,7 @@ mod adversarial_r3_lifecycle {
         let peer = std::thread::spawn(move || {
             let mut s = Session::accept(srv, &k2).unwrap();
             s.send(&SyncMessage::Hello {
-                protocol_version: echokey_sync::PROTOCOL_VERSION,
+                protocol_version: parle_sync::PROTOCOL_VERSION,
                 device_id: DeviceId::parse(B).unwrap(),
                 device_name: "Peer".into(),
             })
@@ -3384,8 +3384,8 @@ mod adversarial_round4 {
         }
     }
 
-    use echokey_core::history::{RemoteItem, Store};
-    use echokey_sync::{PairedKey, Session};
+    use parle_core::history::{RemoteItem, Store};
+    use parle_sync::{PairedKey, Session};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
@@ -3539,7 +3539,7 @@ mod adversarial_round4 {
                 .unwrap();
             assert_eq!(
                 out,
-                echokey_core::history::ApplyOutcome::Ignored,
+                parle_core::history::ApplyOutcome::Ignored,
                 "a badly skewed row must be refused, not written into the cursor"
             );
         }
@@ -3554,7 +3554,7 @@ mod adversarial_round4 {
                 .lock()
                 .apply_remote_item(peer, &item_at(peer, &format!("ok-{i}"), now_ms() + i))
                 .unwrap();
-            assert_eq!(out, echokey_core::history::ApplyOutcome::Inserted);
+            assert_eq!(out, parle_core::history::ApplyOutcome::Inserted);
         }
         assert_eq!(a_store.lock().count().unwrap(), 4);
     }
@@ -3581,8 +3581,8 @@ mod adversarial_round4_mesh {
         }
     }
 
-    use echokey_core::history::{RemoteItem, Store};
-    use echokey_sync::{PairedKey, Session};
+    use parle_core::history::{RemoteItem, Store};
+    use parle_sync::{PairedKey, Session};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
@@ -3766,7 +3766,7 @@ mod adversarial_round4_mesh {
             .lock()
             .apply_remote_item(peer, &item_at(peer, "row", t + 100))
             .unwrap();
-        assert_eq!(out, echokey_core::history::ApplyOutcome::Ignored);
+        assert_eq!(out, parle_core::history::ApplyOutcome::Ignored);
         assert_eq!(a_store.lock().count().unwrap(), 0, "a deleted row must stay deleted");
     }
 
@@ -3778,8 +3778,8 @@ mod adversarial_round4_mesh {
 #[cfg(test)]
 mod adversarial_round4_more {
     use super::*;
-    use echokey_core::history::{RemoteItem, RemoteTombstone, Store, MAX_TOMBSTONES_PER_SOURCE};
-    use echokey_sync::{PairedKey, Session};
+    use parle_core::history::{RemoteItem, RemoteTombstone, Store, MAX_TOMBSTONES_PER_SOURCE};
+    use parle_sync::{PairedKey, Session};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
@@ -3877,7 +3877,7 @@ mod adversarial_round4_more {
         // the alternative — an unbounded table a peer controls — is worse.
         let s = store_for(A);
         let peer = B;
-        let cap = echokey_core::history::MAX_TOMBSTONES_PER_SOURCE;
+        let cap = parle_core::history::MAX_TOMBSTONES_PER_SOURCE;
         let base = now_ms() - 1_000_000;
 
         {
@@ -3952,8 +3952,8 @@ mod adversarial_round4_more {
 #[cfg(test)]
 mod adversarial_round4_lifecycle {
     use super::*;
-    use echokey_core::history::{RemoteItem, Store};
-    use echokey_sync::{DeviceId, ItemKind, PairedKey, Session, SyncItem, SyncMessage};
+    use parle_core::history::{RemoteItem, Store};
+    use parle_sync::{DeviceId, ItemKind, PairedKey, Session, SyncItem, SyncMessage};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
@@ -4005,7 +4005,7 @@ mod adversarial_round4_lifecycle {
         // validation passes.
         let peer = std::thread::spawn(move || {
             let mut s = Session::accept(srv, &k2).unwrap();
-            let items: Vec<SyncItem> = (0..echokey_sync::MAX_BATCH_LEN)
+            let items: Vec<SyncItem> = (0..parle_sync::MAX_BATCH_LEN)
                 .map(|i| SyncItem {
                     source_device: DeviceId::parse(&invented(i)).unwrap(),
                     origin_id: format!("row-{i}"),
@@ -4039,12 +4039,12 @@ mod adversarial_round4_lifecycle {
         peer.join().unwrap();
 
         // Every row was refused, exactly as designed...
-        assert_eq!(stats.refused, echokey_sync::MAX_BATCH_LEN, "{stats:?}");
+        assert_eq!(stats.refused, parle_sync::MAX_BATCH_LEN, "{stats:?}");
         assert_eq!(a_store.lock().count().unwrap(), 0, "and nothing was stored");
         // ...and every one still left a permanent row in source_marks.
         let marks = a_store.lock().watermarks(B).unwrap();
         assert!(
-            marks.len() < echokey_sync::MAX_BATCH_LEN,
+            marks.len() < parle_sync::MAX_BATCH_LEN,
             "one batch of invented source ids created {} receipts. The receipt is \
              written before Attribution::accepts is consulted, so a paired peer \
              decides how big source_marks gets — 256 per message, up to \
@@ -4079,14 +4079,14 @@ mod adversarial_round4_lifecycle {
 
         {
             let g = a_store.lock();
-            for i in 0..(echokey_core::history::MAX_SOURCES_PER_PEER as usize + 500) {
+            for i in 0..(parle_core::history::MAX_SOURCES_PER_PEER as usize + 500) {
                 let src = format!("33333333-3333-4333-8333-{:012x}", i);
                 g.note_received(B, &src, 1_000 + i as i64).unwrap();
             }
         }
         let held = a_store.lock().watermarks(B).unwrap().len() as i64;
         assert!(
-            held <= echokey_core::history::MAX_SOURCES_PER_PEER,
+            held <= parle_core::history::MAX_SOURCES_PER_PEER,
             "one peer put {held} cursors in the table"
         );
 
@@ -4131,8 +4131,8 @@ mod adversarial_round4_lifecycle {
 #[cfg(test)]
 mod adversarial_round4_kinds {
     use super::*;
-    use echokey_core::history::Store;
-    use echokey_sync::{PairedKey, Session};
+    use parle_core::history::Store;
+    use parle_sync::{PairedKey, Session};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
@@ -4294,8 +4294,8 @@ mod adversarial_round4_kinds {
 #[cfg(test)]
 mod adversarial_round4_authority {
     use super::*;
-    use echokey_core::history::Store;
-    use echokey_sync::{
+    use parle_core::history::Store;
+    use parle_sync::{
         DeviceId, ItemKind, PairedKey, Session, SyncItem, SyncMessage, Tombstone, Watermark,
         PROTOCOL_VERSION,
     };
@@ -4506,8 +4506,8 @@ mod adversarial_round5 {
         }
     }
 
-    use echokey_core::history::{RemoteItem, RemoteTombstone, Store};
-    use echokey_sync::{PairedKey, Session};
+    use parle_core::history::{RemoteItem, RemoteTombstone, Store};
+    use parle_sync::{PairedKey, Session};
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -4636,7 +4636,7 @@ mod adversarial_round5 {
             }
         }
 
-        let page = a.lock().items_from(A, 0, echokey_core::history::ORIGIN_CEILING, PAGE).unwrap();
+        let page = a.lock().items_from(A, 0, parle_core::history::ORIGIN_CEILING, PAGE).unwrap();
         assert_eq!(page.len(), PAGE, "precondition: a full page");
         let trimmed: Vec<_> = {
             let tail = page.last().unwrap().updated_at;
@@ -4755,8 +4755,8 @@ mod adversarial_round5_authority {
         }
     }
 
-    use echokey_core::history::Store;
-    use echokey_sync::{
+    use parle_core::history::Store;
+    use parle_sync::{
         DeviceId, ItemKind, PairedKey, Session, SyncItem, SyncMessage, Tombstone, Watermark,
         PROTOCOL_VERSION,
     };
@@ -4989,8 +4989,8 @@ mod adversarial_round5_authority {
 #[cfg(test)]
 mod adversarial_round5_mesh {
     use super::*;
-    use echokey_core::history::{RemoteItem, Store};
-    use echokey_sync::{PairedKey, Session};
+    use parle_core::history::{RemoteItem, Store};
+    use parle_sync::{PairedKey, Session};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 

@@ -3,10 +3,10 @@
 use crate::hotkey_logic::{GestureAction, GestureMachine, KeyPhase};
 use crate::pipeline::{Pipeline, PipelineEvent};
 use crate::platform::{self, HotkeyId, NativeBindings, NativeKey, PlatformEvent};
-use echokey_asr::download::CancelToken;
-use echokey_asr::manager::EngineManager;
-use echokey_core::history::Store;
-use echokey_core::settings::{history_db_path, models_dir, Settings};
+use parle_asr::download::CancelToken;
+use parle_asr::manager::EngineManager;
+use parle_core::history::Store;
+use parle_core::settings::{history_db_path, models_dir, Settings};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,12 +51,12 @@ enum Work {
 
 impl AppState {
     pub fn new(app: &AppHandle) -> Arc<Self> {
-        let mut loaded = Settings::load(&echokey_core::settings::settings_path()).unwrap_or_default();
+        let mut loaded = Settings::load(&parle_core::settings::settings_path()).unwrap_or_default();
         // Assign this install's identity on first run and persist it straight
         // away: a device id that changed between launches would orphan every
         // row already stamped with the old one.
         if loaded.ensure_device_identity() {
-            let path = echokey_core::settings::settings_path();
+            let path = parle_core::settings::settings_path();
             match loaded.save(&path) {
                 Ok(()) => tracing::info!("assigned device identity {}", loaded.sync.device_id),
                 Err(e) => tracing::warn!("could not persist device identity: {e}"),
@@ -141,7 +141,7 @@ impl AppState {
         {
             let pipeline = pipeline.clone();
             std::thread::Builder::new()
-                .name("echokey-worker".into())
+                .name("parle-worker".into())
                 .spawn(move || {
                     // ONE worker: transcription jobs are strictly ordered.
                     for job in work_rx {
@@ -300,7 +300,7 @@ impl AppState {
         // Tray style is a live setting: repaint it now rather than at next launch.
         {
             use tauri::Manager;
-            if let Some(tray) = _app.tray_by_id("echokey-tray") {
+            if let Some(tray) = _app.tray_by_id("parle-tray") {
                 let style = s.appearance.tray_style.as_str();
                 let recording = self.recording_flag.load(Ordering::SeqCst);
                 let _ = tray.set_icon(Some(crate::tray_icon_for(style, recording)));
@@ -420,9 +420,9 @@ pub fn now_ms() -> u64 {
 
 /// Native bindings straight from settings. Free-standing so the hotkey hook can
 /// be armed at process start, before AppState (and its window/DB setup) exists.
-pub fn bindings_from(s: &echokey_core::settings::Settings) -> NativeBindings {
-    use echokey_core::settings::HotkeyMode;
-    let parse = |b: &echokey_core::settings::HotkeyBinding| {
+pub fn bindings_from(s: &parle_core::settings::Settings) -> NativeBindings {
+    use parle_core::settings::HotkeyMode;
+    let parse = |b: &parle_core::settings::HotkeyBinding| {
         if b.enabled {
             NativeKey::parse(&b.key).map(|key| platform::WatchedKey {
                 key,

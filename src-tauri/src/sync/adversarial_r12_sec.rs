@@ -18,8 +18,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::Store;
-use echokey_core::types::TranscriptionResult;
+use parle_core::history::Store;
+use parle_core::types::TranscriptionResult;
 use std::path::{Path, PathBuf};
 
 const A: &str = "11111111-1111-4111-8111-111111111111";
@@ -512,7 +512,7 @@ fn r12_sec_a_local_only_row_stays_withheld_when_a_source_restarts_from_zero() {
 
 #[test]
 fn r12_sec_a_local_only_row_is_never_on_disk_replicable() {
-    let hist = code_of("crates/echokey-core/src/history.rs");
+    let hist = code_of("crates/parle-core/src/history.rs");
     let f = hist
         .split("pub fn insert_transcription_local_only(")
         .nth(1)
@@ -590,7 +590,7 @@ fn r12_sec_an_unattributed_capture_is_replicated_and_that_is_the_residual() {
 /// exclusion list the app ships is still the one the store is given at launch.
 #[test]
 fn r12_sec_the_shipped_exclusion_list_still_reaches_an_old_install() {
-    use echokey_core::settings::{Settings, SETTINGS_VERSION};
+    use parle_core::settings::{Settings, SETTINGS_VERSION};
     let dir = std::env::temp_dir().join(format!("parle-r12-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let p = dir.join("settings.json");

@@ -250,7 +250,7 @@ impl HotkeyListener {
             let stop = stop.clone();
             let runloop = runloop.clone();
             std::thread::Builder::new()
-                .name("echokey-cgeventtap".into())
+                .name("parle-cgeventtap".into())
                 .spawn(move || run_tap(state, recording, stop, runloop, tx))
                 .expect("spawn event tap");
         }

@@ -1,4 +1,4 @@
-//! EchoKey app entry: plugins, tray, windows, platform listeners, dispatcher.
+//! Parle app entry: plugins, tray, windows, platform listeners, dispatcher.
 
 mod commands;
 mod hotkey_logic;
@@ -18,7 +18,7 @@ use tauri::{AppHandle, Emitter, Manager};
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Where the app writes its log. Same directory as settings/history.
 fn log_path() -> Option<std::path::PathBuf> {
-    let dir = dirs_next_local()?.join("EchoKey");
+    let dir = dirs_next_local()?.join("Parle");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("parle.log"))
 }
@@ -34,7 +34,7 @@ fn dirs_next_local() -> Option<std::path::PathBuf> {
 
 pub fn run() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "echokey=info,echokey_lib=info,echokey_core=info,echokey_audio=info,echokey_asr=info".into());
+        .unwrap_or_else(|_| "parle=info,parle_lib=info,parle_core=info,parle_audio=info,parle_asr=info".into());
     // Release builds are GUI-subsystem: stdout goes nowhere, so without this the
     // app has no diagnostics at all on an installed machine. Truncated per run.
     match log_path().and_then(|p| std::fs::File::create(p).ok()) {
@@ -50,7 +50,7 @@ pub fn run() {
     // recommendation; its Windows fallback is a conservative 16 GB guess.
     #[cfg(target_os = "windows")]
     if let Some(mb) = platform::windows::total_ram_mb() {
-        echokey_asr::registry::set_total_ram_mb(mb);
+        parle_asr::registry::set_total_ram_mb(mb);
         tracing::info!("detected {mb} MB RAM");
     }
 
@@ -74,7 +74,7 @@ pub fn run() {
         crossbeam_channel::bounded::<platform::PlatformEvent>(1024);
     #[cfg(target_os = "windows")]
     let early_hotkeys = {
-        let s = echokey_core::settings::Settings::load(&echokey_core::settings::settings_path())
+        let s = parle_core::settings::Settings::load(&parle_core::settings::settings_path())
             .unwrap_or_default();
         if s.onboarding_complete {
             let bindings = state::bindings_from(&s);
@@ -190,7 +190,7 @@ pub fn run() {
                 let state = state.clone();
                 let handle2 = handle.clone();
                 std::thread::Builder::new()
-                    .name("echokey-perm-watch".into())
+                    .name("parle-perm-watch".into())
                     .spawn(move || loop {
                         std::thread::sleep(std::time::Duration::from_secs(3));
                         if state.hotkeys.lock().is_some() {
@@ -257,7 +257,7 @@ pub fn run() {
             }
             if let tauri::RunEvent::Exit = event {
                 // Take sync down POLITELY first. _exit skips every destructor,
-                // including Discovery's, so without this the _echokey._tcp
+                // including Discovery's, so without this the _parle._tcp
                 // record stayed advertised on the LAN until its TTL lapsed and
                 // peers kept dialling a closed port on a machine that had quit.
                 {
@@ -349,7 +349,7 @@ pub(crate) fn tray_icon_for(style: &str, recording: bool) -> tauri::image::Image
 pub(crate) fn tray_style_of(app: &AppHandle) -> String {
     app.try_state::<Arc<AppState>>()
         .map(|s| s.settings.lock().appearance.tray_style.clone())
-        .unwrap_or_else(|| echokey_core::settings::default_tray_style().to_string())
+        .unwrap_or_else(|| parle_core::settings::default_tray_style().to_string())
 }
 
 /// The overlay style, for code that needs to know whether to draw one at all.
@@ -377,7 +377,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 
     let tray_style = tray_style_of(app);
     let tray_style = tray_style.as_str();
-    TrayIconBuilder::with_id("echokey-tray")
+    TrayIconBuilder::with_id("parle-tray")
         // Template mode is alpha-only: macOS discards the colours and tints the
         // shape itself. Correct for the monochrome glyph, but it would flatten
         // the colour badge into a solid silhouette — so only claim it when the
@@ -449,7 +449,7 @@ fn spawn_platform(
 
     let app = app.clone();
     std::thread::Builder::new()
-        .name("echokey-dispatch".into())
+        .name("parle-dispatch".into())
         .spawn(move || {
             for event in rx {
                 state.on_platform_event(&app, event);

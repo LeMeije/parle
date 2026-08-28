@@ -25,8 +25,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::{RemoteItem, Store};
-use echokey_sync::{PairedKey, Session};
+use parle_core::history::{RemoteItem, Store};
+use parle_sync::{PairedKey, Session};
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::net::{TcpListener, TcpStream};
@@ -371,7 +371,7 @@ fn r8_the_drain_banks_a_receipt_for_a_row_it_does_not_store_and_the_repair_is_no
 /// while the device they deleted it on shows it gone.
 #[test]
 fn r8_a_receipt_banked_without_its_tombstone_resurrects_a_deleted_row_for_ever() {
-    use echokey_core::history::ORIGIN_CEILING;
+    use parle_core::history::ORIGIN_CEILING;
 
     let clock = now_ms() - 60_000;
 
@@ -456,7 +456,7 @@ fn r8_a_receipt_banked_without_its_tombstone_resurrects_a_deleted_row_for_ever()
 //   manager.rs:726   if known && due && room && i.dialing.insert(id.clone()) {
 //   manager.rs:734       let guard = DialGuard::new(me3.clone(), id.clone());
 //   manager.rs:735-751   let launched = std::thread::Builder::new()
-//                            .name("echokey-sync-dial".into())
+//                            .name("parle-sync-dial".into())
 //                            .spawn(move || { let _slot = guard; ... });
 //   manager.rs:752       if let Err(e) = launched { tracing::warn!(...) }
 //   manager.rs:761   drop(i);                              <- guard released

@@ -53,7 +53,7 @@ cargo test --workspace     # 74 tests incl. behavioural contract vectors
 Dev note: sign dev builds with one stable certificate or macOS TCC forgets the
 Accessibility grant on every rebuild — see HUMAN_TASKS.md §2.
 
-Internal crate names and the bundle identifier still read `echokey`, the
+Internal crate names and the bundle identifier still read `parle`, the
 project's original name; only the product name changed.
 
 ## Build (Windows)
@@ -68,13 +68,13 @@ and a copy-paste Claude Code pickup prompt.
 ## Repo map
 
 ```
-crates/echokey-core    settings · cleanup formatter · dictionary · history (SQLite+FTS5) · fuzzy search
-crates/echokey-audio   cpal capture · ordered buffering · resample to 16 kHz mono · levels · WAV
-crates/echokey-asr     AsrEngine trait · whisper.cpp backend · model registry · downloader · fallback
+crates/parle-core    settings · cleanup formatter · dictionary · history (SQLite+FTS5) · fuzzy search
+crates/parle-audio   cpal capture · ordered buffering · resample to 16 kHz mono · levels · WAV
+crates/parle-asr     AsrEngine trait · whisper.cpp backend · model registry · downloader · fallback
 src-tauri              app wiring · pipeline · gesture machine · HUD/tray · platform/{macos,windows}
 src                    React UI: onboarding · history palette · models · dictionary · settings · HUD
 shared                 behavioural-contract test vectors (both platforms must pass)
-bench                  speech fixtures + `cargo run --release --example bench -p echokey-asr`
+bench                  speech fixtures + `cargo run --release --example bench -p parle-asr`
 docs                   PRODUCT · ARCHITECTURE · BENCHMARKS · WINDOWS_HANDOFF · research/
 ```
 

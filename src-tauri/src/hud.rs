@@ -110,7 +110,7 @@ pub fn create_hud(app: &AppHandle) -> tauri::Result<()> {
 pub fn sync_hud(app: &AppHandle, state: PipelineState) {
     // Tray badge follows capture only: once we are transcribing the mic is no
     // longer live, and a dot that lingers would misreport that.
-    if let Some(tray) = app.tray_by_id("echokey-tray") {
+    if let Some(tray) = app.tray_by_id("parle-tray") {
         let recording = matches!(state, PipelineState::Recording);
         let style = crate::tray_style_of(app);
         let style = style.as_str();
@@ -165,7 +165,7 @@ fn capture_previous_app(app: &AppHandle) {
     let state = app.state::<std::sync::Arc<crate::state::AppState>>();
     let (bundle_id, _) = crate::platform::imp::frontmost_app();
     if let Some(id) = bundle_id {
-        if id != "com.novaire.echokey" {
+        if id != "com.novaire.parle" {
             *state.previous_app.lock() = Some(id);
         }
     }

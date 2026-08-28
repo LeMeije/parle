@@ -1,6 +1,6 @@
 //! The pairing exchange, driven over a plain TCP stream.
 //!
-//! `echokey-sync` owns the cryptography and hands back opaque blobs; this moves
+//! `parle-sync` owns the cryptography and hands back opaque blobs; this moves
 //! them and nothing else. Both roles are here so the two sides cannot drift.
 //!
 //! Message order (identical for both roles, which is why it is one exchange
@@ -15,7 +15,7 @@
 //! It is still only as trustworthy as the code: see the note in `pairing.rs`
 //! about device ids not being bound into the SPAKE2 transcript.
 
-use echokey_sync::{
+use parle_sync::{
     ConfirmTag, PairedKey, Pairing, PairingCode, PairingError, PairingRole, Session, SessionError,
     SyncMessage, PROTOCOL_VERSION,
 };
@@ -258,7 +258,7 @@ pub fn run_with<S: std::io::Read + std::io::Write>(
     };
     session.send(&SyncMessage::Hello {
         protocol_version: PROTOCOL_VERSION,
-        device_id: echokey_sync::DeviceId::parse(me.0).map_err(|_| PairFlowError::BadIdentity)?,
+        device_id: parle_sync::DeviceId::parse(me.0).map_err(|_| PairFlowError::BadIdentity)?,
         device_name: me.1.chars().take(64).collect(),
     })?;
     let (device_id, device_name) = match session.recv()? {

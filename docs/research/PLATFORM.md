@@ -101,7 +101,7 @@ Full findings from the platform research pass. Crate versions checked on crates.
   headline permission. Test the actual prompt set on current macOS.
 - TCC SIGNING TRAP: ad-hoc signing (-s -) makes a new CDHash per build -> grants silently orphaned every
   rebuild (AXIsProcessTrusted false while toggle looks enabled). Dev fix: ONE stable self-signed or Apple
-  Development cert, sign every dev build with it. Recovery: tccutil reset Accessibility com.novaire.echokey
+  Development cert, sign every dev build with it. Recovery: tccutil reset Accessibility com.novaire.parle
   (never a bare reset) and fully quit System Settings (the pane caches). Ship = Developer ID + hardened
   runtime + notarisation. Never run the .app from an iCloud-synced folder (sync corrupts signatures).
 

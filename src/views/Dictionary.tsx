@@ -37,7 +37,7 @@ export default function DictionaryView() {
       <header className="view-head">
         <h1>Dictionary</h1>
         <p>
-          Names, brands and jargon EchoKey should get right. Terms bias recognition and fix close
+          Names, brands and jargon Parle should get right. Terms bias recognition and fix close
           misspellings — never inserting words you didn't say.
         </p>
       </header>

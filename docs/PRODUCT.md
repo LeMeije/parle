@@ -1,4 +1,4 @@
-# EchoKey — Product Specification
+# Parle — Product Specification
 
 On-device AI dictation + unified transcription/clipboard history for macOS and Windows 11.
 Local-first is the trust wedge: no telemetry, no cloud, ever. Beat OpenWhispr on weight

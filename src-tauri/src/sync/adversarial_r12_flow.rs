@@ -28,9 +28,9 @@
 
 #![cfg(test)]
 
-use echokey_core::history::Store;
-use echokey_core::types::TranscriptionResult;
-use echokey_sync::{PairedKey, Session};
+use parle_core::history::Store;
+use parle_core::types::TranscriptionResult;
+use parle_sync::{PairedKey, Session};
 use parking_lot::Mutex;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -1314,7 +1314,7 @@ fn r12_flow_the_design_doc_predates_the_third_answer() {
 
 #[test]
 fn r12_flow_the_exclusion_union_cannot_fire_a_second_time() {
-    use echokey_core::settings::{Settings, SETTINGS_VERSION};
+    use parle_core::settings::{Settings, SETTINGS_VERSION};
 
     let dir = std::env::temp_dir().join(format!("parle-r12-flow-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -1363,7 +1363,7 @@ fn r12_flow_the_exclusion_union_cannot_fire_a_second_time() {
     );
 
     // The gate is a literal, not a comparison against the shipped list.
-    let src = code_of("crates/echokey-core/src/settings.rs");
+    let src = code_of("crates/parle-core/src/settings.rs");
     assert!(
         src.contains("fn migrate"),
         "anchor lost: migrate is gone"

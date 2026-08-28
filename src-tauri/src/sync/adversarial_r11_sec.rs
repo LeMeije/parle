@@ -16,8 +16,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::Store;
-use echokey_core::settings::Settings;
+use parle_core::history::Store;
+use parle_core::settings::Settings;
 use std::path::{Path, PathBuf};
 
 const A: &str = "11111111-1111-4111-8111-111111111111";
@@ -97,7 +97,7 @@ fn r11_migrate_reaches_a_settings_file_that_already_exists() {
     // And no duplicates were appended for the ones already present.
     let ones = list.iter().filter(|a| a.as_str() == "com.1password.1password").count();
     assert_eq!(ones, 1, "the union must not duplicate what is already there");
-    assert_eq!(loaded.version, echokey_core::settings::SETTINGS_VERSION);
+    assert_eq!(loaded.version, parle_core::settings::SETTINGS_VERSION);
 }
 
 /// A user who deliberately removes an entry must get it back ONCE, not on
@@ -154,12 +154,12 @@ fn r11_no_key_material_can_be_serialised_into_settings() {
     let mut s = Settings::default();
     s.sync.device_id = A.into();
     s.sync.device_name = "Ben's MacBook Pro".into();
-    s.sync.paired.push(echokey_core::settings::PairedDevice {
+    s.sync.paired.push(parle_core::settings::PairedDevice {
         id: "22222222-2222-4222-8222-222222222222".into(),
         name: "G14".into(),
         last_seen: Some(1_700_000_000_000),
     });
-    s.sync.resend_owed.push(echokey_core::settings::ResendDebt {
+    s.sync.resend_owed.push(parle_core::settings::ResendDebt {
         device_id: "22222222-2222-4222-8222-222222222222".into(),
         from: 0,
     });
@@ -398,7 +398,7 @@ fn r11_conceal_and_store_disagree_about_the_same_evidence() {
     );
 
     // And the store can actually honour it: the outbound door filters on it.
-    let store = code_of("crates/echokey-core/src/history.rs");
+    let store = code_of("crates/parle-core/src/history.rs");
     assert!(
         store.contains("local_only = 0"),
         "`items_from` does not exclude local-only rows, so the third outcome is a label with \

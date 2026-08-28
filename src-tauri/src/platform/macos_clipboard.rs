@@ -21,7 +21,7 @@ impl ClipboardMonitor {
             let stop = stop.clone();
             let enabled = enabled.clone();
             std::thread::Builder::new()
-                .name("echokey-clipboard".into())
+                .name("parle-clipboard".into())
                 .spawn(move || {
                     let mut last = macos::pasteboard_change_count();
                     // Who was frontmost at the PREVIOUS sample.

@@ -11,7 +11,7 @@ document.body.dataset.window = isHud ? 'hud' : 'main';
 function dumpError(msg: string) {
   const el = document.createElement('pre');
   el.style.cssText = 'padding:16px;color:#d5382f;font-size:12px;white-space:pre-wrap;user-select:text';
-  el.textContent = `EchoKey UI error:\n${msg}`;
+  el.textContent = `Parle UI error:\n${msg}`;
   document.body.appendChild(el);
 }
 window.addEventListener('error', (e) => dumpError(String(e.error?.stack ?? e.message)));

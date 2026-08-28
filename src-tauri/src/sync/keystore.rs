@@ -11,7 +11,7 @@
 //! Failure to reach the keychain is reported, never silently downgraded to
 //! writing the key somewhere else.
 
-use echokey_sync::PairedKey;
+use parle_sync::PairedKey;
 
 const SERVICE: &str = "Parle sync";
 

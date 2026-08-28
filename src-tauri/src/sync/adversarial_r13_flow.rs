@@ -19,10 +19,10 @@
 
 #![cfg(test)]
 
-use echokey_core::history::Store;
-use echokey_core::settings::Settings;
-use echokey_core::types::TranscriptionResult;
-use echokey_sync::PeerInfo;
+use parle_core::history::Store;
+use parle_core::settings::Settings;
+use parle_core::types::TranscriptionResult;
+use parle_sync::PeerInfo;
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -102,7 +102,7 @@ fn paired(id: &str, name: &str) -> UiPaired {
 
 fn record(id: &str, name: &str, last_octet: u8) -> PeerInfo {
     PeerInfo {
-        id: echokey_sync::DeviceId::parse(id).unwrap(),
+        id: parle_sync::DeviceId::parse(id).unwrap(),
         name: name.into(),
         addr: IpAddr::V4(Ipv4Addr::new(192, 168, 1, last_octet)),
         port: 51234,
@@ -199,7 +199,7 @@ fn r13_flow_a1_an_unsigned_mdns_record_relabels_a_paired_device() {
     // And the character policy does not stand in the way: an ordinary name is
     // returned verbatim by the sanitiser snapshot applies.
     assert_eq!(
-        echokey_sync::sanitise_device_name(LIE).as_deref(),
+        parle_sync::sanitise_device_name(LIE).as_deref(),
         Some(LIE),
         "usable_peer_name passes an ordinary attacker-chosen name through unchanged"
     );
@@ -225,7 +225,7 @@ fn r13_flow_a2_the_paired_name_flaps_between_two_values_with_presence() {
         peers
             .get(&stored.id)
             .map(|q| {
-                echokey_sync::sanitise_device_name(&q.name)
+                parle_sync::sanitise_device_name(&q.name)
                     .unwrap_or_else(|| format!("unnamed device {}", &stored.id[..8]))
             })
             .unwrap_or_else(|| stored.name.clone())
@@ -324,7 +324,7 @@ fn hostile_refuser(l: TcpListener, body: Vec<u8>) -> std::thread::JoinHandle<()>
 /// same screen, and is filtered by nothing.
 #[test]
 fn r13_flow_b2_a_hostile_peer_writes_the_users_pairing_error_message() {
-    use echokey_sync::{PairingCode, PairingRole};
+    use parle_sync::{PairingCode, PairingRole};
 
     // Everything `validate_device_name` refuses, plus enough length to fill the
     // dialogue. U+202E is the right-to-left override the identity module bans
@@ -727,11 +727,11 @@ fn r13_flow_f1_no_sanitised_name_is_refused_by_the_new_validator() {
     ];
     let mut rescued = 0usize;
     for raw in corpus {
-        let refused_raw = echokey_sync::validate_device_name(raw).is_err();
-        match echokey_sync::sanitise_device_name(raw) {
+        let refused_raw = parle_sync::validate_device_name(raw).is_err();
+        match parle_sync::sanitise_device_name(raw) {
             Some(clean) => {
                 assert!(
-                    echokey_sync::validate_device_name(&clean).is_ok(),
+                    parle_sync::validate_device_name(&clean).is_ok(),
                     "sanitise_device_name produced {clean:?} from {raw:?}, which the validator refuses"
                 );
                 if refused_raw {
@@ -760,17 +760,17 @@ fn r13_flow_f1_no_sanitised_name_is_refused_by_the_new_validator() {
 #[test]
 fn r13_flow_f2_a_doubled_space_is_now_refused_outright_not_collapsed() {
     assert!(
-        echokey_sync::validate_device_name("Ben's  MacBook Pro").is_err(),
+        parle_sync::validate_device_name("Ben's  MacBook Pro").is_err(),
         "the round-12 collapse check is not in force"
     );
     assert!(
-        echokey_sync::validate_device_name("Ben's MacBook Pro").is_ok(),
+        parle_sync::validate_device_name("Ben's MacBook Pro").is_ok(),
         "control: the collapsed form is accepted"
     );
     // And the same string is accepted by the sanitiser, which is what every
     // outbound path uses. The two doors disagree by design.
     assert_eq!(
-        echokey_sync::sanitise_device_name("Ben's  MacBook Pro").as_deref(),
+        parle_sync::sanitise_device_name("Ben's  MacBook Pro").as_deref(),
         Some("Ben's MacBook Pro")
     );
 }
@@ -788,17 +788,17 @@ fn r13_flow_f3_the_cf_ban_reaches_format_characters_that_are_not_invisible() {
     for c in ['\u{0600}', '\u{06DD}', '\u{070F}'] {
         let name = format!("Ben {c}Mac");
         assert!(
-            echokey_sync::validate_device_name(&name).is_err(),
+            parle_sync::validate_device_name(&name).is_err(),
             "{c:?} is no longer refused; the Cf ban has been narrowed"
         );
-        let cleaned = echokey_sync::sanitise_device_name(&name).expect("something survives");
+        let cleaned = parle_sync::sanitise_device_name(&name).expect("something survives");
         assert!(!cleaned.contains(c), "{c:?} survived the sanitiser");
         assert_ne!(cleaned, name, "the sanitiser silently changed the user's name");
     }
     // ZWJ and ZWNJ are the deliberate exemptions and must stay exempt.
     for c in ['\u{200C}', '\u{200D}'] {
         assert!(
-            echokey_sync::validate_device_name(&format!("a{c}b")).is_ok(),
+            parle_sync::validate_device_name(&format!("a{c}b")).is_ok(),
             "{c:?} must stay allowed; it is orthographically load-bearing"
         );
     }

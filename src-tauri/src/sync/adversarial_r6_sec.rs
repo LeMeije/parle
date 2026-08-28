@@ -11,8 +11,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::{RemoteItem, RemoteTombstone, Store};
-use echokey_sync::{
+use parle_core::history::{RemoteItem, RemoteTombstone, Store};
+use parle_sync::{
     DeviceId, ItemKind, PairedKey, Session, SyncItem, SyncMessage, Tombstone, Watermark,
     PROTOCOL_VERSION,
 };
@@ -682,8 +682,8 @@ fn r6sec_a_hostile_watermark_clock_cannot_produce_a_nonsense_floor() {
 #[test]
 fn r6sec_a_real_pairing_leaves_no_key_material_anywhere_persisted() {
     use crate::sync::pair_flow;
-    use echokey_core::settings::{PairedDevice, Settings};
-    use echokey_sync::{PairingCode, PairingRole};
+    use parle_core::settings::{PairedDevice, Settings};
+    use parle_sync::{PairingCode, PairingRole};
 
     // Run a genuine pairing over a real socket pair, both roles.
     let (mut c, mut s) = socket_pair();
@@ -721,7 +721,7 @@ fn r6sec_a_real_pairing_leaves_no_key_material_anywhere_persisted() {
     for rendered in [
         format!("{:?}", initiator.key),
         format!("{:?}", code),
-        echokey_sync::PairingError::CodeMismatch.to_string(),
+        parle_sync::PairingError::CodeMismatch.to_string(),
         format!("{:?}", DeviceId::parse(B).unwrap()),
     ] {
         assert!(!rendered.contains(&hex), "key material in {rendered:?}");
@@ -750,7 +750,7 @@ fn r6sec_a_real_pairing_leaves_no_key_material_anywhere_persisted() {
 // ===========================================================================
 #[test]
 fn r6sec_a_device_name_the_ui_accepts_can_disable_sync_entirely() {
-    use echokey_sync::{sanitise_device_name, validate_device_name, Discovery, DiscoveryConfig};
+    use parle_sync::{sanitise_device_name, validate_device_name, Discovery, DiscoveryConfig};
 
     // The PRODUCTION path, not a copy of it.
     //

@@ -2,7 +2,7 @@
 //! down/up events; this decides Start/Stop/Cancel. No timers of its own — the
 //! caller supplies timestamps, which keeps it deterministic and testable.
 
-use echokey_core::settings::HotkeyMode;
+use parle_core::settings::HotkeyMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyPhase {

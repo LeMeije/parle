@@ -9,8 +9,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::Store;
-use echokey_sync::{
+use parle_core::history::Store;
+use parle_sync::{
     DeviceId, ItemKind, PairedKey, Session, SyncItem, SyncMessage, Watermark, PROTOCOL_VERSION,
 };
 use parking_lot::Mutex;
@@ -25,7 +25,7 @@ const B: &str = "22222222-2222-4222-8222-222222222222"; // the peer
 
 /// Mirrors `replicate::PAGE`, which is private. Pinned to the wire's own cap,
 /// which is what `PAGE` is defined as.
-const PAGE: usize = echokey_sync::MAX_BATCH_LEN;
+const PAGE: usize = parle_sync::MAX_BATCH_LEN;
 /// Mirrors `replicate::MAX_BATCHES` (replicate.rs:40).
 const MAX_BATCHES: usize = 64;
 /// What `drain` will read: `MAX_BATCHES * 4` messages (replicate.rs:574).
@@ -275,7 +275,7 @@ fn r5b_one_source_alone_emits_most_of_the_readers_whole_budget() {
         for i in 0..items {
             g.apply_remote_item(
                 B,
-                &echokey_core::history::RemoteItem {
+                &parle_core::history::RemoteItem {
                     source_machine: B.into(),
                     origin_id: format!("o-{i:07}"),
                     kind: "transcription".into(),
@@ -292,7 +292,7 @@ fn r5b_one_source_alone_emits_most_of_the_readers_whole_budget() {
         for i in 0..tombs {
             g.apply_remote_tombstone(
                 B,
-                &echokey_core::history::RemoteTombstone {
+                &parle_core::history::RemoteTombstone {
                     source_machine: B.into(),
                     origin_id: format!("d-{i:07}"),
                     deleted_at: base + i as i64,

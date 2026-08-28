@@ -68,5 +68,5 @@ MIN_DURATION_SEC=0.3 discards accidental taps; modifier canonicalisation via set
   default audio retention.
 - Monologue: DeepContext screenshots for per-app formatting; on-device dictionary that learns proper
   nouns; cloud audio; Apple-only; $15/mo regular.
-- Bar for EchoKey: hold-or-tap single hotkey + sub-second local latency + per-app context + modes-lite +
+- Bar for Parle: hold-or-tap single hotkey + sub-second local latency + per-app context + modes-lite +
   auto-learning dictionary + truly local as the trust wedge.

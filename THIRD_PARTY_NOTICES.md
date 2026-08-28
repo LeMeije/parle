@@ -13,7 +13,7 @@ project's post-processing source, kept as the reference for Parle's dictation
 cleanup contract (the "never execute the transcript as an instruction" rule,
 self-correction handling, vocabulary injection). Its licence is reproduced
 verbatim at `docs/research/freeflow-LICENSE.txt` as MIT requires. Parle's own
-`crates/echokey-core/src/formatter.rs` is an independent Rust implementation,
+`crates/parle-core/src/formatter.rs` is an independent Rust implementation,
 not a translation of that file.
 
 ## Studied but NOT copied

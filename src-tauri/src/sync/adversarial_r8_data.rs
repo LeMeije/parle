@@ -3,7 +3,7 @@
 //!
 //! Scope: `replicate.rs` — serve, drain, authority, paging, the one-shot
 //! re-offer. The store-side half is in
-//! `crates/echokey-core/src/adversarial_r8_data.rs`.
+//! `crates/parle-core/src/adversarial_r8_data.rs`.
 //!
 //! Every socket here has read AND write timeouts, every loop has a hard bound,
 //! and every exchange runs under a wall-clock budget with both sides on their
@@ -12,8 +12,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::{RemoteItem, RemoteTombstone, Store};
-use echokey_sync::{PairedKey, Session};
+use parle_core::history::{RemoteItem, RemoteTombstone, Store};
+use parle_sync::{PairedKey, Session};
 use parking_lot::Mutex;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};

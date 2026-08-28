@@ -13,8 +13,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::Store;
-use echokey_core::settings::HistorySettings;
+use parle_core::history::Store;
+use parle_core::settings::HistorySettings;
 use std::path::{Path, PathBuf};
 
 const A: &str = "11111111-1111-4111-8111-111111111111";
@@ -526,7 +526,7 @@ fn r9_i1_the_persisted_paired_device_still_has_nowhere_to_put_a_key() {
         "the parser cannot distinguish a key field, so a pass below means nothing"
     );
 
-    let fields = paired_device_fields(&code_of("crates/echokey-core/src/settings.rs"));
+    let fields = paired_device_fields(&code_of("crates/parle-core/src/settings.rs"));
     assert!(!fields.is_empty(), "the control is wrong: PairedDevice parsed as having no fields");
     for f in &fields {
         assert!(

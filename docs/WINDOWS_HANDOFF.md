@@ -56,7 +56,7 @@ principle and does not survive contact with a busy Tauri process. Windows
 silently removes any hook whose proc exceeds `LowLevelHooksTimeout` (~300 ms),
 and the app's own startup and transcription work were enough to trip it.
 
-The hook now lives in `crates/echokey-hook`, built as a separate ~230 KB
+The hook now lives in `crates/parle-hook`, built as a separate ~230 KB
 `parle-hook.exe` helper that does nothing but pump messages. The app talks to it
 over named pipes and keeps it inside a job object with
 `KILL_ON_JOB_CLOSE`, so the helper cannot outlive the app.
@@ -86,8 +86,8 @@ added 75 ms of latency for a bug that did not exist.
   only the M2 Metal numbers; its Windows section is a prediction, not a
   measurement. Run both and replace it:
   ```bash
-  cargo run --release --example bench -p echokey-asr                  # CPU
-  cargo run --release --example bench -p echokey-asr --features cuda  # CUDA
+  cargo run --release --example bench -p parle-asr                  # CPU
+  cargo run --release --example bench -p parle-asr --features cuda  # CUDA
   ```
 - **Win+V exclusion is implemented but not verified on hardware.** Dictate, then
   press Win+V: the transcript must not appear.
@@ -105,13 +105,13 @@ added 75 ms of latency for a bug that did not exist.
 
 `tauri-build` emits no `rerun-if-changed` for the icon files, so changing an
 icon and rebuilding ships the **old** icon with no warning and no error. Force
-it by touching `build.rs` or clearing `target/release/build/echokey-*`. The only
+it by touching `build.rs` or clearing `target/release/build/parle-*`. The only
 reliable confirmation is a byte-search of the produced executable for the new
 icon data.
 
 ## Behavioural contract
 
 `shared/formatter-test-vectors.json` and `shared/dictionary-test-vectors.json`
-are the spec; `cargo test -p echokey-core` runs them. If Windows behaviour ever
+are the spec; `cargo test -p parle-core` runs them. If Windows behaviour ever
 has to differ — it should not, the formatter and dictionary are pure Rust —
 change the vectors first and flag it.

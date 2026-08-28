@@ -21,8 +21,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::{RemoteItem, Store};
-use echokey_sync::{PairedKey, Session};
+use parle_core::history::{RemoteItem, Store};
+use parle_sync::{PairedKey, Session};
 use parking_lot::Mutex;
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
@@ -207,7 +207,7 @@ fn texts(store: &Arc<Mutex<Store>>) -> Vec<String> {
 // ---------------------------------------------------------------------------
 #[test]
 fn r8_one_oversized_row_stops_the_pairing_permanently_in_both_directions() {
-    let cap = echokey_sync::wire::MAX_ITEM_TEXT_BYTES;
+    let cap = parle_sync::wire::MAX_ITEM_TEXT_BYTES;
     let base = now_ms() - 5_000_000;
 
     // CONTROL FIRST, so a green defect assertion cannot be green by accident.
@@ -511,7 +511,7 @@ fn r8_the_default_exclusion_list_protects_a_password_manager_on_only_one_of_the_
     // The list is generated from one table of products now, so every entry has
     // both identifiers by construction. This test is what stops the halves
     // drifting apart again.
-    let list = echokey_core::settings::Settings::default().history.excluded_apps;
+    let list = parle_core::settings::Settings::default().history.excluded_apps;
 
     let mac: Vec<String> = list
         .iter()
@@ -590,7 +590,7 @@ fn r8_the_default_exclusion_list_protects_a_password_manager_on_only_one_of_the_
 // ---------------------------------------------------------------------------
 #[test]
 fn r8_device_names_pass_invisible_and_direction_changing_characters() {
-    use echokey_sync::{sanitise_device_name, validate_device_name};
+    use parle_sync::{sanitise_device_name, validate_device_name};
 
     // CONTROL: the gate does reject what it claims to reject, so a pass below
     // is a gap in the rule and not a broken import.

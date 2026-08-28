@@ -20,9 +20,9 @@
 
 #![cfg(test)]
 
-use echokey_core::history::{ApplyOutcome, RemoteItem, RemoteTombstone, Store};
-use echokey_core::types::TranscriptionResult;
-use echokey_sync::{PairedKey, Session};
+use parle_core::history::{ApplyOutcome, RemoteItem, RemoteTombstone, Store};
+use parle_core::types::TranscriptionResult;
+use parle_sync::{PairedKey, Session};
 use parking_lot::Mutex;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};

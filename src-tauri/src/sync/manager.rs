@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use echokey_sync::{
+use parle_sync::{
     Discovery, DiscoveryConfig, DiscoveryEvent, PairingCode, PairingRole, PeerInfo,
 };
 use parking_lot::Mutex;
@@ -29,7 +29,7 @@ use super::pair_flow;
 use super::deadline::{Deadline, Timed};
 use super::replicate::{self, Attribution, Kinds, Retention, Turn};
 use super::wire_tcp::{read_byte, read_frame, write_byte, write_frame, MODE_PAIR, MODE_SESSION};
-use echokey_core::history::Store;
+use parle_core::history::Store;
 
 /// How long we will sit in a blocking read on an unauthenticated socket.
 /// Without this a peer that connects and says nothing pins a thread forever.
@@ -229,7 +229,7 @@ pub(crate) fn retention_widened(previous: u32, next: u32) -> bool {
 /// sees the id rather than a blank row or a name that reads like their own
 /// machine.
 fn usable_peer_name(raw: &str, id: &str) -> String {
-    echokey_sync::sanitise_device_name(raw)
+    parle_sync::sanitise_device_name(raw)
         .unwrap_or_else(|| format!("unnamed device {}", id.chars().take(8).collect::<String>()))
 }
 
@@ -238,11 +238,11 @@ fn usable_peer_name(raw: &str, id: &str) -> String {
 /// Never returns something `validate_device_name` would refuse, because every
 /// caller of it treats a refusal as a hard failure of the whole feature.
 fn usable_device_name(stored: &str) -> String {
-    if let Some(safe) = echokey_sync::sanitise_device_name(stored) {
+    if let Some(safe) = parle_sync::sanitise_device_name(stored) {
         return safe;
     }
     tracing::warn!("sync: the stored device name is unusable on the wire; falling back");
-    echokey_sync::sanitise_device_name(&fallback_device_name())
+    parle_sync::sanitise_device_name(&fallback_device_name())
         .unwrap_or_else(|| "This device".to_string())
 }
 
@@ -561,7 +561,7 @@ pub struct SyncManager {
     store: Arc<Mutex<Store>>,
     /// Written on every change to pairing state. Never holds `inner` while
     /// taking this, so the two locks cannot invert.
-    settings: Arc<Mutex<echokey_core::settings::Settings>>,
+    settings: Arc<Mutex<parle_core::settings::Settings>>,
     inbound: Arc<AtomicUsize>,
     /// Pre-authentication connections in flight, per source address.
     preauth: Arc<Mutex<std::collections::HashMap<std::net::IpAddr, usize>>>,
@@ -579,9 +579,9 @@ impl SyncManager {
     /// that whole exchange.
     pub fn new(
         app: AppHandle,
-        s: &echokey_core::settings::SyncSettings,
+        s: &parle_core::settings::SyncSettings,
         store: Arc<Mutex<Store>>,
-        settings: Arc<Mutex<echokey_core::settings::Settings>>,
+        settings: Arc<Mutex<parle_core::settings::Settings>>,
         retention_days: u32,
     ) -> Arc<Self> {
         let m = Arc::new(Self {
@@ -751,7 +751,7 @@ impl SyncManager {
             (i.device_id.clone(), i.device_name.clone())
         };
 
-        let id = match echokey_sync::DeviceId::parse(&device_id) {
+        let id = match parle_sync::DeviceId::parse(&device_id) {
             Ok(id) => id,
             Err(e) => {
                 let msg = format!("This machine has no usable sync identity: {e}");
@@ -769,7 +769,7 @@ impl SyncManager {
                 self.inner.lock().discovery = Some(d);
                 let me = self.clone();
                 std::thread::Builder::new()
-                    .name("echokey-sync-discovery".into())
+                    .name("parle-sync-discovery".into())
                     .spawn(move || {
                         for ev in rx {
                             // Decided under the lock, ACTED ON after it.
@@ -811,7 +811,7 @@ impl SyncManager {
                                 // stays in `dialing` for the life of the process.
                                 let guard = DialGuard::new(me3.clone(), id.clone());
                                 let launched = std::thread::Builder::new()
-                                    .name("echokey-sync-dial".into())
+                                    .name("parle-sync-dial".into())
                                     .spawn(move || {
                                         let _slot = guard;
                                         me3.clone().dial(id.clone());
@@ -838,7 +838,7 @@ impl SyncManager {
         self.inner.lock().listen_stop = Some(gen_stop.clone());
         let me = self.clone();
         let spawned = std::thread::Builder::new()
-            .name("echokey-sync-listen".into())
+            .name("parle-sync-listen".into())
             .spawn(move || {
                 for conn in listener.incoming() {
                     // This generation's flag, not the process-wide one: a
@@ -908,7 +908,7 @@ impl SyncManager {
                             // that no longer exists. That is the exact state the
                             // rollback below the spawn exists to prevent.
                             let launched = std::thread::Builder::new()
-                                .name("echokey-sync-serve".into())
+                                .name("parle-sync-serve".into())
                                 .spawn(move || {
                                 // RAII: released on every exit including a
                                 // panic. Decrementing after the call would leak
@@ -1261,7 +1261,7 @@ impl SyncManager {
         };
         // The handshake is still unauthenticated work, so the deadline set
         // before the first byte stays on across it.
-        match echokey_sync::Session::accept(s, &key) {
+        match parle_sync::Session::accept(s, &key) {
             Ok(session) => {
                 // Authenticated: a longer budget, still never unbounded.
                 // The socket timeouts move with it. They are the backstop that
@@ -1506,7 +1506,7 @@ impl SyncManager {
     /// tells the user); by the time it reaches here it must be storable, so an
     /// unusable one keeps the existing name rather than bricking sync.
     pub fn set_device_name(&self, name: &str) {
-        match echokey_sync::sanitise_device_name(name) {
+        match parle_sync::sanitise_device_name(name) {
             Some(safe) => {
                 self.inner.lock().device_name = safe;
                 self.publish();
@@ -1633,7 +1633,7 @@ impl SyncManager {
                 i.clipboard,
                 i.paired
                     .iter()
-                    .map(|d| echokey_core::settings::PairedDevice {
+                    .map(|d| parle_core::settings::PairedDevice {
                         id: d.id.clone(),
                         name: d.name.clone(),
                         last_seen: d.last_seen,
@@ -1641,7 +1641,7 @@ impl SyncManager {
                     .collect::<Vec<_>>(),
                 i.resend_owed
                     .iter()
-                    .map(|(id, from)| echokey_core::settings::ResendDebt {
+                    .map(|(id, from)| parle_core::settings::ResendDebt {
                         device_id: id.clone(),
                         from: *from,
                     })
@@ -1661,12 +1661,12 @@ impl SyncManager {
         // is already durable in SQLite, so losing this one left exactly the
         // silent, permanent hole the mechanism exists to close.
         s.sync.resend_owed = owed;
-        if let Err(e) = s.save(&echokey_core::settings::settings_path()) {
+        if let Err(e) = s.save(&parle_core::settings::settings_path()) {
             tracing::warn!("sync: could not persist sync settings: {e}");
         }
     }
 
-    pub fn persistable(&self) -> (bool, String, bool, bool, Vec<echokey_core::settings::PairedDevice>) {
+    pub fn persistable(&self) -> (bool, String, bool, bool, Vec<parle_core::settings::PairedDevice>) {
         let i = self.inner.lock();
         (
             i.enabled,
@@ -1675,7 +1675,7 @@ impl SyncManager {
             i.clipboard,
             i.paired
                 .iter()
-                .map(|d| echokey_core::settings::PairedDevice {
+                .map(|d| parle_core::settings::PairedDevice {
                     id: d.id.clone(),
                     name: d.name.clone(),
                     last_seen: d.last_seen,
@@ -1687,7 +1687,7 @@ impl SyncManager {
     fn run_session<S: std::io::Read + std::io::Write>(
         &self,
         peer_id: String,
-        mut session: echokey_sync::Session<S>,
+        mut session: parle_sync::Session<S>,
         turn: Turn,
     ) {
         {
@@ -1856,7 +1856,7 @@ impl SyncManager {
                             "{} item{} too large to sync ({} MB limit). Everything else synced.",
                             stats.oversized,
                             if stats.oversized == 1 { " is" } else { "s are" },
-                            echokey_sync::MAX_ITEM_TEXT_BYTES / (1024 * 1024)
+                            parle_sync::MAX_ITEM_TEXT_BYTES / (1024 * 1024)
                         ),
                     );
                 }
@@ -2048,7 +2048,7 @@ impl SyncManager {
             return;
         }
         let deadline = Deadline::after(HANDSHAKE_TIMEOUT);
-        match echokey_sync::Session::initiate(Timed::new(s, deadline.clone()), &key) {
+        match parle_sync::Session::initiate(Timed::new(s, deadline.clone()), &key) {
             Ok(session) => {
                 deadline.extend(SESSION_TIMEOUT);
                 relax_socket(session.get_ref().get_ref());
@@ -2365,7 +2365,7 @@ mod adversarial_round4 {
 
     fn info() -> PeerInfo {
         PeerInfo {
-            id: echokey_sync::DeviceId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+            id: parle_sync::DeviceId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
             name: "x".into(),
             addr: std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 2)),
             port: 1,
@@ -2467,7 +2467,7 @@ mod adversarial_round5_availability {
 
     fn info(addr: IpAddr, port: u16, id: &str) -> PeerInfo {
         PeerInfo {
-            id: echokey_sync::DeviceId::parse(id).unwrap(),
+            id: parle_sync::DeviceId::parse(id).unwrap(),
             name: "peer".into(),
             addr,
             port,
@@ -2638,7 +2638,7 @@ mod adversarial_r6_conc {
     }
 
     fn r6_info(addr: IpAddr, port: u16, id: &str) -> PeerInfo {
-        PeerInfo { id: echokey_sync::DeviceId::parse(id).unwrap(), name: "peer".into(), addr, port }
+        PeerInfo { id: parle_sync::DeviceId::parse(id).unwrap(), name: "peer".into(), addr, port }
     }
 
     /// An `Inner` in the state the manager is in while sync is running.

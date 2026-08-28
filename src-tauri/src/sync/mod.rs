@@ -1,6 +1,6 @@
 //! App-side sync: the parts the protocol crate deliberately leaves out.
 //!
-//! `echokey-sync` is transport and crypto only. Three things it cannot own,
+//! `parle-sync` is transport and crypto only. Three things it cannot own,
 //! because they need state that outlives a single pairing run or knowledge of
 //! the user's data, live here:
 //!

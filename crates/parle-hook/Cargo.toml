@@ -1,0 +1,31 @@
+[package]
+name = "parle-hook"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Parle keyboard-hook helper: an isolated low-level keyboard hook that startup contention cannot starve"
+
+# The wire protocol. Pure data, no OS dependencies — the app links this too.
+[lib]
+name = "parle_hook"
+path = "src/lib.rs"
+
+# The helper process itself. Windows-only in substance; on other platforms it
+# compiles to an immediate-exit stub so `cargo build --workspace` stays green.
+[[bin]]
+name = "parle-hook"
+path = "src/bin/parle-hook.rs"
+
+[target.'cfg(windows)'.dependencies]
+crossbeam-channel = { workspace = true }
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

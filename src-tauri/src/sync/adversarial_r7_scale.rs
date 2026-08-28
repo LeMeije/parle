@@ -11,8 +11,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::{RemoteItem, RemoteTombstone, Store};
-use echokey_sync::{PairedKey, Session};
+use parle_core::history::{RemoteItem, RemoteTombstone, Store};
+use parle_sync::{PairedKey, Session};
 use parking_lot::Mutex;
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
@@ -188,7 +188,7 @@ fn seed(store: &Arc<Mutex<Store>>, source: &str, n: usize, base: i64) {
 // ---------------------------------------------------------------------------
 #[test]
 fn r7_clear_history_over_a_large_replicated_history_completes_and_loses_no_delete() {
-    let over = echokey_core::history::MAX_TOMBSTONES_PER_SOURCE as usize + 50;
+    let over = parle_core::history::MAX_TOMBSTONES_PER_SOURCE as usize + 50;
     let a = store_for(A);
     let b = store_for(B);
     let base = now_ms() - 10_000_000;

@@ -2,17 +2,17 @@
 resolver = "2"
 members = [
     "src-tauri",
-    "crates/echokey-core",
-    "crates/echokey-audio",
-    "crates/echokey-asr",
-    "crates/echokey-hook",
-    "crates/echokey-sync",
+    "crates/parle-core",
+    "crates/parle-audio",
+    "crates/parle-asr",
+    "crates/parle-hook",
+    "crates/parle-sync",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Novaire <contact@novairedigital.com>"]
+authors = ["Benjamin Jacquet <contact@novairedigital.com>"]
 license = "MIT"
 
 [workspace.dependencies]

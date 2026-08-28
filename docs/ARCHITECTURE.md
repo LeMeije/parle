@@ -1,4 +1,4 @@
-# EchoKey Architecture
+# Parle Architecture
 
 ## Stack decision (performance-justified)
 Tauri 2 + Rust core + React/Vite UI. Rejected Electron (OpenWhispr's exploitable weakness: bundled
@@ -9,15 +9,15 @@ rendering UI. Idle footprint target: tens of MB + model memory; installers under
 
 ## Workspace layout
 ```
-echokey/
+parle/
   Cargo.toml               # workspace root
   src-tauri/               # app crate: wiring, tray, windows, IPC commands, platform modules
     src/platform/macos/    #   CGEventTap hotkeys, AX+Cmd-V injection, pasteboard monitor, TCC
     src/platform/windows/  #   WH_KEYBOARD_LL (incl. Copilot key), SendInput, clipboard listener
   crates/
-    echokey-core/          # settings, history store (SQLite+FTS5), text pipeline, dictionary, types
-    echokey-audio/         # cpal capture, buffer copying, resample->16kHz mono f32, levels, WAV debug
-    echokey-asr/           # AsrEngine trait, whisper backend, model registry+downloader, fallback chain
+    parle-core/          # settings, history store (SQLite+FTS5), text pipeline, dictionary, types
+    parle-audio/         # cpal capture, buffer copying, resample->16kHz mono f32, levels, WAV debug
+    parle-asr/           # AsrEngine trait, whisper backend, model registry+downloader, fallback chain
   src/                     # React UI: HUD window + main window (history, settings, onboarding)
   shared/                  # behavioural contract JSON test vectors (formatter, dictionary)
   docs/                    # PRODUCT, ARCHITECTURE, research/, WINDOWS_HANDOFF, HUMAN_TASKS

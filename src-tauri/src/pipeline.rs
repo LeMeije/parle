@@ -6,14 +6,14 @@
 //! user cancels. On total ASR failure the WAV is written for recovery.
 
 use crate::platform;
-use echokey_asr::manager::EngineManager;
-use echokey_asr::{is_silence, TranscribeOptions};
-use echokey_audio::recorder::{LevelUpdate, Recorder};
-use echokey_core::dictionary::Dictionary;
-use echokey_core::formatter;
-use echokey_core::history::Store;
-use echokey_core::settings::{data_dir, Settings};
-use echokey_core::types::{LowConfidenceSpan, Segment, TranscriptionResult};
+use parle_asr::manager::EngineManager;
+use parle_asr::{is_silence, TranscribeOptions};
+use parle_audio::recorder::{LevelUpdate, Recorder};
+use parle_core::dictionary::Dictionary;
+use parle_core::formatter;
+use parle_core::history::Store;
+use parle_core::settings::{data_dir, Settings};
+use parle_core::types::{LowConfidenceSpan, Segment, TranscriptionResult};
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::sync::Arc;
@@ -172,8 +172,8 @@ impl FieldSecrecy {
 /// One place, so the two dictation paths cannot drift: the secure-field drop
 /// was added to one of them and missed on the other once already.
 fn store_transcription(
-    store: &std::sync::Arc<parking_lot::Mutex<echokey_core::history::Store>>,
-    tr: &echokey_core::types::TranscriptionResult,
+    store: &std::sync::Arc<parking_lot::Mutex<parle_core::history::Store>>,
+    tr: &parle_core::types::TranscriptionResult,
     app_id: &Option<String>,
     app_name: &Option<String>,
     secrecy: FieldSecrecy,
@@ -287,7 +287,7 @@ impl Pipeline {
     fn spawn_partial_loop(self: &Arc<Self>) {
         let this = self.clone();
         std::thread::Builder::new()
-            .name("echokey-partials".into())
+            .name("parle-partials".into())
             .spawn(move || {
                 const MAX_PARTIAL_SECS: usize = 30 * 16_000;
                 loop {
@@ -341,13 +341,13 @@ impl Pipeline {
         samples: &[f32],
         chunks: &[std::ops::Range<usize>],
         opts: &TranscribeOptions,
-    ) -> Result<(echokey_asr::AsrOutput, String), echokey_asr::AsrError> {
+    ) -> Result<(parle_asr::AsrOutput, String), parle_asr::AsrError> {
         let mut segments = Vec::new();
         let mut langs: Vec<String> = Vec::new();
         let mut transcribe_ms = 0u64;
         let mut model_id = String::new();
         for r in chunks {
-            let offset_ms = (r.start as u64 * 1000) / echokey_audio::ASR_SAMPLE_RATE as u64;
+            let offset_ms = (r.start as u64 * 1000) / parle_audio::ASR_SAMPLE_RATE as u64;
             let (out, mid) = self.engine.lock().transcribe(&samples[r.clone()], opts, None)?;
             model_id = mid;
             transcribe_ms += out.transcribe_ms;
@@ -364,7 +364,7 @@ impl Pipeline {
         }
         let detected_language = if langs.is_empty() { None } else { Some(langs.join("+")) };
         Ok((
-            echokey_asr::AsrOutput { segments, detected_language, transcribe_ms },
+            parle_asr::AsrOutput { segments, detected_language, transcribe_ms },
             model_id,
         ))
     }
@@ -443,7 +443,7 @@ impl Pipeline {
 
         // Streaming partials to the HUD.
         let sink = self.sink.clone();
-        let on_partial: echokey_asr::PartialCallback = Box::new(move |t: &str| {
+        let on_partial: parle_asr::PartialCallback = Box::new(move |t: &str| {
             sink(PipelineEvent::Partial { text: t.to_string() });
         });
 
@@ -458,7 +458,7 @@ impl Pipeline {
         let auto_lang = settings.language.language == "auto";
         let lang_chunks = |samples: &[f32]| {
             if auto_lang {
-                echokey_asr::split_on_speech(samples, echokey_audio::ASR_SAMPLE_RATE)
+                parle_asr::split_on_speech(samples, parle_audio::ASR_SAMPLE_RATE)
             } else {
                 vec![0..samples.len()]
             }
@@ -489,7 +489,7 @@ impl Pipeline {
                     now_stamp()
                 ));
                 let _ = std::fs::create_dir_all(path.parent().unwrap());
-                let _ = echokey_audio::wav::write_wav_16k_mono(&path, &recording.samples);
+                let _ = parle_audio::wav::write_wav_16k_mono(&path, &recording.samples);
                 (self.sink)(PipelineEvent::Error {
                     message: format!(
                         "Transcription failed ({e}). Your recording was saved to {}.",
@@ -723,7 +723,7 @@ impl Pipeline {
     /// independently; mark text goes in verbatim — URLs never touch cleanup.
     fn process_with_marks(
         &self,
-        recording: echokey_audio::recorder::Recording,
+        recording: parle_audio::recorder::Recording,
         mut marks: Vec<(u64, String)>,
         opts: &TranscribeOptions,
         settings: &Settings,
@@ -731,7 +731,7 @@ impl Pipeline {
     ) {
         use crate::pipeline::PipelineState;
         marks.sort_by_key(|(ms, _)| *ms);
-        let sr = echokey_audio::ASR_SAMPLE_RATE as u64;
+        let sr = parle_audio::ASR_SAMPLE_RATE as u64;
         let total = recording.samples.len();
 
         // Piece boundaries in samples.
@@ -759,7 +759,7 @@ impl Pipeline {
             if range.len() > (sr as usize / 4) && !is_silence(&recording.samples[range.clone()]) {
                 let piece = &recording.samples[range.clone()];
                 let chunks = if settings.language.language == "auto" {
-                    echokey_asr::split_on_speech(piece, echokey_audio::ASR_SAMPLE_RATE)
+                    parle_asr::split_on_speech(piece, parle_audio::ASR_SAMPLE_RATE)
                 } else {
                     vec![0..piece.len()]
                 };
@@ -960,7 +960,7 @@ impl Pipeline {
     }
 }
 
-fn collect_low_confidence(asr: &echokey_asr::AsrOutput, final_text: &str) -> Vec<LowConfidenceSpan> {
+fn collect_low_confidence(asr: &parle_asr::AsrOutput, final_text: &str) -> Vec<LowConfidenceSpan> {
     let mut out = Vec::new();
     let mut cursor = 0usize;
     for seg in &asr.segments {
@@ -1001,14 +1001,14 @@ fn find_word_boundary(haystack: &str, word: &str) -> Option<usize> {
     None
 }
 
-/// True when EchoKey itself is the frontmost app: pasting the result into our
+/// True when Parle itself is the frontmost app: pasting the result into our
 /// own Compose window would be absurd — the result panel and clipboard cover it.
 fn frontmost_is_self() -> bool {
     let (app_id, _) = platform::imp::frontmost_app();
-    app_id.as_deref() == Some("com.novaire.echokey")
+    app_id.as_deref() == Some("com.novaire.parle")
         || std::env::current_exe()
             .ok()
-            .and_then(|e| e.to_str().map(|p| p.contains("EchoKey.app")))
+            .and_then(|e| e.to_str().map(|p| p.contains("Parle.app")))
             .map(|in_bundle| in_bundle && app_id.is_none())
             .unwrap_or(false)
 }

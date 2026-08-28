@@ -17,9 +17,9 @@
 
 #![cfg(test)]
 
-use echokey_core::history::Store;
-use echokey_core::settings::{PairedDevice, Settings};
-use echokey_sync::{PairedKey, Session, SyncMessage, Watermark};
+use parle_core::history::Store;
+use parle_core::settings::{PairedDevice, Settings};
+use parle_sync::{PairedKey, Session, SyncMessage, Watermark};
 use parking_lot::Mutex;
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
@@ -281,7 +281,7 @@ fn r8_h2_the_replication_path_can_see_which_app_a_row_came_from() {
     // The residual that leaves: an exclusion list is per-device, so an entry
     // added on the Mac does not protect a capture on the PC. That is stated in
     // the settings hint rather than solved by broadcasting app names.
-    let store = std::fs::read_to_string(repo_root().join("crates/echokey-core/src/history.rs"))
+    let store = std::fs::read_to_string(repo_root().join("crates/parle-core/src/history.rs"))
         .expect("history.rs is readable");
 
     // Control: the information exists on every locally captured row.
@@ -313,7 +313,7 @@ fn r8_h2_the_replication_path_can_see_which_app_a_row_came_from() {
     );
 
     // And the wire still carries no provenance. This half is the rejection.
-    let wire = std::fs::read_to_string(repo_root().join("crates/echokey-sync/src/wire.rs"))
+    let wire = std::fs::read_to_string(repo_root().join("crates/parle-sync/src/wire.rs"))
         .expect("wire.rs is readable");
     let wire_code: String = wire
         .lines()
@@ -562,7 +562,7 @@ fn r8_f1_a_paired_peer_cannot_renew_the_session_budget_with_traffic() {
             Err(_) => return 0usize,
         };
         let msg = SyncMessage::Watermarks {
-            entries: vec![Watermark { source_device: echokey_sync::DeviceId::parse(A).unwrap(), clock: 1, origin: String::new()  }],
+            entries: vec![Watermark { source_device: parle_sync::DeviceId::parse(A).unwrap(), clock: 1, origin: String::new()  }],
             more: true,
         };
         // Hard bound: 60 sends at 60 ms is 3.6 s, comfortably past the victim's
@@ -626,7 +626,7 @@ fn r8_f1_a_paired_peer_cannot_renew_the_session_budget_with_traffic() {
 /// encoding it could plausibly appear in.
 #[test]
 fn r8_i1_no_paired_key_reaches_settings_json() {
-    use echokey_sync::{Pairing, PairingCode, PairingRole};
+    use parle_sync::{Pairing, PairingCode, PairingRole};
 
     let code = PairingCode::parse("904417").unwrap();
     let (init, msg_i) = Pairing::start(PairingRole::Initiator, &code);
@@ -725,7 +725,7 @@ fn r8_i2_unpair_destroys_the_key_before_it_reports_success() {
 /// device — and only the first may land.
 #[test]
 fn r8_g1_a_paired_device_cannot_author_rows_for_anyone_else() {
-    use echokey_sync::{DeviceId, ItemKind, SyncItem, PROTOCOL_VERSION};
+    use parle_sync::{DeviceId, ItemKind, SyncItem, PROTOCOL_VERSION};
 
     const THIRD: &str = "33333333-3333-4333-8333-333333333333";
     let victim_store = store_for(A);

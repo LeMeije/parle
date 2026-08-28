@@ -2,12 +2,12 @@
 
 use crate::platform;
 use crate::state::AppState;
-use echokey_asr::download::{self, CancelToken, DownloadProgress};
-use echokey_asr::registry;
-use echokey_core::dictionary::Dictionary;
-use echokey_core::history::Store;
-use echokey_core::settings::{models_dir, settings_path, Settings};
-use echokey_core::types::{HistoryItem, HistoryKind};
+use parle_asr::download::{self, CancelToken, DownloadProgress};
+use parle_asr::registry;
+use parle_core::dictionary::Dictionary;
+use parle_core::history::Store;
+use parle_core::settings::{models_dir, settings_path, Settings};
+use parle_core::types::{HistoryItem, HistoryKind};
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -137,7 +137,7 @@ pub async fn paste_item(state: State<'_, Arc<AppState>>, app: AppHandle, id: i64
             std::thread::sleep(std::time::Duration::from_millis(50));
             let (front, _) = platform::imp::frontmost_app();
             match front.as_deref() {
-                Some("com.novaire.echokey") | None => continue,
+                Some("com.novaire.parle") | None => continue,
                 Some(f) => {
                     if target.as_deref().map(|t| t == f).unwrap_or(true) {
                         break; // the right app (or at least not us) is frontmost
@@ -312,7 +312,7 @@ pub fn machine_profile() -> registry::MachineProfile {
 // -- Dictionary ---------------------------------------------------------------
 
 #[tauri::command]
-pub fn dict_list(state: State<'_, Arc<AppState>>) -> Result<Vec<echokey_core::dictionary::DictEntry>> {
+pub fn dict_list(state: State<'_, Arc<AppState>>) -> Result<Vec<parle_core::dictionary::DictEntry>> {
     state.store.lock().dict_entries().map_err(err)
 }
 
@@ -398,7 +398,7 @@ pub fn repair_accessibility() {
     #[cfg(target_os = "macos")]
     {
         let _ = std::process::Command::new("tccutil")
-            .args(["reset", "Accessibility", "com.novaire.echokey"])
+            .args(["reset", "Accessibility", "com.novaire.parle"])
             .status();
         std::thread::sleep(std::time::Duration::from_millis(400));
         platform::imp::request_accessibility_access();
@@ -461,7 +461,7 @@ pub fn open_permission_settings(which: String) {
 
 #[tauri::command]
 pub fn list_audio_devices() -> Vec<String> {
-    echokey_audio::capture::input_devices()
+    parle_audio::capture::input_devices()
 }
 
 /// First-launch model recommendation for the onboarding flow.
@@ -529,7 +529,7 @@ pub async fn sync_set_device_name(state: State<'_, Arc<AppState>>, name: String)
     // rides in an mDNS TXT key=value pair), so "Ben=Work" and any longish
     // non-Latin name were stored and then killed every exchange and discovery
     // with it, which the UI showed as a network fault.
-    let Some(name) = echokey_sync::sanitise_device_name(&name) else {
+    let Some(name) = parle_sync::sanitise_device_name(&name) else {
         return Err("Give this device a name so you can recognise it when pairing".into());
     };
     let st = state.inner().clone();

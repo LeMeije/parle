@@ -13,9 +13,9 @@
 
 #![cfg(test)]
 
-use echokey_core::history::{RemoteItem, Store, MAX_CLOCK_SKEW_MS};
-use echokey_core::types::{HistoryKind, TranscriptionResult};
-use echokey_sync::{PairedKey, Session};
+use parle_core::history::{RemoteItem, Store, MAX_CLOCK_SKEW_MS};
+use parle_core::types::{HistoryKind, TranscriptionResult};
+use parle_sync::{PairedKey, Session};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{TcpListener, TcpStream};
@@ -1009,7 +1009,7 @@ fn r14_data_withheld_rows_neither_shorten_nor_cross_a_truncated_pass() {
     let b = store_for(B);
     // `MAX_BATCHES` is private to `replicate.rs`, so its value is restated
     // here. `d1.truncated` below is the premise that catches it drifting.
-    let sendable = 64 * echokey_sync::MAX_BATCH_LEN + 300;
+    let sendable = 64 * parle_sync::MAX_BATCH_LEN + 300;
     let base = now_ms() - 5_000_000;
     {
         let g = a.lock();

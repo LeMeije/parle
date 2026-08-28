@@ -11,8 +11,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::Store;
-use echokey_core::settings::{HistorySettings, Settings};
+use parle_core::history::Store;
+use parle_core::settings::{HistorySettings, Settings};
 use std::path::{Path, PathBuf};
 
 const A: &str = "11111111-1111-4111-8111-111111111111";
@@ -76,7 +76,7 @@ fn r10_a_an_existing_install_never_gains_the_new_exclusions() {
     let path = dir.join("settings.json");
 
     // An install created before the round-9 additions.
-    let mut old = echokey_core::settings::Settings::default();
+    let mut old = parle_core::settings::Settings::default();
     old.version = 1;
     // A build from before round 12 never wrote `excluded_defaults_seen`, so an
     // old file does not have it. Synthesising the premise from the CURRENT
@@ -88,11 +88,11 @@ fn r10_a_an_existing_install_never_gains_the_new_exclusions() {
         vec!["com.1password.1password".into(), "1Password.exe".into()];
     std::fs::write(&path, serde_json::to_string_pretty(&old).unwrap()).unwrap();
 
-    let loaded = echokey_core::settings::Settings::load(&path).unwrap();
+    let loaded = parle_core::settings::Settings::load(&path).unwrap();
     let have: Vec<String> =
         loaded.history.excluded_apps.iter().map(|a| a.to_ascii_lowercase()).collect();
 
-    let defaults = echokey_core::settings::Settings::default().history.excluded_apps;
+    let defaults = parle_core::settings::Settings::default().history.excluded_apps;
     let missing: Vec<&String> =
         defaults.iter().filter(|d| !have.contains(&d.to_ascii_lowercase())).collect();
     assert!(
@@ -104,7 +104,7 @@ fn r10_a_an_existing_install_never_gains_the_new_exclusions() {
         have.iter().any(|a| a == "com.1password.1password"),
         "the migration must not discard what was already there"
     );
-    assert_eq!(loaded.version, echokey_core::settings::SETTINGS_VERSION);
+    assert_eq!(loaded.version, parle_core::settings::SETTINGS_VERSION);
 }
 
 /// The consequence, at the layer that decides what leaves the machine. A row
@@ -466,7 +466,7 @@ fn r10_e1_settings_carry_no_key_material() {
     let mut s = Settings::default();
     s.sync.device_id = A.to_string();
     s.sync.device_name = "Ben's Mac".into();
-    s.sync.paired.push(echokey_core::settings::PairedDevice {
+    s.sync.paired.push(parle_core::settings::PairedDevice {
         id: "22222222-2222-4222-8222-222222222222".into(),
         name: "Ben's G14".into(),
         last_seen: Some(1),

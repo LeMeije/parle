@@ -17,8 +17,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::{Store, MAX_CLOCK_SKEW_MS};
-use echokey_sync::{PairedKey, Session};
+use parle_core::history::{Store, MAX_CLOCK_SKEW_MS};
+use parle_sync::{PairedKey, Session};
 use parking_lot::Mutex;
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
@@ -517,7 +517,7 @@ fn r13_data_a_refused_row_still_drives_the_report_and_the_stamp() {
         "the refusal no longer tells the user where to look at all"
     );
     let core: String =
-        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/echokey-core/src/history.rs"))
+        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/parle-core/src/history.rs"))
             .expect("history.rs is readable");
     assert!(
         core.contains("Check THIS machine's clock."),

@@ -1,7 +1,7 @@
 //! A DIAGNOSTIC, not a unit test. Run it deliberately:
 //!
 //! ```text
-//! cargo test -p echokey --test keychain_field_check -- --ignored --nocapture
+//! cargo test -p parle --test keychain_field_check -- --ignored --nocapture
 //! ```
 //!
 //! `#[ignore]` because it writes to, reads from and deletes an item in the

@@ -20,17 +20,17 @@ Branch `windows-build`. Green, per package:
 
 | Package | Result |
 |---|---|
-| `echokey-core --lib` | 175 pass, 0 fail, 1 ignored diagnostic |
-| `echokey-sync` (all targets) | 68 pass, 0 fail, 1 ignored diagnostic |
-| `echokey --lib` | 259 pass, 0 fail, 2 ignored diagnostics |
+| `parle-core --lib` | 175 pass, 0 fail, 1 ignored diagnostic |
+| `parle-sync` (all targets) | 68 pass, 0 fail, 1 ignored diagnostic |
+| `parle --lib` | 259 pass, 0 fail, 2 ignored diagnostics |
 
 Nothing is ignored and nothing is quarantined. Two `#[ignore]`d **diagnostics**
 exist on purpose and are not part of that count; see section 5.
 
 ```bash
-source ./env.sh && cargo test -p echokey-core --lib
-source ./env.sh && cargo test -p echokey-sync
-source ./env.sh && cargo test -p echokey --lib
+source ./env.sh && cargo test -p parle-core --lib
+source ./env.sh && cargo test -p parle-sync
+source ./env.sh && cargo test -p parle --lib
 ```
 
 **Do not run `cargo test --workspace` bare**, it exceeds a 10-minute timeout.
@@ -38,7 +38,7 @@ Run per package.
 
 `env.sh` is gitignored and machine-specific; on macOS it needs only
 `export PATH="$HOME/.cargo/bin:$PATH"`. A fresh checkout also needs the Tauri
-sidecar staged once, or `echokey` fails to build with "resource path
+sidecar staged once, or `parle` fails to build with "resource path
 `binaries/parle-hook-<triple>` doesn't exist":
 
 ```bash
@@ -49,13 +49,13 @@ node scripts/build-hook.mjs
 
 | Path | What |
 |---|---|
-| `crates/echokey-core/src/history.rs` | SQLite store: schema, migrations v1→v6, conflict resolution, cursors, caps |
-| `crates/echokey-core/src/settings.rs` | `SyncSettings`, `PairedDevice`, `ResendDebt` |
-| `crates/echokey-sync/src/wire.rs` | Message shapes, size limits, `validate()` |
-| `crates/echokey-sync/src/identity.rs` | Device ids, `validate_device_name`, `sanitise_device_name` |
-| `crates/echokey-sync/src/pairing.rs` | SPAKE2 pairing primitives |
-| `crates/echokey-sync/src/session.rs` | Noise `NNpsk0` session |
-| `crates/echokey-sync/src/discovery.rs` | mDNS (`_echokey._tcp`) |
+| `crates/parle-core/src/history.rs` | SQLite store: schema, migrations v1→v6, conflict resolution, cursors, caps |
+| `crates/parle-core/src/settings.rs` | `SyncSettings`, `PairedDevice`, `ResendDebt` |
+| `crates/parle-sync/src/wire.rs` | Message shapes, size limits, `validate()` |
+| `crates/parle-sync/src/identity.rs` | Device ids, `validate_device_name`, `sanitise_device_name` |
+| `crates/parle-sync/src/pairing.rs` | SPAKE2 pairing primitives |
+| `crates/parle-sync/src/session.rs` | Noise `NNpsk0` session |
+| `crates/parle-sync/src/discovery.rs` | mDNS (`_parle._tcp`) |
 | `src-tauri/src/sync/replicate.rs` | The exchange: serve, drain, authority, paging |
 | `src-tauri/src/sync/manager.rs` | Lifecycle: listener, dialling, pairing, persistence |
 | `src-tauri/src/sync/guard.rs` | Pairing rate limit |
@@ -259,8 +259,8 @@ Two `#[ignore]`d tests that touch the real machine. They are not part of the
 suite and a failure is information, not a broken build.
 
 ```bash
-cargo test -p echokey-sync --test mdns_field_check -- --ignored --nocapture
-cargo test -p echokey --test keychain_field_check -- --ignored --nocapture
+cargo test -p parle-sync --test mdns_field_check -- --ignored --nocapture
+cargo test -p parle --test keychain_field_check -- --ignored --nocapture
 ```
 
 Both pass on macOS 26.5.1, mDNS resolves on the real LAN in under a second, and

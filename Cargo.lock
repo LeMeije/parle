@@ -1269,126 +1269,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "echokey"
-version = "0.1.0"
-dependencies = [
- "accessibility-sys",
- "arboard",
- "block2",
- "core-foundation 0.10.1",
- "core-graphics 0.24.0",
- "crossbeam-channel",
- "echokey-asr",
- "echokey-audio",
- "echokey-core",
- "echokey-hook",
- "echokey-sync",
- "keyring",
- "libc",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "parking_lot",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-nspanel",
- "tauri-plugin-autostart",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-opener",
- "tauri-plugin-single-instance",
- "thiserror 2.0.20",
- "tracing",
- "tracing-subscriber",
- "unicode-normalization",
- "window-vibrancy 0.8.0",
- "windows 0.58.0",
-]
-
-[[package]]
-name = "echokey-asr"
-version = "0.1.0"
-dependencies = [
- "bzip2 0.5.2",
- "echokey-audio",
- "parking_lot",
- "serde",
- "serde_json",
- "sherpa-onnx",
- "tar",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "ureq",
- "whisper-rs",
-]
-
-[[package]]
-name = "echokey-audio"
-version = "0.1.0"
-dependencies = [
- "cpal",
- "crossbeam-channel",
- "hound",
- "parking_lot",
- "rubato",
- "serde",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
-name = "echokey-core"
-version = "0.1.0"
-dependencies = [
- "dirs 5.0.1",
- "gethostname",
- "nucleo-matcher",
- "parking_lot",
- "regex",
- "rusqlite",
- "serde",
- "serde_json",
- "strsim",
- "tempfile",
- "thiserror 2.0.20",
- "time",
- "tracing",
- "unicode-normalization",
- "uuid",
-]
-
-[[package]]
-name = "echokey-hook"
-version = "0.1.0"
-dependencies = [
- "crossbeam-channel",
- "windows 0.58.0",
-]
-
-[[package]]
-name = "echokey-sync"
-version = "0.1.0"
-dependencies = [
- "crossbeam-channel",
- "flume",
- "getrandom 0.4.3",
- "hmac",
- "mdns-sd",
- "serde",
- "serde_json",
- "sha2",
- "snow",
- "spake2",
- "subtle",
- "thiserror 2.0.20",
- "tracing",
- "unicode-properties",
-]
-
-[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3393,6 +3273,126 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link 0.2.1",
+]
+
+[[package]]
+name = "parle"
+version = "0.1.0"
+dependencies = [
+ "accessibility-sys",
+ "arboard",
+ "block2",
+ "core-foundation 0.10.1",
+ "core-graphics 0.24.0",
+ "crossbeam-channel",
+ "keyring",
+ "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "parking_lot",
+ "parle-asr",
+ "parle-audio",
+ "parle-core",
+ "parle-hook",
+ "parle-sync",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-nspanel",
+ "tauri-plugin-autostart",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-opener",
+ "tauri-plugin-single-instance",
+ "thiserror 2.0.20",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-normalization",
+ "window-vibrancy 0.8.0",
+ "windows 0.58.0",
+]
+
+[[package]]
+name = "parle-asr"
+version = "0.1.0"
+dependencies = [
+ "bzip2 0.5.2",
+ "parking_lot",
+ "parle-audio",
+ "serde",
+ "serde_json",
+ "sherpa-onnx",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "ureq",
+ "whisper-rs",
+]
+
+[[package]]
+name = "parle-audio"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "crossbeam-channel",
+ "hound",
+ "parking_lot",
+ "rubato",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "parle-core"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "gethostname",
+ "nucleo-matcher",
+ "parking_lot",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "strsim",
+ "tempfile",
+ "thiserror 2.0.20",
+ "time",
+ "tracing",
+ "unicode-normalization",
+ "uuid",
+]
+
+[[package]]
+name = "parle-hook"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "windows 0.58.0",
+]
+
+[[package]]
+name = "parle-sync"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "flume",
+ "getrandom 0.4.3",
+ "hmac",
+ "mdns-sd",
+ "serde",
+ "serde_json",
+ "sha2",
+ "snow",
+ "spake2",
+ "subtle",
+ "thiserror 2.0.20",
+ "tracing",
+ "unicode-properties",
 ]
 
 [[package]]

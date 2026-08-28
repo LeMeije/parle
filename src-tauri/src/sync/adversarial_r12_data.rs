@@ -17,8 +17,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::Store;
-use echokey_sync::{PairedKey, Session};
+use parle_core::history::Store;
+use parle_sync::{PairedKey, Session};
 use parking_lot::Mutex;
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
@@ -294,7 +294,7 @@ fn r12_data_a_correction_after_a_backwards_clock_step_never_reaches_the_peer() {
     // 2. A's clock steps back an hour.
     let t_high = step_the_authors_clock_back(&a, A, &b, 60 * 60 * 1000);
     assert!(
-        t_high > now_ms() + echokey_core::history::MAX_CLOCK_SKEW_MS,
+        t_high > now_ms() + parle_core::history::MAX_CLOCK_SKEW_MS,
         "premise: the step must exceed the skew window, or the clamp never engages"
     );
 
@@ -361,7 +361,7 @@ fn r12_data_clearing_history_announces_every_withheld_dictation_to_the_peer() {
     let a = store_for(A);
     let b = store_for(B);
 
-    let tr = echokey_core::types::TranscriptionResult {
+    let tr = parle_core::types::TranscriptionResult {
         raw_text: "hunter2".into(),
         text: "hunter2".into(),
         language: Some("en".into()),

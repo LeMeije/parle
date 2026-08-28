@@ -1,6 +1,6 @@
-# EchoKey Benchmarks
+# Parle Benchmarks
 
-Reproduce with `cargo run --release --example bench -p echokey-asr --features metal [runs]`
+Reproduce with `cargo run --release --example bench -p parle-asr --features metal [runs]`
 (fixtures in bench/fixtures, synthesised speech; median of 5 runs after warmup).
 
 ## macOS — Apple M2, 24 GB, Metal (measured 21/08/2026)
@@ -49,7 +49,7 @@ open (~100-300 ms warm; first-ever open can take seconds — the recorder allows
 ## Windows — Ryzen AI 9 370HX + RTX 5070 Ti (TO MEASURE)
 
 Run on the G14 (see docs/WINDOWS_HANDOFF.md):
-`cargo run --release --example bench -p echokey-asr` (CPU) and
+`cargo run --release --example bench -p parle-asr` (CPU) and
 `--features cuda` (GPU), then append results here. Expected from research:
 turbo-q8_0 well above 30x RT on CUDA; Parakeet int8 ~25-40x RT on CPU
 (engine not yet implemented).

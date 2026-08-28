@@ -23,8 +23,8 @@
 
 #![cfg(test)]
 
-use echokey_core::history::Store;
-use echokey_sync::{
+use parle_core::history::Store;
+use parle_sync::{
     sanitise_device_name, validate_device_name, ConfirmTag, PairedKey, Pairing, PairingCode,
     PairingRole, Session, SyncMessage, DeviceId, MAX_DEVICE_NAME_BYTES, PROTOCOL_VERSION,
 };
@@ -847,7 +847,7 @@ fn r14_pair_c3_a_failure_after_the_hello_discards_the_name_it_already_proved() {
 #[test]
 fn r14_pair_c4_the_wire_comment_that_licenses_an_unpoliced_name_is_stale() {
     // The claim spans a line break in the source, so match it whitespace-free.
-    let wire = tight(&read_src("crates/echokey-sync/src/wire.rs"));
+    let wire = tight(&read_src("crates/parle-sync/src/wire.rs"));
     assert!(
         wire.contains("Hellonameanddiscardsit,sonothingherereachesascreen"),
         "anchor missing: the claim is no longer in wire.rs, so nothing to report"
@@ -1005,7 +1005,7 @@ fn r14_pair_d2_a_real_hostname_is_never_denied_sync_but_may_be_denied_a_row() {
     );
 
     // The two call sites, anchored, so the cost above is attributed correctly.
-    let d = tight(&code_of("crates/echokey-sync/src/discovery.rs"));
+    let d = tight(&code_of("crates/parle-sync/src/discovery.rs"));
     assert!(
         d.contains("validate_device_name(&config.device_name)?;"),
         "anchor missing: Discovery::start no longer validates our own name"
@@ -1016,7 +1016,7 @@ fn r14_pair_d2_a_real_hostname_is_never_denied_sync_but_may_be_denied_a_row() {
     );
     // And the wire does NOT, which is why a paired peer with such a name still
     // syncs while an unpaired one cannot be seen.
-    let w = tight(&code_of("crates/echokey-sync/src/wire.rs"));
+    let w = tight(&code_of("crates/parle-sync/src/wire.rs"));
     assert!(
         !w.contains("validate_device_name"),
         "wire.rs polices the name again; the round-9 sync-denial regression is back"
