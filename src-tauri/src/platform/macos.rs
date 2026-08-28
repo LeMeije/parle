@@ -81,6 +81,19 @@ pub fn open_accessibility_settings() {
         .spawn();
 }
 
+/// The Keyboard pane, where macOS's own "Press 🌐 key to" setting lives.
+///
+/// The shipped macOS dictation key is the Globe key, and macOS binds a
+/// double-press of the same key to ITS dictation by default, so the two fight
+/// over one key and the user gets whichever wins the race. Telling them to
+/// change it was not enough: the setting is four levels deep and most people
+/// never find it. This puts them in front of it.
+pub fn open_keyboard_settings() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.Keyboard-Settings.extension")
+        .spawn();
+}
+
 /// The Local Network pane, which is where a denied mDNS permission is repaired.
 ///
 /// macOS 14+ gates local network access, and a denial is SILENT for us:

@@ -29,7 +29,7 @@ function rich(text: string, nodes: Record<string, React.ReactNode>): React.React
 
 const IS_MAC = navigator.userAgent.includes('Mac');
 
-type Step = 'language' | 'welcome' | 'permissions' | 'model' | 'hotkey' | 'test';
+type Step = 'language' | 'welcome' | 'about' | 'permissions' | 'model' | 'hotkey' | 'test';
 
 export default function Onboarding({ onDone }: { onDone: () => void }) {
   const [step, setStep] = useState<Step>('language');
@@ -37,14 +37,15 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
     <div className="onboarding">
       <div className="ob-card">
         {step === 'language' && <LanguageStep onNext={() => setStep('welcome')} />}
-        {step === 'welcome' && <Welcome onNext={() => setStep('permissions')} />}
+        {step === 'welcome' && <Welcome onNext={() => setStep('about')} />}
+        {step === 'about' && <AboutStep onNext={() => setStep('permissions')} />}
         {step === 'permissions' && <Permissions onNext={() => setStep('model')} />}
         {step === 'model' && <ModelStep onNext={() => setStep('hotkey')} />}
         {step === 'hotkey' && <HotkeyStep onNext={() => setStep('test')} />}
         {step === 'test' && <TestStep onDone={onDone} />}
       </div>
       <div className="ob-steps">
-        {(['language', 'welcome', 'permissions', 'model', 'hotkey', 'test'] as Step[]).map((s) => (
+        {(['language', 'welcome', 'about', 'permissions', 'model', 'hotkey', 'test'] as Step[]).map((s) => (
           <span key={s} className={`ob-dot ${s === step ? 'active' : ''}`} />
         ))}
       </div>
@@ -262,7 +263,12 @@ function HotkeyStep({ onNext }: { onNext: () => void }) {
           {rich(t('onboarding.hotkey.mac'), {
             key: <strong>{t('onboarding.hotkey.macKey')}</strong>,
             doNothing: <strong>{t('onboarding.hotkey.doNothing')}</strong>,
-          })}
+          })}{' '}
+          {/* A LINK, not just an instruction. The setting is four levels deep
+              in System Settings and telling people where it is was not enough. */}
+          <button className="linkish" onClick={() => api.openPermissionSettings('keyboard')}>
+            {t('onboarding.hotkey.openKeyboard')}
+          </button>
         </p>
       ) : (
         <p>
@@ -389,6 +395,40 @@ function LanguageStep({ onNext }: { onNext: () => void }) {
       </div>
       <p className="hint">{t('onboarding.language.note')}</p>
       <button className="btn primary" onClick={confirm}>
+        {t('onboarding.permissions.continue')}
+      </button>
+    </>
+  );
+}
+
+
+/// What the product actually is, before asking for anything.
+///
+/// The first version of onboarding went straight from hello to a microphone
+/// permission prompt, which asks someone to trust an app they have not been
+/// told anything about. This is the screen that earns the prompt on the next
+/// one: what it does, where the data goes, and what is off by default.
+function AboutStep({ onNext }: { onNext: () => void }) {
+  const t = useT();
+  const points: [string, string][] = [
+    ['onboarding.about.dictation.title', 'onboarding.about.dictation.body'],
+    ['onboarding.about.clipboard.title', 'onboarding.about.clipboard.body'],
+    ['onboarding.about.sync.title', 'onboarding.about.sync.body'],
+    ['onboarding.about.privacy.title', 'onboarding.about.privacy.body'],
+  ];
+  return (
+    <>
+      <h1>{t('onboarding.about.title')}</h1>
+      <p className="ob-sub">{t('onboarding.about.sub')}</p>
+      <div className="ob-about">
+        {points.map(([title, body]) => (
+          <div className="ob-about-item" key={title}>
+            <div className="ob-about-title">{t(title)}</div>
+            <p>{t(body)}</p>
+          </div>
+        ))}
+      </div>
+      <button className="btn primary" onClick={onNext}>
         {t('onboarding.permissions.continue')}
       </button>
     </>

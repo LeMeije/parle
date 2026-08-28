@@ -179,6 +179,7 @@ pub fn run() {
             }
             setup_tray(&handle)?;
             spawn_platform(&handle, state.clone(), platform_tx, platform_rx);
+            state.set_app_handle(handle.clone());
             register_chord_shortcuts(&handle, &state);
 
             // Pre-warm the model so the first dictation is instant.
@@ -487,6 +488,52 @@ fn spawn_platform(
 /// Native-only keys (Fn, bare modifiers, Copilot) are handled by the platform
 /// listener instead. Safe to call repeatedly: clears previous registrations
 /// first so settings changes apply without a restart.
+/// Arm or disarm the cancel key as a global shortcut.
+///
+/// Called from `set_recording_flag`, so the key is only claimed for the
+/// duration of a recording. It is a genuine global shortcut (Carbon
+/// `RegisterEventHotKey` under the plugin) rather than an event tap, which
+/// means it still fires when Accessibility has not been granted, and that is
+/// the case where the tap-based path silently did nothing at all.
+///
+/// The tap path is deliberately left in place as well. It is the faster of the
+/// two and it swallows the key properly; this is the belt to its braces. Both
+/// firing is harmless: the second cancel arrives when there is no longer a
+/// recording to cancel and is a no-op.
+pub(crate) fn set_cancel_shortcut_armed(app: &AppHandle, state: &AppState, armed: bool) {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+    let binding = state.settings.lock().hotkeys.cancel.clone();
+    if !binding.enabled || binding.key.is_empty() {
+        return;
+    }
+    // "Escape" is the stored name; the shortcut parser wants "Esc".
+    let spelled = match binding.key.as_str() {
+        "Escape" => "Esc".to_string(),
+        other => other.to_string(),
+    };
+    let Ok(shortcut) = spelled.parse::<tauri_plugin_global_shortcut::Shortcut>() else {
+        tracing::warn!("cancel key '{}' is not a registrable shortcut", binding.key);
+        return;
+    };
+    if !armed {
+        let _ = app.global_shortcut().unregister(shortcut);
+        return;
+    }
+    let handle = app.clone();
+    let result = app.global_shortcut().on_shortcut(shortcut, move |a, _sc, event| {
+        if matches!(event.state(), ShortcutState::Pressed) {
+            if let Some(st) = a.try_state::<Arc<AppState>>() {
+                st.external_cancel();
+            }
+        }
+    });
+    let _ = handle;
+    if let Err(e) = result {
+        tracing::warn!("could not arm the cancel shortcut '{}': {e}", binding.key);
+    }
+}
+
 pub(crate) fn register_chord_shortcuts(app: &AppHandle, state: &Arc<AppState>) {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 

@@ -255,9 +255,9 @@ export const de: Record<string, string> = {
   'settings.smartCleanup.label': 'Intelligente Bereinigung',
   'settings.smartCleanup.hint': 'Hauptschalter für die deterministische Bereinigungsstufe',
   'settings.removeFillers.label': 'Füllwörter entfernen',
-  'settings.removeFillers.hint': 'äh, ähm, hm…',
+  'settings.removeFillers.hint': 'äh, ähm, öh…',
   'settings.removeHedges.label': 'Floskeln entfernen',
-  'settings.removeHedges.hint': 'sozusagen, irgendwie, ich meine (greift stärker ein)',
+  'settings.removeHedges.hint': 'sozusagen, wie gesagt (greift stärker ein)',
   'settings.trimSelfCorrections.label': 'Selbstkorrekturen kürzen',
   'settings.trimSelfCorrections.hint':
     '„Donnerstag, nein, eigentlich Mittwoch“ → „Mittwoch“. Gekürzte Stellen bleiben im Verlauf einsehbar',
@@ -450,4 +450,21 @@ export const de: Record<string, string> = {
   // ---------- Settings: interface language ----------
   'settings.uiLanguage.label': 'Oberflächensprache',
   'settings.uiLanguage.hint': 'Die Sprache, in der Parle selbst geschrieben ist. Getrennt von der unten eingestellten Diktatsprache.',
+
+  // ---------- Onboarding: what Parle is ----------
+  'onboarding.hotkey.openKeyboard': 'Tastatur-Einstellungen öffnen',
+  'onboarding.about.title': 'Was Parle macht',
+  'onboarding.about.sub': 'Diktieren und ein Verlauf der Zwischenablage, beides bleibt auf diesem Rechner.',
+  'onboarding.about.dictation.title': 'Sprechen statt tippen',
+  'onboarding.about.dictation.body':
+    'Halten Sie Ihre Diktattaste gedrückt, sagen Sie, was Sie wollen, und lassen Sie los. Der Text erscheint dort, wo die Einfügemarke steht. Nichts wird irgendwohin gesendet: Das Modell läuft auf diesem Rechner, und es funktioniert ganz ohne Internet.',
+  'onboarding.about.clipboard.title': 'Alles, was Sie kopieren, aufgehoben',
+  'onboarding.about.clipboard.body':
+    'Parle merkt sich, was Sie kopieren, damit Sie es wiederfinden. Passwortmanager sind von Haus aus ausgenommen, und Sie können jede weitere App hinzufügen, die Parle lieber ignorieren soll.',
+  'onboarding.about.sync.title': 'Ihre anderen Rechner, wenn Sie mögen',
+  'onboarding.about.sync.body':
+    'Parle kann sich über Ihr lokales Netzwerk mit Ihren eigenen Geräten synchronisieren, Ende-zu-Ende-verschlüsselt, ohne Konto und ohne Server dazwischen. Es ist aus, bis Sie es einschalten, und die Zwischenablage wird erst synchronisiert, wenn Sie das separat einschalten.',
+  'onboarding.about.privacy.title': 'Es bleibt bei Ihnen',
+  'onboarding.about.privacy.body':
+    'Kein Konto, keine Telemetrie, keine Cloud. Ihr Verlauf ist eine Datei auf diesem Rechner, die Sie jederzeit löschen können.',
 };

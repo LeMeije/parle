@@ -446,11 +446,25 @@ fn same_kind(a: &str, b: &str) -> bool {
 /// The lists are the sounds a speaker of that language actually makes, not
 /// translations of the English ones. "Euh" is French hesitation; "um" is not.
 fn fillers_for(lang: &str) -> &'static [&'static str] {
+    // THE RULE, learned the hard way: an entry must be a NON-WORD. If it can
+    // appear in an ordinary sentence carrying meaning, it does not belong here,
+    // however often people also use it to hesitate.
+    //
+    // The first version of this list broke that rule badly. It carried "é" for
+    // Portuguese, which is the verb "to be", so every Portuguese dictation lost
+    // every "é" it contained. It carried "este" and "esto" for Spanish, which
+    // are demonstratives, and "also" and "tja" for German, which are ordinary
+    // words. Those were written from assumption rather than checked, and the
+    // tests that were supposed to prove the feature worked could not see it,
+    // because they only ever asked whether ONE filler was removed.
+    //
+    // `ordinary_sentences_survive_cleanup` below is the guard that would have
+    // caught it, and it is the one that matters.
     match lang {
-        "fr" => &["euh", "heu", "hein", "bah", "ben", "hum", "mmm"],
-        "es" => &["eh", "em", "este", "esto", "mmm", "ehm"],
-        "de" => &["äh", "ähm", "öh", "hm", "hmm", "mhm", "tja"],
-        "pt" => &["é", "eh", "ahn", "hum", "hm", "né"],
+        "fr" => &["euh", "heu", "hum", "mmm"],
+        "es" => &["eh", "em", "ehm", "mmm"],
+        "de" => &["äh", "ähm", "öh", "hmm", "mhm"],
+        "pt" => &["hum", "hmm", "ahn", "ãhn"],
         // English, and the fallback for every language we have not tuned.
         _ => &["um", "uh", "uhm", "umm", "ah", "er", "erm", "hmm", "mhm", "mmm"],
     }
@@ -458,11 +472,26 @@ fn fillers_for(lang: &str) -> &'static [&'static str] {
 
 /// Hedge phrases, per language. Same reasoning as `fillers_for`.
 fn hedges_for(lang: &str) -> &'static [&'static [&'static str]] {
+    // Same rule, and it bites harder here because hedges are made of real
+    // words. A phrase only qualifies if the WHOLE phrase is a discourse marker
+    // that carries no content. Single words that double as ordinary vocabulary
+    // are out: Spanish "en plan" eats "en plan de negocio", German "also" is a
+    // conjunction, Portuguese "tipo" is the noun "type".
     match lang {
-        "fr" => &[&["vous", "voyez"], &["tu", "vois"], &["je", "veux", "dire"], &["en", "fait"], &["du", "coup"]],
-        "es" => &[&["o", "sea"], &["sabes"], &["digamos"], &["en", "plan"], &["es", "decir"]],
-        "de" => &[&["sozusagen"], &["irgendwie"], &["ich", "meine"], &["also"], &["quasi"]],
-        "pt" => &[&["tipo"], &["sabe"], &["quer", "dizer"], &["ou", "seja"], &["na", "verdade"]],
+        // "I mean" and its translations are OUT, in every language except
+        // English, where the existing `k == 0` guard already handles it. They
+        // are literal sentences as often as they are discourse markers: "je
+        // veux dire la vérité" is "I want to tell the truth", and cleanup was
+        // reducing it to "la vérité". What survives here is only phrases that
+        // cannot be read literally.
+        "fr" => &[&["vous", "voyez"], &["tu", "vois"]],
+        // "o sea" is out too, for the same reason: "o sea grande o sea
+        // pequeño" is "whether big or small". It is a very common filler and
+        // that is not enough. Leaving a filler in costs the user a word they
+        // said; taking one out costs them a word they meant.
+        "es" => &[&["por", "así", "decirlo"]],
+        "de" => &[&["sozusagen"], &["wie", "gesagt"]],
+        "pt" => &[&["ou", "seja"], &["por", "assim", "dizer"]],
         _ => &[&["you", "know"], &["i", "mean"], &["sort", "of"], &["kind", "of"], &["basically"]],
     }
 }
@@ -863,6 +892,78 @@ mod localised_cleanup_tests {
         }
     }
 
+    /// ORDINARY SENTENCES MUST SURVIVE CLEANUP UNTOUCHED.
+    ///
+    /// This is the guard that matters, and it did not exist when the localised
+    /// lists were written. The two tests that did exist each removed one filler
+    /// and checked one unrelated word survived, which cannot notice that an
+    /// entry is itself a real word.
+    ///
+    /// It was: "é" is the Portuguese verb "to be", so `remove_fillers`, which
+    /// is ON by default, deleted it from every Portuguese dictation. Spanish
+    /// lost "este" and "esto", German lost "also". An independent verifier
+    /// found it by running plain sentences through `format()`, which is exactly
+    /// what this now does on every run.
+    ///
+    /// Nothing here contains a filler. If cleanup changes any of these, an
+    /// entry in `fillers_for` or `hedges_for` is a word people actually use.
+    #[test]
+    fn ordinary_sentences_survive_cleanup() {
+        let cases: &[(&str, &[&str])] = &[
+            ("en", &["the meeting is at noon", "that is a good point", "send it this afternoon"]),
+            (
+                "fr",
+                &["la réunion est à midi", "ce point est important", "je veux dire la vérité"],
+            ),
+            (
+                "es",
+                &[
+                    "esto es bueno",
+                    "este informe es largo",
+                    "en plan de negocio",
+                    // The literal reading of "o sea": whether big or small.
+                    "o sea grande o sea pequeño",
+                ],
+            ),
+            (
+                "de",
+                &["also gut wir fangen an", "das Treffen ist um zwölf", "tja das war es"],
+            ),
+            (
+                "pt",
+                &[
+                    "isso é muito bom",
+                    "o preço é alto",
+                    "tipo de dado",
+                    "ele sabe a resposta",
+                ],
+            ),
+        ];
+        for (lang, sentences) in cases {
+            for input in *sentences {
+                let out = format(input, &[], &cfg(), "", lang);
+                let before: Vec<String> =
+                    input.split_whitespace().map(|w| w.to_lowercase()).collect();
+                let after: Vec<String> = out
+                    .text
+                    .split_whitespace()
+                    .map(|w| {
+                        w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()
+                    })
+                    .filter(|w| !w.is_empty())
+                    .collect();
+                assert_eq!(
+                    after.len(),
+                    before.len(),
+                    "[{lang}] cleanup deleted a real word from {input:?}: got {:?}. An entry in \
+                     fillers_for/hedges_for is a word people actually use, and remove_fillers is \
+                     ON by default",
+                    out.text
+                );
+            }
+        }
+    }
+
     /// The lists must be DIFFERENT per language, not one list under five names.
     ///
     /// Without this, a regression that quietly pointed every language back at
@@ -881,5 +982,51 @@ mod localised_cleanup_tests {
         // And an unknown language falls back to English rather than to nothing,
         // because no cleanup is worse than English cleanup on English text.
         assert_eq!(fillers_for("ja"), en, "an untuned language must fall back to English");
+    }
+}
+
+#[cfg(test)]
+mod hint_honesty_tests {
+    use super::*;
+
+    /// The hint must only advertise words the engine actually removes.
+    ///
+    /// The hints live in the translation files and the lists live here, so
+    /// nothing but this test connects them. They drifted twice while the lists
+    /// were being corrected: French offered "ben" and German offered "hm"
+    /// after both had been taken out. A hint that names a word cleanup leaves
+    /// alone is a promise the product does not keep.
+    #[test]
+    fn every_word_a_hint_advertises_is_one_the_engine_removes() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root");
+        let mut checked = 0usize;
+        for lang in ["fr", "es", "de", "pt"] {
+            let path = root.join("src/i18n").join(format!("{lang}.ts"));
+            let Ok(src) = std::fs::read_to_string(&path) else {
+                panic!("{} is unreadable; this test would silently pass", path.display());
+            };
+            let hint = src
+                .split("'settings.removeFillers.hint': '")
+                .nth(1)
+                .and_then(|s| s.split('\'').next())
+                .unwrap_or_else(|| panic!("[{lang}] the filler hint is missing"));
+            let list = fillers_for(lang);
+            for word in hint.split(',') {
+                let w = word.trim().trim_end_matches('…').trim().to_lowercase();
+                if w.is_empty() {
+                    continue;
+                }
+                checked += 1;
+                assert!(
+                    list.contains(&w.as_str()),
+                    "[{lang}] the settings hint offers {w:?} as a filler, and the engine does \
+                     not remove it. The hint and the list have drifted: {list:?}"
+                );
+            }
+        }
+        assert!(checked >= 8, "only {checked} hint words were checked; this test found nothing");
     }
 }

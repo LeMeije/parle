@@ -119,6 +119,30 @@ fn worst_ui_wait_during_serve(store: Arc<Mutex<Store>>) -> (u64, Duration) {
     (worst.load(Ordering::SeqCst), took)
 }
 
+/// The same UI probe with NOTHING competing for the store, so the caller can
+/// tell "the serve froze the window" apart from "this machine is busy".
+fn worst_ui_wait_without_serve(store: Arc<Mutex<Store>>) -> (u64, std::time::Duration) {
+    let worst = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (w, s2) = (worst.clone(), stop.clone());
+    let st = store.clone();
+    let ui = std::thread::spawn(move || {
+        while !s2.load(Ordering::SeqCst) {
+            let t = Instant::now();
+            let _ = st.lock().search("", None, 50);
+            let ms = t.elapsed().as_millis() as u64;
+            w.fetch_max(ms, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
+    let t = Instant::now();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let took = t.elapsed();
+    stop.store(true, Ordering::SeqCst);
+    ui.join().unwrap();
+    (worst.load(Ordering::SeqCst), took)
+}
+
 /// A paired peer choosing one `updated_at` for 20,000 rows must not freeze the
 /// history window: the pages are bounded and the mutex is released between
 /// them.
@@ -127,11 +151,28 @@ fn r4_the_widened_serve_page_is_one_uninterruptible_hold() {
     // 4 KiB a row: well under the 1 MiB the wire allows, i.e. a conservative
     // version of the attack.
     let store = Arc::new(Mutex::new(saturated_millisecond(WIDE_PAGE, 4096)));
+    // BASELINE FIRST, on this machine, right now.
+    //
+    // The gate was `waited < 200`, an absolute millisecond count, and it failed
+    // on a machine that happened to be busy while passing every time in
+    // isolation. What the test is actually about is whether a serve makes the
+    // history window WORSE, and that survives a loaded machine: if everything
+    // is slow, the baseline is slow too and the comparison still means what it
+    // meant. An absolute number only ever measured how busy the CPU was.
+    let idle_store = Arc::new(Mutex::new(saturated_millisecond(WIDE_PAGE, 4096)));
+    let (baseline, _) = worst_ui_wait_without_serve(idle_store);
+
     let (waited, took) = worst_ui_wait_during_serve(store);
-    eprintln!("widened serve page held the store lock {took:?}; UI worst wait {waited} ms");
+    eprintln!(
+        "widened serve page held the store lock {took:?}; UI worst wait {waited} ms \
+         (baseline with no serve running: {baseline} ms)"
+    );
+    let ceiling = 200u64.max(baseline.saturating_mul(4));
     assert!(
-        waited < 200,
-        "a single serve() page froze the history UI for {waited} ms (the fetch itself \
+        waited < ceiling,
+        "a single serve() page froze the history UI for {waited} ms, against a ceiling of \
+         {ceiling} ms and a no-serve baseline of {baseline} ms on this machine (the fetch \
+         itself \
          held the store mutex {took:?}). `prune_after_exchange` was chunked in round 3; \
          `fetch_page`'s WIDE_PAGE re-fetch was not, and its trigger — every row in a \
          page sharing one `updated_at` — is a value the PAIRED PEER chooses."

@@ -52,3 +52,46 @@ fn r14_live_the_liveness_check_only_ever_relaxes_a_raised_flag() {
          only ever allowed to relax a raised flag, never to raise a lowered one"
     );
 }
+
+/// The cancel key must have a path that does not depend on the event tap.
+///
+/// Reported from real use: "escape cancel is on and pressing Escape does
+/// nothing". The cause was not in the Escape handling, which reads correctly.
+/// It was that the tap was the ONLY listener. `register_chord_shortcuts`
+/// deliberately skips every key `NativeKey::parse` recognises, on the grounds
+/// that the native listener owns it, and Escape is one of those, so the cancel
+/// key was never registered as a global shortcut. When the tap delivers
+/// nothing, which is what happens without an Accessibility grant, the setting
+/// is a switch wired to nothing.
+///
+/// This asserts the second path exists and is armed by recording state, which
+/// is the property that makes the feature work rather than the mechanism.
+#[test]
+fn r14_live_the_cancel_key_has_a_path_that_does_not_need_the_tap() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lib = std::fs::read_to_string(root.join("src/lib.rs")).expect("lib.rs is readable");
+    let state = std::fs::read_to_string(root.join("src/state.rs")).expect("state.rs is readable");
+
+    // PREMISE: the generic registration really does skip native keys, so the
+    // cancel key genuinely cannot be covered by it.
+    assert!(
+        lib.contains("if platform::NativeKey::parse(&binding.key).is_some() {"),
+        "premise: register_chord_shortcuts no longer skips native keys; re-read this finding"
+    );
+    assert!(
+        crate::platform::NativeKey::parse("Escape").is_some(),
+        "premise: Escape is a native key, which is why the skip above excludes it"
+    );
+
+    // THE CLAIM: a dedicated path exists, and recording state drives it.
+    assert!(
+        lib.contains("fn set_cancel_shortcut_armed("),
+        "the cancel key has no registration path outside the event tap, so the setting does \
+         nothing whenever the tap is not delivering key events"
+    );
+    assert!(
+        state.contains("set_cancel_shortcut_armed(&app, self, on)"),
+        "the cancel shortcut is never armed from recording state, so it is either always \
+         registered (swallowing Escape system-wide) or never"
+    );
+}

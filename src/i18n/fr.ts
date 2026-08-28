@@ -252,9 +252,9 @@ export const fr: Record<string, string> = {
   'settings.smartCleanup.label': 'Nettoyage intelligent',
   'settings.smartCleanup.hint': 'Interrupteur général du nettoyage déterministe',
   'settings.removeFillers.label': 'Supprimer les mots de remplissage',
-  'settings.removeFillers.hint': 'euh, hum, ben…',
+  'settings.removeFillers.hint': 'euh, heu, hum…',
   'settings.removeHedges.label': 'Supprimer les tournures vagues',
-  'settings.removeHedges.hint': 'vous voyez, du coup, je veux dire (plus agressif)',
+  'settings.removeHedges.hint': 'vous voyez, tu vois (plus agressif)',
   'settings.trimSelfCorrections.label': 'Couper les autocorrections',
   'settings.trimSelfCorrections.hint':
     '« jeudi, non en fait mercredi » → « mercredi ». Les passages coupés restent consultables dans l’Historique',
@@ -447,5 +447,22 @@ export const fr: Record<string, string> = {
   // ---------- Settings: interface language ----------
   'settings.uiLanguage.label': 'Langue de l’interface',
   'settings.uiLanguage.hint': 'La langue dans laquelle Parle lui-même est écrit. Distincte de la langue dans laquelle vous dictez, ci-dessous.',
+
+  // ---------- Onboarding: what Parle is ----------
+  'onboarding.hotkey.openKeyboard': 'Ouvrir les réglages Clavier',
+  'onboarding.about.title': 'Ce que fait Parle',
+  'onboarding.about.sub': 'La dictée et un historique du presse-papiers, qui restent tous deux sur cette machine.',
+  'onboarding.about.dictation.title': 'Parler plutôt que taper',
+  'onboarding.about.dictation.body':
+    'Maintenez votre touche de dictée, dites ce que vous voulez, relâchez. Le texte apparaît là où se trouve votre curseur. Rien n’est envoyé nulle part : le modèle tourne sur cette machine, et cela fonctionne sans aucune connexion internet.',
+  'onboarding.about.clipboard.title': 'Tout ce que vous copiez, conservé',
+  'onboarding.about.clipboard.body':
+    'Parle retient ce que vous copiez pour que vous puissiez le retrouver. Les gestionnaires de mots de passe sont exclus d’office, et vous pouvez ajouter toute autre app que vous préférez qu’il ignore.',
+  'onboarding.about.sync.title': 'Vos autres machines, si vous le souhaitez',
+  'onboarding.about.sync.body':
+    'Parle peut se synchroniser avec vos propres appareils sur votre réseau local, avec un chiffrement de bout en bout, sans compte et sans serveur intermédiaire. La synchronisation est désactivée tant que vous ne l’activez pas, et celle du presse-papiers reste désactivée tant que vous ne la demandez pas séparément.',
+  'onboarding.about.privacy.title': 'Tout reste chez vous',
+  'onboarding.about.privacy.body':
+    'Aucun compte, aucune télémétrie, aucun cloud. Votre historique est un fichier sur cette machine, que vous pouvez effacer à tout moment.',
 };
 

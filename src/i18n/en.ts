@@ -450,4 +450,21 @@ export const en: Record<string, string> = {
   // ---------- Settings: interface language ----------
   'settings.uiLanguage.label': 'Interface language',
   'settings.uiLanguage.hint': 'The language Parle itself is written in. Separate from the language you dictate in, below.',
+
+  // ---------- Onboarding: what Parle is ----------
+  'onboarding.hotkey.openKeyboard': 'Open Keyboard settings',
+  'onboarding.about.title': 'What Parle does',
+  'onboarding.about.sub': 'Dictation and a clipboard history, both of which stay on this machine.',
+  'onboarding.about.dictation.title': 'Talk instead of typing',
+  'onboarding.about.dictation.body':
+    'Hold your dictation key, say what you want, let go. The text appears where your cursor is. Nothing is sent anywhere: the model runs on this computer, and it works with no internet at all.',
+  'onboarding.about.clipboard.title': 'Everything you copy, kept',
+  'onboarding.about.clipboard.body':
+    'Parle remembers what you copy so you can find it again. Password managers are excluded out of the box, and you can add any other app you would rather it ignored.',
+  'onboarding.about.sync.title': 'Your other machines, if you want',
+  'onboarding.about.sync.body':
+    'Parle can sync to your own devices over your local network, encrypted end to end, with no account and no server in between. It is off until you turn it on, and clipboard sync stays off until you ask for it separately.',
+  'onboarding.about.privacy.title': 'It stays yours',
+  'onboarding.about.privacy.body':
+    'No account, no telemetry, no cloud. Your history is a file on this machine that you can clear at any time.',
 };

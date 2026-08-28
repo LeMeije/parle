@@ -570,6 +570,10 @@ pub fn open_permission_settings(which: String) {
         // the one button offered to a user whose mDNS is being filtered sent
         // them to the wrong settings pane entirely.
         "local-network" => platform::imp::open_local_network_settings(),
+        // macOS binds a double-press of the Globe key to its own dictation,
+        // which is the same key Parle ships as its default.
+        #[cfg(target_os = "macos")]
+        "keyboard" => platform::imp::open_keyboard_settings(),
         _ => platform::imp::open_accessibility_settings(),
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]

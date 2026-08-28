@@ -262,9 +262,9 @@ export const es: Record<string, string> = {
   'settings.smartCleanup.label': 'Limpieza inteligente',
   'settings.smartCleanup.hint': 'Interruptor principal del nivel de limpieza determinista',
   'settings.removeFillers.label': 'Eliminar muletillas',
-  'settings.removeFillers.hint': 'eh, em, esto…',
+  'settings.removeFillers.hint': 'eh, em, ehm…',
   'settings.removeHedges.label': 'Eliminar coletillas',
-  'settings.removeHedges.hint': '¿sabes?, o sea, digamos (más agresivo)',
+  'settings.removeHedges.hint': 'por así decirlo (más agresivo)',
   'settings.trimSelfCorrections.label': 'Recortar rectificaciones',
   'settings.trimSelfCorrections.hint':
     '“el jueves, no, en realidad el miércoles” → “el miércoles”. Los fragmentos recortados se pueden seguir revisando en el Historial',
@@ -470,4 +470,22 @@ export const es: Record<string, string> = {
   'settings.uiLanguage.label': 'Idioma de la interfaz',
   'settings.uiLanguage.hint':
     'El idioma en el que está escrito el propio Parle. Es independiente del idioma en el que dicta, abajo.',
+
+  // ---------- Onboarding: what Parle is ----------
+  'onboarding.hotkey.openKeyboard': 'Abrir los ajustes de Teclado',
+  'onboarding.about.title': 'Qué hace Parle',
+  'onboarding.about.sub':
+    'Dictado y un historial del portapapeles, y ambos se quedan en esta máquina.',
+  'onboarding.about.dictation.title': 'Hablar en vez de escribir',
+  'onboarding.about.dictation.body':
+    'Mantenga pulsada su tecla de dictado, diga lo que quiera y suéltela. El texto aparece donde está el cursor. No se envía nada a ningún sitio: el modelo se ejecuta en esta máquina y funciona sin ninguna conexión a internet.',
+  'onboarding.about.clipboard.title': 'Todo lo que copia, guardado',
+  'onboarding.about.clipboard.body':
+    'Parle recuerda lo que copia para que pueda volver a encontrarlo. Los gestores de contraseñas quedan excluidos de fábrica, y puede añadir cualquier otra app que prefiera que ignore.',
+  'onboarding.about.sync.title': 'Sus otras máquinas, si quiere',
+  'onboarding.about.sync.body':
+    'Parle puede sincronizarse con sus propios dispositivos por la red local, con cifrado de extremo a extremo, sin cuenta y sin ningún servidor de por medio. Está desactivado hasta que lo active, y la sincronización del portapapeles sigue desactivada hasta que la pida por separado.',
+  'onboarding.about.privacy.title': 'Sigue siendo suyo',
+  'onboarding.about.privacy.body':
+    'Sin cuenta, sin telemetría, sin nube. Su historial es un archivo en esta máquina que puede borrar cuando quiera.',
 };

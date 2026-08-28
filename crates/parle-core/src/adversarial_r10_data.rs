@@ -222,15 +222,26 @@ fn r10_a_paired_peer_can_ratchet_our_own_clock_but_only_to_the_skew_ceiling() {
         let id = a.insert_clipboard(&format!("row {round}"), None, None).unwrap();
         let (origin, _) = a.origin_and_text_for_test(id).unwrap();
         // The peer relays a delete of our row, stamped as high as we will take.
+        // ONE reading of the clock, used for both the stamp and the
+        // measurement.
+        //
+        // This sampled `now_ms()` twice, so a single millisecond ticking
+        // between the two made the offset 119999 against a `>= 120000` gate.
+        // It failed in three of six full runs on a loaded machine and passed
+        // eight times out of eight in isolation, which is what a one
+        // millisecond wide wall-clock gate always eventually does. Same rule
+        // as everywhere else in this codebase: read your input once and carry
+        // the value.
+        let at = now_ms();
         let t = RemoteTombstone {
             source_machine: ME.into(),
             origin_id: origin,
-            deleted_at: now_ms() + MAX_CLOCK_SKEW_MS,
+            deleted_at: at + MAX_CLOCK_SKEW_MS,
         };
         a.apply_remote_tombstone(PEER, &t).unwrap();
 
         let next = a.insert_clipboard(&format!("after {round}"), None, None).unwrap();
-        let offset = updated_at_of(&a, next) - now_ms();
+        let offset = updated_at_of(&a, next) - at;
         highest_offset = highest_offset.max(offset);
     }
 

@@ -23,6 +23,9 @@ pub struct AppState {
     pub gesture: Mutex<GestureMachine>,
     pub gesture_alt: Mutex<GestureMachine>,
     recording_flag: Arc<AtomicBool>,
+    /// Kept so the cancel shortcut can be armed while recording. See
+    /// `set_recording_flag`.
+    app: parking_lot::Mutex<Option<AppHandle>>,
     /// Worker that runs stop_and_process off the event thread, strictly serial.
     work_tx: crossbeam_channel::Sender<Work>,
     /// Channel into the dispatcher, kept so listeners can be armed later
@@ -200,6 +203,7 @@ impl AppState {
             gesture_alt: Mutex::new(GestureMachine::new(mode_alt, latch)),
             sync,
             recording_flag: Arc::new(AtomicBool::new(false)),
+            app: parking_lot::Mutex::new(None),
             work_tx,
             platform_tx: Mutex::new(None),
             previous_app: Mutex::new(None),
@@ -274,6 +278,27 @@ impl AppState {
         if let Some(h) = self.hotkeys.lock().as_ref() {
             h.set_recording(on);
         }
+        // Arm the cancel key as a REAL global shortcut for as long as we are
+        // recording, and disarm it the moment we stop.
+        //
+        // The event tap was the only thing listening for it, and the tap does
+        // not receive ordinary key events when Accessibility has not been
+        // granted, which made "press Escape to cancel" a switch that did
+        // nothing with no way to tell. `register_chord_shortcuts` could not
+        // help: it skips any key `NativeKey::parse` recognises on the grounds
+        // that the native listener owns it, and Escape is one of those.
+        //
+        // Registered only WHILE RECORDING, because a permanently registered
+        // Escape would swallow the key system-wide, which is exactly why the
+        // setting is off by default in the first place.
+        if let Some(app) = self.app.lock().clone() {
+            crate::set_cancel_shortcut_armed(&app, self, on);
+        }
+    }
+
+    /// Remember the handle so `set_recording_flag` can reach the shortcut API.
+    pub fn set_app_handle(&self, app: AppHandle) {
+        *self.app.lock() = Some(app);
     }
 
     /// Build native bindings from settings (only keys the native layer owns).
