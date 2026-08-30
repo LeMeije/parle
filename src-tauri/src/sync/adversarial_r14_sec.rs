@@ -874,9 +874,14 @@ fn r14_sec_i1_the_delete_confirmation_never_hears_about_a_new_pairing() {
     let api = squashed("src/api.ts");
 
     // ANCHOR 1: the round-13 state and its one-shot fetch.
-    anchor(&h, "const[pairedNames,setPairedNames]=useState<string[]|null>(null);", "History.tsx");
-    anchor(&h, "onSyncStatus((st)=>setPairedNames(st.paired.map((d)=>d.name)))", "History.tsx");
-    anchor(&h, ".catch(()=>setPairedNames(null));", "History.tsx");
+    // Repointed after the roster stopped being its own state: History now holds
+    // the whole `SyncStatus`, because the per-device row markers need the local
+    // device id as well as the peer names, and the roster is derived from it.
+    // Same subscription, same null contract, one source of truth instead of two.
+    anchor(&h, "const[syncStatus,setSyncStatus]=useState<SyncStatus|null>(null);", "History.tsx");
+    anchor(&h, "onSyncStatus((st)=>setSyncStatus(st))", "History.tsx");
+    anchor(&h, ".catch(()=>setSyncStatus(null));", "History.tsx");
+    anchor(&h, "constpairedNames=syncStatus?syncStatus.paired.map((d)=>d.name):null;", "History.tsx");
     // ANCHOR 2: an empty array really does silence the warning.
     anchor(&h, "elseif(pairedNames.length>0){", "History.tsx confirmDelete");
     // CONTROL: the push channel exists and a sibling view already uses it, so

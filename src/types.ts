@@ -117,6 +117,10 @@ export interface HistoryItem {
   // Kept on this device and never offered to a paired device. Set when the
   // secure-field probe could not rule out that this was a password field.
   local_only: boolean;
+  // The device that CREATED this row, as a sync device id. Null means this
+  // machine: the row predates this install having a sync identity, or was
+  // written before sync was switched on.
+  source_machine: string | null;
   meta: string | null;
 }
 

@@ -14,7 +14,8 @@ import {
 } from 'lucide-react';
 import { api, onSyncStatus, onFocusPalette, onHistoryChanged, onPipelineEvent } from '../api';
 import { COPY_KEYS } from '../types';
-import type { HistoryItem } from '../types';
+import type { HistoryItem, SyncStatus } from '../types';
+import { deviceLabel, devicesInItems, hueFor, isLocal } from '../devices';
 import { t } from '../i18n';
 import { useT } from '../i18n/useT';
 
@@ -39,7 +40,12 @@ export default function HistoryView() {
   // `null` means we do not know yet, which is NOT the same as "nobody to
   // warn about". Collapsing the two into an empty array made a failed status
   // call silently downgrade the warning on an irreversible, travelling delete.
-  const [pairedNames, setPairedNames] = useState<string[] | null>(null);
+  // The WHOLE status, not just the names. The row markers need the local device
+  // id and the peer names, and a second subscription for the same push event
+  // would be a second thing to keep in step. `pairedNames` is derived below so
+  // its null-means-unknown contract is unchanged.
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const [deviceFilter, setDeviceFilter] = useState<string>('all');
   useEffect(() => {
     // SUBSCRIBED, not fetched once. A `[]` that was right at mount is
     // indistinguishable from one that is now wrong: pair a device after
@@ -47,7 +53,7 @@ export default function HistoryView() {
     // `sync-status` is pushed for exactly this and SettingsView already
     // listens to it.
     let stop: (() => void) | undefined;
-    onSyncStatus((st) => setPairedNames(st.paired.map((d) => d.name)))
+    onSyncStatus((st) => setSyncStatus(st))
       .then((un) => {
         stop = un;
       })
@@ -58,10 +64,22 @@ export default function HistoryView() {
       // sync toggle says, and it absorbs on the peer the moment sync comes
       // back on. The Clear-all disclosure this was copied from has no such
       // gate either; the copy invented one.
-      .then((st) => setPairedNames(st.paired.map((d) => d.name)))
-      .catch(() => setPairedNames(null));
+      .then((st) => setSyncStatus(st))
+      .catch(() => setSyncStatus(null));
     return () => stop?.();
   }, []);
+
+  const pairedNames = syncStatus ? syncStatus.paired.map((d) => d.name) : null;
+
+  // Which machines wrote the rows currently in hand, and the device-filtered
+  // view of them. Filtered HERE rather than in SQL because `source_machine` is
+  // the one facet the store does not index for search, and a page that is
+  // already in memory is the wrong place to pay for a round trip.
+  const devices = devicesInItems(items, syncStatus);
+  const shown =
+    deviceFilter === 'all'
+      ? items
+      : items.filter((it) => (it.source_machine ?? syncStatus?.device_id ?? '') === deviceFilter);
 
   function confirmDelete(item: HistoryItem): boolean {
     // Whole sentences joined by a blank line, never fragments: each half is
@@ -115,18 +133,18 @@ export default function HistoryView() {
     if (editing !== null) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setSelected((s) => Math.min(s + 1, items.length - 1));
+      setSelected((s) => Math.min(s + 1, shown.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setSelected((s) => Math.max(s - 1, 0));
-    } else if (e.key === 'Enter' && items[selected]) {
+    } else if (e.key === 'Enter' && shown[selected]) {
       e.preventDefault();
       // Enter pastes into the previous app (the window hides first so focus
       // returns there); Cmd/Ctrl+Enter copies only.
       if (e.metaKey || e.ctrlKey) {
-        api.copyItem(items[selected].id);
+        api.copyItem(shown[selected].id);
       } else {
-        api.pasteItem(items[selected].id);
+        api.pasteItem(shown[selected].id);
       }
     }
   }
@@ -159,6 +177,26 @@ export default function HistoryView() {
             </button>
           ))}
         </div>
+        {/* Only once a second machine has actually written something. A
+            one-machine user must never be shown a device filter: it would be a
+            control that can only ever have one answer. */}
+        {devices.length > 1 && (
+          <select
+            className="device-filter"
+            value={deviceFilter}
+            onChange={(e) => {
+              setDeviceFilter(e.target.value);
+              setSelected(0);
+            }}
+          >
+            <option value="all">{t('history.filter.allDevices')}</option>
+            {devices.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.local ? t('history.filter.thisDevice', { name: d.label }) : d.label}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
       {gone && (
@@ -166,17 +204,24 @@ export default function HistoryView() {
       )}
 
       <div className="history-list" ref={listRef}>
-        {items.length === 0 && (
+        {shown.length === 0 && (
           <div className="empty">
             <Mic size={28} strokeWidth={1.6} />
             <p>{query ? t('history.empty.noMatches') : t('history.empty.nothingYet')}</p>
           </div>
         )}
-        {items.map((item, i) => (
+        {shown.map((item, i) => (
           <div
             key={item.id}
             data-index={i}
-            className={`row ${i === selected ? 'selected' : ''} ${item.pinned ? 'pinned' : ''}`}
+            className={`row ${i === selected ? 'selected' : ''} ${item.pinned ? 'pinned' : ''} ${
+              isLocal(item, syncStatus) ? '' : 'from-peer'
+            }`}
+            style={
+              isLocal(item, syncStatus)
+                ? undefined
+                : ({ '--device-hue': hueFor(item.source_machine!) } as React.CSSProperties)
+            }
             onClick={() => setSelected(i)}
             onDoubleClick={() => api.copyItem(item.id)}
           >
@@ -214,6 +259,21 @@ export default function HistoryView() {
                   {(item.app_name ?? item.app_id) && <span>· {item.app_name ?? item.app_id}</span>}
                   {/* A row that will never reach the other machine says so on a
                       feature whose whole promise is that it does. */}
+                  {/* Named, not just coloured. The edge marker answers "is this
+                      mine" at a glance; only the name answers "which machine",
+                      and colour alone is no answer at all to a colour-blind
+                      reader. Absent on local rows: most rows are local, and
+                      labelling every one of them would bury the ones that are
+                      not. */}
+                  {!isLocal(item, syncStatus) && (
+                    <span
+                      className="badge badge-device"
+                      style={{ '--device-hue': hueFor(item.source_machine!) } as React.CSSProperties}
+                      title={t('history.fromDevice.title')}
+                    >
+                      {deviceLabel(item.source_machine!, syncStatus)}
+                    </span>
+                  )}
                   {item.local_only && (
                     <span className="badge" title={t('history.localOnly.title')}>
                       {t('history.localOnly.badge')}

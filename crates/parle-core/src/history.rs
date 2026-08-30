@@ -2231,7 +2231,7 @@ impl Store {
     }
 }
 
-const SELECT_COLS: &str = "SELECT id, kind, text, raw_text, created_at, pinned, duration_ms, model_id, language, app_id, app_name, local_only, meta FROM items";
+const SELECT_COLS: &str = "SELECT id, kind, text, raw_text, created_at, pinned, duration_ms, model_id, language, app_id, app_name, local_only, meta, source_machine FROM items";
 
 fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
     let kind: String = row.get(1)?;
@@ -2249,6 +2249,7 @@ fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
         app_name: row.get(10)?,
         local_only: row.get::<_, i64>(11)? != 0,
         meta: row.get(12)?,
+        source_machine: row.get(13)?,
     })
 }
 

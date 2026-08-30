@@ -582,13 +582,24 @@ fn r13_flow_d2_a_failed_syncstatus_silently_downgrades_the_delete_warning() {
     // INVERTED. `null` is "we do not know yet or the call failed" and `[]` is
     // "nobody to warn about". Collapsing them let a failed status call silently
     // downgrade the warning on an irreversible, travelling delete.
+    // Repointed, not weakened. The roster is no longer its own state: History
+    // keeps the whole `SyncStatus`, because the per-device row markers need the
+    // local device id as well as the peer names, and DERIVES the roster from
+    // it. The property under test is unchanged, and is now carried by the
+    // derivation: a null status must yield a null roster, never an empty one.
     assert!(
-        h.contains("useState<string[]|null>(null)") && h.contains("pairedNames===null"),
+        h.contains("useState<SyncStatus|null>(null)") && h.contains("pairedNames===null"),
         "the initial state and the failure state are the same value, so nothing downstream \
          can tell them apart and the delete proceeds either way"
     );
     assert!(
-        !h.contains(".catch(()=>setPairedNames([]));"),
+        h.contains("constpairedNames=syncStatus?syncStatus.paired.map((d)=>d.name):null;"),
+        "the roster is no longer derived null-for-null, so 'we do not know' has collapsed \
+         back into 'nobody to warn about' on an irreversible, travelling delete"
+    );
+    assert!(
+        !h.contains(".catch(()=>setSyncStatus([]));")
+            && h.contains(".catch(()=>setSyncStatus(null));"),
         "a failed syncStatus is still swallowed into the same empty list that means \
          'no paired devices'"
     );

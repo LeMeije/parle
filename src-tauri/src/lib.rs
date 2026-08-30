@@ -44,8 +44,18 @@ pub fn run() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "parle=info,parle_lib=info,parle_core=info,parle_audio=info,parle_asr=info".into());
     // Release builds are GUI-subsystem: stdout goes nowhere, so without this the
-    // app has no diagnostics at all on an installed machine. Truncated per run.
-    match log_path().and_then(|p| std::fs::File::create(p).ok()) {
+    // app has no diagnostics at all on an installed machine.
+    //
+    // One generation is kept. The run before this one is the run worth reading:
+    // when something goes wrong the user's first move is to restart the app, and
+    // with a plain `File::create` that restart destroys the only record of the
+    // failure. That is exactly how the 2026-08-28 overlay incident lost its
+    // evidence. Two files, not a rotating set: the log is small and the question
+    // is always "what happened last time", never "what happened last week".
+    match log_path().and_then(|p| {
+        let _ = std::fs::rename(&p, p.with_extension("log.1"));
+        std::fs::File::create(p).ok()
+    }) {
         Some(f) => tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_ansi(false)
@@ -123,6 +133,7 @@ pub fn run() {
             commands::sync_set_enabled,
             commands::sync_set_device_name,
             commands::sync_set_kinds,
+            commands::sync_now,
             commands::sync_start_pairing,
             commands::sync_cancel_pairing,
             commands::sync_pair_with,

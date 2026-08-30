@@ -47,6 +47,9 @@ export const api = {
   syncStartPairing: () => invoke<{ code: string; expires_at: number }>('sync_start_pairing'),
   syncCancelPairing: () => invoke<void>('sync_cancel_pairing'),
   syncPairWith: (peerId: string, code: string) => invoke<void>('sync_pair_with', { peerId, code }),
+  /** Exchange with every visible paired device now. Resolves to how many
+   *  exchanges actually started; 0 means nobody was reachable. */
+  syncNow: () => invoke<number>('sync_now'),
   syncUnpair: (deviceId: string) => invoke<void>('sync_unpair', { deviceId }),
   syncSetKinds: (dictations: boolean, clipboard: boolean) =>
     invoke<void>('sync_set_kinds', { dictations, clipboard }),

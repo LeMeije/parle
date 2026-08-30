@@ -23,6 +23,7 @@ export const de: Record<string, string> = {
   'app.nav.history': 'Verlauf',
   'app.nav.dictionary': 'Wörterbuch',
   'app.nav.models': 'Modelle',
+  'app.nav.sync': 'Synchronisierung',
   'app.nav.settings': 'Einstellungen',
   'app.record.start': 'Diktat starten',
   'app.record.stop': 'Diktat beenden',
@@ -45,6 +46,8 @@ export const de: Record<string, string> = {
   'history.filter.all': 'Alle',
   'history.filter.dictations': 'Diktate',
   'history.filter.clipboard': 'Zwischenablage',
+  'history.filter.allDevices': 'Alle Geräte',
+  'history.filter.thisDevice': '{name} (dieses Gerät)',
   'history.gone': 'Dieser Eintrag ist nicht mehr vorhanden. Er wurde auf einem anderen Gerät gelöscht, deshalb wurde die Liste aktualisiert.',
   'history.empty.noMatches': 'Keine Treffer.',
   'history.empty.nothingYet': 'Noch nichts hier. Halten Sie Ihr Tastenkürzel gedrückt und sprechen Sie.',
@@ -54,6 +57,7 @@ export const de: Record<string, string> = {
   'history.localOnly.badge': 'nur dieses Gerät',
   'history.localOnly.title':
     'Parle konnte nicht ausschließen, dass dies ein Passwortfeld war. Der Eintrag bleibt deshalb auf diesem Gerät und wird nie an Ihre anderen Geräte gesendet',
+  'history.fromDevice.title': 'Auf einem anderen Ihrer Geräte geschrieben und hierher synchronisiert',
   'history.action.paste': 'Einfügen',
   'history.action.pasteTitle': 'In die vorherige App einfügen (Enter)',
   'history.action.copy': 'Kopieren',
@@ -391,6 +395,10 @@ export const de: Record<string, string> = {
   'sync.paired.label': 'Gekoppelte Geräte',
   'sync.paired.hint': 'Nur diese Rechner können Ihren Verlauf sehen. Die Kopplung gilt beidseitig.',
   'sync.paired.none': 'Noch keine Geräte gekoppelt. Koppeln Sie unten eines, um zu starten.',
+  'sync.now.button': 'Jetzt synchronisieren',
+  'sync.now.working': 'Synchronisiert',
+  'sync.now.none': 'Derzeit ist kein gekoppeltes Gerät erreichbar.',
+  'sync.now.ok': 'Austausch mit Ihren anderen Geräten läuft.',
   'sync.syncedAgo': 'Synchronisiert {when}',
   'sync.visibleNotSynced': 'Im Netzwerk sichtbar, aber noch nichts synchronisiert',
   'sync.neverConnected': 'Nie verbunden',
@@ -416,10 +424,16 @@ export const de: Record<string, string> = {
   'sync.peers.openLocalNetwork': '„Lokales Netzwerk“ öffnen',
   'sync.peers.winBlocked': 'Wenn das alles stimmt, blockiert möglicherweise die Windows-Firewall Parle.',
   'sync.peers.openFirewall': 'Firewall-Einstellungen öffnen',
+  'sync.peers.vpnHint':
+    'Ein VPN ist die andere häufige Ursache: Viele blockieren den lokalen Netzwerkverkehr, auch wenn alles andere funktioniert. Schalten Sie es aus oder aktivieren Sie dessen Einstellung zur lokalen Netzwerkfreigabe.',
+  'sync.peers.isolatedHint':
+    'Gäste und Hotel WLANs verhindern oft, dass sich Geräte im selben Netzwerk überhaupt sehen. Ein Hotspot vom Telefon schließt das schnell aus.',
   'sync.peers.looking':
     'Suche nach Geräten in diesem Netzwerk… Öffnen Sie Parle auf dem anderen Rechner und schalten Sie Sync auch dort ein.',
   'sync.pairing': 'Wird gekoppelt…',
   'sync.pair': 'Koppeln',
+  'sync.pair.needsDevice':
+    'Wählen Sie zuerst oben das Gerät aus. Es wird nichts aufgeführt, solange sich beide Rechner im Netzwerk nicht sehen.',
   'sync.dictations.label': 'Diktate synchronisieren',
   'sync.dictations.hintPaired':
     'Alles, was Sie diktieren, erscheint im Verlauf beider Rechner. Schalten Sie dies wieder ein, wird Ihr Verlauf erneut an Ihre gekoppelten Geräte gesendet, was einen Moment dauern kann.',

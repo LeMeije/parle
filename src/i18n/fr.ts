@@ -20,6 +20,7 @@ export const fr: Record<string, string> = {
   'app.nav.history': 'Historique',
   'app.nav.dictionary': 'Dictionnaire',
   'app.nav.models': 'Modèles',
+  'app.nav.sync': 'Synchronisation',
   'app.nav.settings': 'Réglages',
   'app.record.start': 'Démarrer la dictée',
   'app.record.stop': 'Arrêter la dictée',
@@ -42,6 +43,8 @@ export const fr: Record<string, string> = {
   'history.filter.all': 'Tout',
   'history.filter.dictations': 'Dictées',
   'history.filter.clipboard': 'Presse-papiers',
+  'history.filter.allDevices': 'Tous les appareils',
+  'history.filter.thisDevice': '{name} (cet appareil)',
   'history.gone': 'Cet élément n’est plus là. Il a été supprimé sur un autre appareil, la liste a donc été actualisée.',
   'history.empty.noMatches': 'Aucun résultat.',
   'history.empty.nothingYet': 'Rien ici pour l’instant. Maintenez votre raccourci et parlez.',
@@ -51,6 +54,7 @@ export const fr: Record<string, string> = {
   'history.localOnly.badge': 'cet appareil uniquement',
   'history.localOnly.title':
     'Parle n’a pas pu exclure qu’il s’agisse d’un champ de mot de passe : cet élément est donc conservé sur cet appareil et n’est jamais envoyé à vos autres appareils',
+  'history.fromDevice.title': 'Écrit sur un autre de vos appareils et synchronisé ici',
   'history.action.paste': 'Coller',
   'history.action.pasteTitle': 'Coller dans l’app précédente (Entrée)',
   'history.action.copy': 'Copier',
@@ -388,6 +392,10 @@ export const fr: Record<string, string> = {
   'sync.paired.label': 'Appareils associés',
   'sync.paired.hint': 'Seules ces machines peuvent voir votre historique. L’association est réciproque.',
   'sync.paired.none': 'Aucun appareil associé pour l’instant. Associez-en un ci-dessous pour lancer la synchronisation.',
+  'sync.now.button': 'Synchroniser',
+  'sync.now.working': 'Synchronisation',
+  'sync.now.none': 'Aucun appareil associé n’est joignable pour le moment.',
+  'sync.now.ok': 'Échange en cours avec vos autres appareils.',
   'sync.syncedAgo': 'Synchronisé {when}',
   'sync.visibleNotSynced': 'Visible sur le réseau, mais rien n’a encore été synchronisé',
   'sync.neverConnected': 'Jamais connecté',
@@ -413,10 +421,16 @@ export const fr: Record<string, string> = {
   'sync.peers.openLocalNetwork': 'Ouvrir les réglages Réseau local',
   'sync.peers.winBlocked': 'Si tout cela semble correct, le pare-feu Windows bloque peut-être Parle.',
   'sync.peers.openFirewall': 'Ouvrir les réglages du pare-feu',
+  'sync.peers.vpnHint':
+    'Un VPN est l’autre cause fréquente : beaucoup bloquent le trafic du réseau local même quand tout le reste fonctionne. Désactivez-le, ou activez son option de partage du réseau local.',
+  'sync.peers.isolatedHint':
+    'Les Wi-Fi d’hôtel et d’invités empêchent souvent les appareils d’un même réseau de se voir. Un partage de connexion depuis un téléphone permet de le vérifier vite.',
   'sync.peers.looking':
     'Recherche d’appareils sur ce réseau… Ouvrez Parle sur l’autre machine et activez-y aussi la synchronisation.',
   'sync.pairing': 'Association…',
   'sync.pair': 'Associer',
+  'sync.pair.needsDevice':
+    'Sélectionnez d’abord l’appareil ci-dessus. Rien ne s’affiche tant que les deux machines ne se voient pas sur le réseau.',
   'sync.dictations.label': 'Synchroniser les dictées',
   'sync.dictations.hintPaired':
     'Tout ce que vous dictez apparaît dans l’Historique sur les deux machines. Réactiver cette option renvoie votre historique à vos appareils associés, ce qui peut prendre un moment.',

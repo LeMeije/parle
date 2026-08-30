@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AudioLines, BookA, Cpu, History as HistoryIcon, Settings as SettingsIcon } from 'lucide-react';
+import { AudioLines, BookA, Cpu, History as HistoryIcon, MonitorSmartphone, Settings as SettingsIcon } from 'lucide-react';
 import appIcon from './assets/icon.png';
 import { api, onPipelineEvent } from './api';
 import { PASTE_KEYS } from './types';
@@ -12,10 +12,11 @@ import ComposeView from './views/Compose';
 import ModelsView from './views/Models';
 import DictionaryView from './views/Dictionary';
 import SettingsView from './views/SettingsView';
+import SyncView from './views/Sync';
 import Onboarding from './views/Onboarding';
 import './app.css';
 
-type Tab = 'history' | 'compose' | 'dictionary' | 'models' | 'settings';
+type Tab = 'history' | 'compose' | 'dictionary' | 'models' | 'sync' | 'settings';
 
 export default function App() {
   const t = useT();
@@ -110,6 +111,9 @@ export default function App() {
           <NavItem icon={<HistoryIcon size={17} />} label={t('app.nav.history')} active={tab === 'history'} onClick={() => setTab('history')} />
           <NavItem icon={<BookA size={17} />} label={t('app.nav.dictionary')} active={tab === 'dictionary'} onClick={() => setTab('dictionary')} />
           <NavItem icon={<Cpu size={17} />} label={t('app.nav.models')} active={tab === 'models'} onClick={() => setTab('models')} />
+          {/* Before Settings, not inside it. Sync is a place with live state
+              to watch, not a preference to set once. */}
+          <NavItem icon={<MonitorSmartphone size={17} />} label={t('app.nav.sync')} active={tab === 'sync'} onClick={() => setTab('sync')} />
           <NavItem icon={<SettingsIcon size={17} />} label={t('app.nav.settings')} active={tab === 'settings'} onClick={() => setTab('settings')} />
         </nav>
         <button
@@ -125,6 +129,7 @@ export default function App() {
         {tab === 'compose' && <ComposeView />}
         {tab === 'dictionary' && <DictionaryView />}
         {tab === 'models' && <ModelsView />}
+        {tab === 'sync' && <SyncView settings={settings} />}
         {tab === 'settings' && <SettingsView settings={settings} onSave={save} />}
       </main>
       {toast && <div className={`toast toast-${toast.kind}`}>{toast.text}</div>}

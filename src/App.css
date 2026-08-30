@@ -386,6 +386,26 @@ textarea:focus {
 .row.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .row.pinned { background: color-mix(in srgb, var(--accent-soft) 40%, var(--bg-raised)); }
 
+/* Rows this machine did not write.
+ *
+ * A pseudo-element rather than a left border or an inset shadow: `.row` already
+ * spends its border on selection and its box-shadow on the selected ring, and a
+ * marker that disappears the moment a row is selected is worse than none. This
+ * one is independent of both.
+ *
+ * Only peer rows are marked. Most rows are local, so marking those too would
+ * paint the whole list and leave nothing standing out. */
+.row.from-peer { position: relative; overflow: hidden; }
+.row.from-peer::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--device-hue, var(--accent));
+}
+
 .row-icon {
   flex: 0 0 auto;
   width: 26px;
@@ -462,6 +482,33 @@ textarea:focus {
   border-color: color-mix(in srgb, #8b5cf6 36%, transparent);
 }
 [data-mode='dark'] .badge-trim { color: #bda4ff; }
+
+/* The machine that wrote the row. Takes its hue inline from `--device-hue`, so
+ * one rule serves every device instead of one class per colour. Mixed against
+ * `transparent` exactly like the badges above it, which is what keeps it
+ * legible in both themes without a second definition. */
+.badge-device {
+  color: color-mix(in srgb, var(--device-hue) 78%, #000);
+  background: color-mix(in srgb, var(--device-hue) 13%, transparent);
+  border-color: color-mix(in srgb, var(--device-hue) 38%, transparent);
+  cursor: default;
+}
+[data-mode='dark'] .badge-device { color: color-mix(in srgb, var(--device-hue) 62%, #fff); }
+
+/* Sits beside the kind filter; matches the segmented control it stands next
+ * to rather than inventing a third control shape for the same toolbar. */
+.device-filter {
+  padding: 6px 10px;
+  border-radius: var(--radius-s);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12.5px;
+  font-weight: 550;
+  font-family: var(--font-ui);
+  cursor: pointer;
+  max-width: 190px;
+}
 
 .badge-lang {
   color: #0b7d88;
@@ -1144,4 +1191,44 @@ button.linkish {
   cursor: pointer;
   font: inherit;
   text-decoration: underline;
+}
+
+/* --- Manual sync ------------------------------------------------------- */
+
+/* The paired-devices heading and its "Sync now" action share a line: the
+ * button belongs to that list, not to the sync panel as a whole. */
+.sync-paired-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sync-now-msg {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+@keyframes parle-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Honest feedback: the icon turns only while an exchange is actually in
+ * flight, so a stopped icon never implies work that is not happening. */
+.spin { animation: parle-spin 900ms linear infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation: none; }
+}
+
+/* The causes of an empty peer list that the app cannot see for itself: a VPN
+ * blocking LAN traffic, and a guest network isolating its clients. Set on its
+ * own line and dimmer than the hint above it, because it is the second thing to
+ * try, not the first. */
+.sync-hint-extra {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-dim);
+  opacity: 0.85;
 }

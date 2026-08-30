@@ -23,6 +23,7 @@ export const es: Record<string, string> = {
   'app.nav.history': 'Historial',
   'app.nav.dictionary': 'Diccionario',
   'app.nav.models': 'Modelos',
+  'app.nav.sync': 'Sincronización',
   'app.nav.settings': 'Ajustes',
   'app.record.start': 'Iniciar dictado',
   'app.record.stop': 'Detener dictado',
@@ -46,6 +47,8 @@ export const es: Record<string, string> = {
   'history.filter.all': 'Todo',
   'history.filter.dictations': 'Dictados',
   'history.filter.clipboard': 'Portapapeles',
+  'history.filter.allDevices': 'Todos los dispositivos',
+  'history.filter.thisDevice': '{name} (este dispositivo)',
   'history.gone':
     'Ese elemento ya no está aquí. Se eliminó en otro dispositivo, así que la lista se ha actualizado.',
   'history.empty.noMatches': 'Sin coincidencias.',
@@ -56,6 +59,7 @@ export const es: Record<string, string> = {
   'history.localOnly.badge': 'solo en este dispositivo',
   'history.localOnly.title':
     'Parle no pudo descartar que esto fuera un campo de contraseña, así que se conserva en este dispositivo y nunca se envía a sus otros dispositivos',
+  'history.fromDevice.title': 'Escrito en otro de tus dispositivos y sincronizado aquí',
   'history.action.paste': 'Pegar',
   'history.action.pasteTitle': 'Pegar en la app anterior (Enter)',
   'history.action.copy': 'Copiar',
@@ -407,6 +411,10 @@ export const es: Record<string, string> = {
   'sync.paired.label': 'Dispositivos emparejados',
   'sync.paired.hint': 'Solo estas máquinas pueden ver su historial. El emparejamiento es mutuo.',
   'sync.paired.none': 'Aún no hay dispositivos emparejados. Empareje uno abajo para sincronizar.',
+  'sync.now.button': 'Sincronizar',
+  'sync.now.working': 'Sincronizando',
+  'sync.now.none': 'Ningún dispositivo emparejado está accesible en este momento.',
+  'sync.now.ok': 'Intercambiando con tus otros dispositivos.',
   'sync.syncedAgo': 'Sincronizado {when}',
   'sync.visibleNotSynced': 'Visible en la red, pero todavía no se ha sincronizado nada',
   'sync.neverConnected': 'Nunca se ha conectado',
@@ -434,10 +442,16 @@ export const es: Record<string, string> = {
   'sync.peers.winBlocked':
     'Si todo eso es correcto, puede que el Firewall de Windows esté bloqueando Parle.',
   'sync.peers.openFirewall': 'Abrir la configuración del firewall',
+  'sync.peers.vpnHint':
+    'Una VPN es la otra causa habitual: muchas bloquean el tráfico de la red local aunque todo lo demás funcione. Desactívala o activa su opción de uso compartido de la red local.',
+  'sync.peers.isolatedHint':
+    'Las redes Wi-Fi de hoteles e invitados suelen impedir que los dispositivos de la misma red se vean entre sí. Compartir la conexión desde el móvil es una forma rápida de descartarlo.',
   'sync.peers.looking':
     'Buscando dispositivos en esta red… Abra Parle en la otra máquina y active también allí la sincronización.',
   'sync.pairing': 'Emparejando…',
   'sync.pair': 'Emparejar',
+  'sync.pair.needsDevice':
+    'Selecciona primero el dispositivo de arriba. No aparece nada hasta que ambas máquinas se vean en la red.',
   'sync.dictations.label': 'Sincronizar los dictados',
   'sync.dictations.hintPaired':
     'Todo lo que dicte aparece en el Historial de ambas máquinas. Al volver a activarlo, su historial se reenvía a los dispositivos emparejados, lo que puede tardar un momento.',

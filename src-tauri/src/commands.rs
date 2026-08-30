@@ -677,6 +677,19 @@ pub async fn sync_set_kinds(
     .map_err(err)
 }
 
+/// Exchange with every visible paired device now.
+///
+/// Returns how many exchanges actually started. Zero is a real answer, not a
+/// failure: it means no paired device is visible on the network right now, and
+/// the UI says so rather than showing a spinner that resolves into nothing.
+#[tauri::command]
+pub async fn sync_now(state: State<'_, Arc<AppState>>) -> Result<usize> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || st.sync.sync_now())
+        .await
+        .map_err(err)
+}
+
 #[derive(serde::Serialize)]
 pub struct StartPairing {
     pub code: String,

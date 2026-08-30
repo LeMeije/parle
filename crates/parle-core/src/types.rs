@@ -83,6 +83,14 @@ pub struct HistoryItem {
     /// schema v8 and was honoured by `items_from` and nowhere else, so it could
     /// not reach the IPC payload and the UI could not show it.
     pub local_only: bool,
+    /// The device that CREATED this row, as a sync device id.
+    ///
+    /// `None` means this machine: either the row predates this install having a
+    /// sync identity, or it was written before sync was ever switched on. The
+    /// column has been in the schema since v8 and drives the whole replication
+    /// authority model, but it could not reach the UI, so a list that mixes
+    /// three machines looked exactly like a list from one.
+    pub source_machine: Option<String>,
     /// JSON blob: trimmed spans, low-confidence spans, cleanup tier, etc.
     pub meta: Option<String>,
 }

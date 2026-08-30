@@ -68,6 +68,14 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
 /// Concurrent outbound dials. A flapping (or spoofed) mDNS record would
 /// otherwise spawn a thread per sighting, without bound.
 pub(crate) const MAX_DIALS: usize = 4;
+/// How often a paired, visible device is exchanged with when nothing else has
+/// prompted one.
+///
+/// This is the WORST case for a dictation reaching another machine, so it is
+/// chosen to be shorter than a person's patience rather than as long as the
+/// network can bear. An exchange with nothing to say is two small frames over a
+/// warm LAN connection.
+pub(crate) const SYNC_TICK: Duration = Duration::from_secs(20);
 /// How long before a peer we have already tried is dialled again.
 pub(crate) const DIAL_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// Distinct peers we will track. mDNS is unsigned, so anyone on the LAN can
@@ -175,6 +183,51 @@ pub(crate) fn decide_dial(i: &mut Inner, p: PeerInfo) -> Option<String> {
         return Some(id);
     }
     None
+}
+
+/// Which paired peers a USER-REQUESTED sync should dial right now.
+///
+/// A free function for the same reason `stop_claim` is one: a test can drive the
+/// real rule instead of a hand copy that goes on asserting a shape the code left
+/// behind.
+///
+/// This deliberately ignores `DIAL_RETRY_AFTER`, and only this does. That clock
+/// exists because mDNS is unsigned, so a sighting is an ATTACKER-CONTROLLED
+/// event and an ungated dial per sighting is a free thread, keychain read and
+/// 20 second connect for anyone on the LAN. A press of "Sync now" is not that
+/// event: it arrives from this machine's own UI and nobody on the network can
+/// forge it, so the budget it needs to respect is the local resource one, not
+/// the anti-abuse one.
+///
+/// The two limits that ARE the local resource budget are kept exactly as
+/// `decide_dial` keeps them: never exceed `MAX_DIALS`, and never dial a peer
+/// that already has a dial in flight. So holding the button down cannot spawn
+/// threads without bound, which is the property that actually matters here.
+///
+/// `last_dial` is still stamped, so a manual sync also postpones the next
+/// automatic one rather than doubling it.
+pub(crate) fn decide_manual_dials(i: &mut Inner) -> Vec<String> {
+    let paired: Vec<String> = i.paired.iter().map(|d| d.id.clone()).collect();
+    let mut out = Vec::new();
+    for id in paired {
+        // Only peers we can actually see. Dialling an address we have never
+        // been told about is a connect that can only time out, and it would
+        // hold a slot for the whole handshake timeout while it did.
+        if !i.peers.contains_key(&id) {
+            continue;
+        }
+        if i.dialing.len() >= MAX_DIALS {
+            break;
+        }
+        if i.dialing.contains(&id) {
+            continue;
+        }
+        if i.dialing.insert(id.clone()) {
+            i.last_dial.insert(id.clone(), Instant::now());
+            out.push(id);
+        }
+    }
+    out
 }
 
 /// Everything a `stop()` owns, taken in ONE critical section.
@@ -836,6 +889,57 @@ impl SyncManager {
 
         let gen_stop = Arc::new(AtomicBool::new(false));
         self.inner.lock().listen_stop = Some(gen_stop.clone());
+
+        // A clock, because mDNS is not one.
+        //
+        // Until this existed, an exchange happened ONLY when the discovery
+        // stream produced a `PeerFound`, so how quickly a dictation reached the
+        // other machine was decided by how often `mdns-sd` happened to
+        // re-announce a peer whose record had not changed. Nothing at all fires
+        // when a row is written. Measured on two real machines: a dictation took
+        // between five and seven minutes to appear on the other one, and the
+        // exchange itself is fast, so all of that was waiting.
+        //
+        // The tick is not a second dial path: it reuses `decide_manual_dials`,
+        // so it obeys the same two limits (`MAX_DIALS`, never twice into one
+        // peer) and there is one rule to keep correct rather than two. Like the
+        // manual press it is a LOCAL event, so it is not the thing
+        // `DIAL_RETRY_AFTER` defends against.
+        //
+        // It shares THIS generation's stop flag with the listener, so a stop()
+        // kills the ticker with everything else and a ticker from an earlier
+        // enable can never outlive its generation.
+        {
+            let tick_stop = gen_stop.clone();
+            let me = self.clone();
+            let ticker = std::thread::Builder::new()
+                .name("parle-sync-tick".into())
+                .spawn(move || {
+                    loop {
+                        // Slept in slices so a stop is acted on promptly rather
+                        // than up to a whole interval later: `stop()` waits for
+                        // its threads, and a coarse sleep would make disabling
+                        // sync feel like a hang.
+                        for _ in 0..(SYNC_TICK.as_millis() / 250) {
+                            if tick_stop.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(250));
+                        }
+                        if tick_stop.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        me.sync_now();
+                    }
+                });
+            if let Err(e) = ticker {
+                // Not fatal. Without the ticker sync still works, it just goes
+                // back to being as prompt as mDNS feels like being, so this
+                // degrades rather than fails.
+                tracing::warn!("sync: could not start the periodic sync thread: {e}");
+            }
+        }
+
         let me = self.clone();
         let spawned = std::thread::Builder::new()
             .name("parle-sync-listen".into())
@@ -1574,6 +1678,40 @@ impl SyncManager {
     /// cursor for one exchange. Re-applying is idempotent; without it every
     /// clipboard item captured while clipboard sync was off is unreachable
     /// forever.
+    /// Exchange with every visible paired device NOW, because the user asked.
+    ///
+    /// Returns how many dials were actually started, so the UI can tell "talking
+    /// to two machines" apart from "there is nobody here to talk to". Those look
+    /// identical otherwise, and the second one is the answer the user needs.
+    ///
+    /// An exchange is bidirectional: `replicate::exchange` serves our rows and
+    /// drains theirs in the same pass. So this is neither a fetch nor a push and
+    /// the UI must not name it as one; one press moves everything both ways.
+    pub fn sync_now(self: &Arc<Self>) -> usize {
+        // Decided under the lock, ACTED ON after it, exactly as the discovery
+        // path does. `DialGuard` locks `inner` on drop, and `parking_lot` is not
+        // reentrant, so a spawn that fails while we still held the lock would
+        // park this thread for ever holding it and freeze every window behind
+        // the next `sync_status`.
+        let to_dial = decide_manual_dials(&mut self.inner.lock());
+        let mut started = 0;
+        for id in to_dial {
+            let me = self.clone();
+            let guard = DialGuard::new(me.clone(), id.clone());
+            match std::thread::Builder::new()
+                .name("parle-sync-dial".into())
+                .spawn(move || {
+                    let _slot = guard;
+                    me.clone().dial(id.clone());
+                }) {
+                Ok(_) => started += 1,
+                Err(e) => tracing::warn!("sync: could not start a manual dial thread: {e}"),
+            }
+        }
+        tracing::info!("sync: manual sync started {started} exchange(s)");
+        started
+    }
+
     pub fn set_kinds(&self, dictations: bool, clipboard: bool) {
         let mut i = self.inner.lock();
         let widened = (dictations && !i.dictations) || (clipboard && !i.clipboard);
@@ -2449,6 +2587,138 @@ mod adversarial_round4 {
             }
         }
         assert_eq!(dials, 1, "{dials} dials started inside one retry window");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The rule behind "Sync now" and the periodic tick.
+//
+// Both call `decide_manual_dials`, so these pin the properties that make a
+// LOCAL trigger safe: it may ignore the anti-abuse backoff, because no remote
+// party can cause it, but it must still respect the local resource budget.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod manual_sync {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn dev(id: &str) -> UiPaired {
+        UiPaired { id: id.into(), name: id.into(), last_seen: None, online: false, last_sync_ok: None }
+    }
+
+    fn seen(id: &str, last: u8) -> PeerInfo {
+        PeerInfo {
+            id: parle_sync::DeviceId::parse(id).unwrap(),
+            name: "peer".into(),
+            addr: IpAddr::V4(Ipv4Addr::new(192, 168, 1, last)),
+            port: 51234,
+        }
+    }
+
+    fn id_n(n: u8) -> String {
+        format!("{n}{n}{n}{n}{n}{n}{n}{n}-{n}{n}{n}{n}-4{n}{n}{n}-8{n}{n}{n}-{n}{n}{n}{n}{n}{n}{n}{n}{n}{n}{n}{n}")
+    }
+
+    /// An `Inner` with sync running and nothing else going on.
+    ///
+    /// Built here rather than shared with the round-6 helper: that one is shaped
+    /// around the stop/start race it was written for, and a test that quietly
+    /// depends on another test's fixture breaks when that fixture moves.
+    fn blank_inner() -> Inner {
+        Inner {
+            enabled: true,
+            device_id: "33333333-3333-4333-8333-333333333333".into(),
+            device_name: "this machine".into(),
+            dictations: true,
+            clipboard: true,
+            peers: HashMap::new(),
+            paired: Vec::new(),
+            guard: PairingGuard::new(),
+            discovery: None,
+            port: 51234,
+            listen_stop: Some(Arc::new(AtomicBool::new(false))),
+            dialing: std::collections::HashSet::new(),
+            last_dial: std::collections::HashMap::new(),
+            last_move: std::collections::HashMap::new(),
+            resend_owed: std::collections::HashMap::new(),
+            resend_epoch: std::collections::HashMap::new(),
+            starting: false,
+            stop_epoch: 0,
+            user_enabled: true,
+            unpaired_mid_session: std::collections::HashSet::new(),
+            error: None,
+        }
+    }
+
+    fn inner_with(paired: Vec<String>, visible: Vec<String>) -> Inner {
+        let mut i = blank_inner();
+        i.paired = paired.iter().map(|s| dev(s)).collect();
+        for (n, v) in visible.iter().enumerate() {
+            i.peers.insert(v.clone(), seen(v, n as u8 + 2));
+        }
+        i
+    }
+
+    /// The whole point: a user-triggered sync does NOT wait out the backoff a
+    /// sighting has to wait out. Pressing the button one second after an
+    /// automatic exchange must still exchange.
+    #[test]
+    fn a_local_trigger_ignores_the_sighting_backoff() {
+        let id = id_n(1);
+        let mut i = inner_with(vec![id.clone()], vec![id.clone()]);
+        // An automatic dial just happened.
+        i.last_dial.insert(id.clone(), Instant::now());
+        i.dialing.clear();
+
+        let out = decide_manual_dials(&mut i);
+        assert_eq!(out, vec![id], "a local trigger must not be gated by DIAL_RETRY_AFTER");
+    }
+
+    /// The limit that DOES still apply. Holding the button, or a tick landing on
+    /// a busy machine, must not spawn threads without bound.
+    #[test]
+    fn it_never_exceeds_the_outbound_dial_budget() {
+        let ids: Vec<String> = (1..=6).map(id_n).collect();
+        let mut i = inner_with(ids.clone(), ids.clone());
+        let out = decide_manual_dials(&mut i);
+        assert!(
+            out.len() <= MAX_DIALS,
+            "{} dials started against a budget of {MAX_DIALS}",
+            out.len()
+        );
+        assert_eq!(i.dialing.len(), out.len(), "every started dial must claim its slot");
+    }
+
+    /// Pressing twice while the first exchange is still running must not open a
+    /// second connection to the same device.
+    #[test]
+    fn a_peer_already_being_dialled_is_not_dialled_again() {
+        let id = id_n(1);
+        let mut i = inner_with(vec![id.clone()], vec![id.clone()]);
+        let first = decide_manual_dials(&mut i);
+        assert_eq!(first.len(), 1);
+        let second = decide_manual_dials(&mut i);
+        assert!(second.is_empty(), "the same peer was dialled twice concurrently");
+    }
+
+    /// A paired device that is not on the network is not dialled. Connecting to
+    /// an address we were never given can only time out, and it would hold one
+    /// of the four slots for the whole handshake timeout while it did.
+    #[test]
+    fn an_invisible_paired_device_is_not_dialled() {
+        let there = id_n(1);
+        let away = id_n(2);
+        let mut i = inner_with(vec![there.clone(), away], vec![there.clone()]);
+        assert_eq!(decide_manual_dials(&mut i), vec![there]);
+    }
+
+    /// Nobody paired, nothing to do, and specifically no panic and no slot left
+    /// claimed: this is the state every new install is in.
+    #[test]
+    fn an_unpaired_machine_starts_nothing() {
+        let mut i = inner_with(vec![], vec![]);
+        assert!(decide_manual_dials(&mut i).is_empty());
+        assert!(i.dialing.is_empty());
     }
 }
 

@@ -1,6 +1,7 @@
 // Full settings surface. Every control writes through to Rust immediately.
 
 import { useEffect, useState } from 'react';
+import { RefreshCw } from 'lucide-react';
 import { enable as enableAutostart, disable as disableAutostart } from '@tauri-apps/plugin-autostart';
 import { api, onSyncStatus } from '../api';
 import type { Settings, SyncStatus } from '../types';
@@ -643,7 +644,6 @@ export default function SettingsView({
         </Field>
       </Section>
 
-      <SyncSection sync={s.sync} />
 
       <Section title={t('settings.section.audio')}>
         <Field label={t('settings.microphone.label')}>
@@ -778,7 +778,7 @@ function NumberInput({
 // reject (a wrong pairing code is the *expected* failure, and the Rust side may
 // still be landing), so failures surface inline instead of blanking the panel.
 
-function SyncSection({ sync }: { sync: Settings['sync'] }) {
+export function SyncSection({ sync }: { sync: Settings['sync'] }) {
   const t = useT();
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -801,6 +801,11 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
   const [code, setCode] = useState('');
   const [pairError, setPairError] = useState<string | null>(null);
   const [pairBusy, setPairBusy] = useState(false);
+  // "Sync now". Its own busy flag, not `busy`: that one disables the enable
+  // toggle and the kind switches, and a manual exchange has no business
+  // freezing the settings around it.
+  const [nowBusy, setNowBusy] = useState(false);
+  const [nowMsg, setNowMsg] = useState<string | null>(null);
   // One in-flight flag for the actions that had none. Without it the enable
   // toggle, Show a code, Cancel, Unpair and the kind switches could each be
   // fired repeatedly while their command was still running. The backend is
@@ -945,6 +950,24 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
     }
   }
 
+  async function syncNow() {
+    if (nowBusy) return;
+    setNowBusy(true);
+    setNowMsg(null);
+    try {
+      const started = await api.syncNow();
+      // Zero is a real answer and the one worth saying out loud: it means no
+      // paired device is on the network, which is a different problem from a
+      // sync that ran and moved nothing.
+      setNowMsg(started > 0 ? t('sync.now.ok') : t('sync.now.none'));
+    } catch (e) {
+      setNowMsg(errText(e));
+    } finally {
+      setNowBusy(false);
+      window.setTimeout(() => setNowMsg(null), 6000);
+    }
+  }
+
   async function unpair(id: string) {
     if (busy) return;
     setBusy(true);
@@ -1053,10 +1076,29 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
           </Field>
 
           <div className="sync-block">
-            <div className="field-label">
-              <span>{t('sync.paired.label')}</span>
-              <small>{t('sync.paired.hint')}</small>
+            <div className="sync-paired-head">
+              <div className="field-label">
+                <span>{t('sync.paired.label')}</span>
+                <small>{t('sync.paired.hint')}</small>
+              </div>
+              {/* Only with something to sync WITH. An exchange button on a
+                  machine that has never been paired can do nothing, and a
+                  control that cannot act is worse than an absent one.
+
+                  `.btn`, not `.cta`: `.cta` is only ever styled as
+                  `.row-actions button.cta`, so outside a history row it renders
+                  as an unstyled browser button among properly drawn ones. Plain
+                  `.btn` rather than `.btn primary`, because the primary action
+                  on this screen is pairing and two competing primaries teach
+                  the eye nothing. */}
+              {status.paired.length > 0 && (
+                <button className="btn" onClick={syncNow} disabled={nowBusy}>
+                  <RefreshCw size={14} className={nowBusy ? 'spin' : undefined} />{' '}
+                  {nowBusy ? t('sync.now.working') : t('sync.now.button')}
+                </button>
+              )}
             </div>
+            {nowMsg && <div className="sync-now-msg">{nowMsg}</div>}
             {status.paired.length === 0 ? (
               <span className="sync-empty">{t('sync.paired.none')}</span>
             ) : (
@@ -1188,6 +1230,17 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
                             </button>
                           </>
                         )}
+                        {/* The two causes that are INVISIBLE from inside the app.
+                            Both were hit on the first real two-machine test, at
+                            the same time, and neither shows up as an error: the
+                            permission is granted, the firewall rule is there, the
+                            listener is bound, and the peer list is simply empty
+                            for ever. Named here rather than in a help page
+                            because this empty list is where someone is actually
+                            standing when it happens to them. */}
+                        <span className="sync-hint-extra">
+                          {t('sync.peers.vpnHint')} {t('sync.peers.isolatedHint')}
+                        </span>
                       </>
                     ) : (
                       t('sync.peers.looking')
@@ -1241,6 +1294,17 @@ function SyncSection({ sync }: { sync: Settings['sync'] }) {
                     {pairBusy ? t('sync.pairing') : t('sync.pair')}
                   </button>
                 </div>
+                {/* Why the button is dead, said out loud.
+                    Reported from the first real pairing attempt: with no device
+                    discovered there is nothing to select, so Pair stays greyed
+                    however correct the six digits are, and the user reads it as
+                    the button being broken. A disabled control that gives no
+                    reason is the failure being described. Only shown once the
+                    code is complete, so it appears exactly when the user is
+                    waiting for something to happen and nothing does. */}
+                {!selected && code.length === 6 && (
+                  <div className="sync-now-msg">{t('sync.pair.needsDevice')}</div>
+                )}
                 {pairError && <div className="callout error">{pairError}</div>}
               </>
             )}

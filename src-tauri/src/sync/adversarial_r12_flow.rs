@@ -1238,39 +1238,37 @@ fn r12_flow_deleting_one_row_is_unguarded_while_clearing_all_is_not() {
     );
 }
 
-/// A synced row gives the user no way to know it is synced.
+/// CLOSED, and now guarded: a synced row says which machine wrote it.
 ///
-/// `HistoryItem` carries no source device, so the list cannot mark a row as
-/// "from your PC". `Store::source_machine_of` exists and is never exposed
-/// through a command. The delete confirmation could not name the other machine
-/// even if someone wrote one.
+/// This was a finding demonstration. `HistoryItem` carried no source device, so
+/// the list could not mark a row as "from your PC" even though the store had
+/// known the answer since schema v8: `source_machine` drove the whole
+/// replication authority model and simply could not reach the UI.
+///
+/// Turned into a regression test rather than deleted. The column is load-bearing
+/// for replication, so a future change could plausibly stop PROPAGATING it to
+/// the payload without breaking a single sync test, and the symptom would be a
+/// three-machine history that silently looks like a one-machine history again.
 #[test]
-fn r12_flow_the_history_row_cannot_say_which_machine_it_came_from() {
-    // Runtime: the store knows.
+fn r12_flow_the_history_row_says_which_machine_it_came_from() {
     let mut s = Store::open_in_memory().unwrap();
     s.set_device_id(A);
     let mine = s.insert_clipboard("mine", None, None).unwrap();
     let src = s.source_machine_of(mine).unwrap();
     assert_eq!(src.as_deref(), Some(A), "the store no longer records a source; premise gone");
 
-    // And the payload does not carry it.
+    // The IPC payload carries it, which is the half that was missing.
     let rows = s.search("", None, 10).unwrap();
     let j = serde_json::to_value(&rows[0]).unwrap();
     let j = j.as_object().unwrap();
-    assert!(j.len() >= 10, "HistoryItem shrank to {} fields; re-check", j.len());
-    for k in ["source_machine", "source", "device", "origin_id"] {
-        assert!(!j.contains_key(k), "FINDING closed? HistoryItem now carries {k}");
-    }
-
-    // And no command exposes it.
-    let cmds = code_of("src-tauri/src/commands.rs");
     assert!(
-        cmds.contains("fn search_history") || cmds.contains("search_history"),
-        "anchor lost: the history search command is gone"
+        j.contains_key("source_machine"),
+        "HistoryItem stopped carrying source_machine; the history UI cannot tell          one machine from another without it"
     );
-    assert!(
-        !cmds.contains("source_machine_of"),
-        "FINDING closed? a command now exposes the source machine"
+    assert_eq!(
+        j["source_machine"].as_str(),
+        Some(A),
+        "the payload names the wrong machine, which is worse than naming none"
     );
 }
 

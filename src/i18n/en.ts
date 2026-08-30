@@ -23,6 +23,7 @@ export const en: Record<string, string> = {
   'app.nav.history': 'History',
   'app.nav.dictionary': 'Dictionary',
   'app.nav.models': 'Models',
+  'app.nav.sync': 'Sync',
   'app.nav.settings': 'Settings',
   'app.record.start': 'Start dictation',
   'app.record.stop': 'Stop dictation',
@@ -45,6 +46,8 @@ export const en: Record<string, string> = {
   'history.filter.all': 'All',
   'history.filter.dictations': 'Dictations',
   'history.filter.clipboard': 'Clipboard',
+  'history.filter.allDevices': 'All devices',
+  'history.filter.thisDevice': '{name} (this device)',
   'history.gone': 'That item is no longer here. It was deleted on another device, so the list has been refreshed.',
   'history.empty.noMatches': 'No matches.',
   'history.empty.nothingYet': 'Nothing here yet. Hold your hotkey and speak.',
@@ -54,6 +57,7 @@ export const en: Record<string, string> = {
   'history.localOnly.badge': 'this device only',
   'history.localOnly.title':
     'Parle could not rule out that this was a password field, so it is kept on this device and never sent to your other devices',
+  'history.fromDevice.title': 'Written on another one of your devices and synced here',
   'history.action.paste': 'Paste',
   'history.action.pasteTitle': 'Paste into the previous app (Enter)',
   'history.action.copy': 'Copy',
@@ -391,6 +395,10 @@ export const en: Record<string, string> = {
   'sync.paired.label': 'Paired devices',
   'sync.paired.hint': 'Only these machines can see your history. Pairing is mutual.',
   'sync.paired.none': 'No devices paired yet. Pair one below to start syncing.',
+  'sync.now.button': 'Sync now',
+  'sync.now.working': 'Syncing',
+  'sync.now.none': 'No paired device is reachable right now.',
+  'sync.now.ok': 'Exchanging with your other devices.',
   'sync.syncedAgo': 'Synced {when}',
   'sync.visibleNotSynced': 'Visible on the network, but nothing has synced yet',
   'sync.neverConnected': 'Never connected',
@@ -416,10 +424,16 @@ export const en: Record<string, string> = {
   'sync.peers.openLocalNetwork': 'Open Local Network settings',
   'sync.peers.winBlocked': 'If that all looks right, Windows Firewall may be blocking Parle.',
   'sync.peers.openFirewall': 'Open firewall settings',
+  'sync.peers.vpnHint':
+    'A VPN is the other common cause: many block local network traffic even while everything else works. Turn it off, or switch on its local network sharing setting.',
+  'sync.peers.isolatedHint':
+    'Guest and hotel Wi-Fi often stop devices on the same network from seeing each other at all. A phone hotspot is a quick way to rule that out.',
   'sync.peers.looking':
     'Looking for devices on this network… Open Parle on the other machine and turn Sync on there too.',
   'sync.pairing': 'Pairing…',
   'sync.pair': 'Pair',
+  'sync.pair.needsDevice':
+    'Select the device above first. Nothing is listed until both machines can see each other on the network.',
   'sync.dictations.label': 'Sync dictations',
   'sync.dictations.hintPaired':
     'Everything you dictate shows up in History on both machines. Turning this back on re-sends your history to your paired devices, which can take a moment.',
