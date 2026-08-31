@@ -56,11 +56,13 @@ cargo test --workspace     # 74 tests incl. behavioural contract vectors
 Dev note: sign dev builds with one stable certificate or macOS TCC forgets the
 Accessibility grant on every rebuild: see HUMAN_TASKS.md §2.
 
-The project was called EchoKey before it was called Parle. Nothing internal
-carries the old name any more: crates, modules, the mDNS service and the bundle
-identifier were all renamed on 28/08/2026. The single deliberate exception is
-`data_dir()` in `parle-core`, which still knows the old folder name because that
-is the directory it migrates users FROM.
+The project shipped under a different name before it was called Parle. Nothing
+internal carries the old name any more: crates, modules, the mDNS service and
+the bundle identifier were all renamed on 28/08/2026. The single deliberate
+exception is the `OLD_DATA_DIR` constant in `parle-core`, which still holds the
+old folder name because that is the directory it migrates users FROM. See
+docs/RENAME_AUDIT.md for the full account, including the leftovers that live
+outside the repo.
 
 ## Build (Windows)
 

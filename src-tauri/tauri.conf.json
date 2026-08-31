@@ -41,7 +41,8 @@
     ],
     "macOS": {
       "minimumSystemVersion": "12.0",
-      "entitlements": "entitlements.plist"
+      "entitlements": "entitlements.plist",
+      "signingIdentity": "Parle Dev"
     },
     "windows": {
       "nsis": {

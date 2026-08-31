@@ -15,13 +15,50 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager};
 
+/// Make the OS agree with the `launch_at_login` setting, at every startup.
+///
+/// The setting used to be written ONLY by the toggle in Settings, which assumes
+/// the two can never drift. They can, and they did: renaming the app orphaned
+/// the LaunchAgent (it still pointed at the old bundle, which no longer
+/// existed), so the agent failed at every login with EX_CONFIG while Settings
+/// went on showing "launch at login" as ON. A setting that reports a state the
+/// system is not in is worse than one that is simply off, because nothing about
+/// the UI invites you to go and look.
+///
+/// Reconciling here makes the stored value the source of truth and the OS a
+/// cache of it, so a drift of this kind repairs itself on the next launch
+/// instead of persisting silently until someone happens to check.
+fn reconcile_autostart(app: &tauri::AppHandle, state: &Arc<AppState>) {
+    use tauri_plugin_autostart::ManagerExt;
+
+    let want = state.settings.lock().launch_at_login;
+    let mgr = app.autolaunch();
+    // Sample the OS state once and carry it: asking twice invites the two
+    // reads to disagree with each other.
+    let have = match mgr.is_enabled() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("could not read the autostart state ({e}); leaving it alone");
+            return;
+        }
+    };
+    if want == have {
+        return;
+    }
+    let r = if want { mgr.enable() } else { mgr.disable() };
+    match r {
+        Ok(()) => tracing::info!("autostart reconciled to the saved setting (launch_at_login = {want})"),
+        Err(e) => tracing::warn!("could not reconcile autostart to {want} ({e})"),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Where the app writes its log. Same directory as settings/history.
 fn log_path() -> Option<std::path::PathBuf> {
     // `data_dir()`, NOT a second hand-rolled copy of the same path.
     //
     // This used to build the path itself and `create_dir_all` it, and it runs
-    // FIRST at startup. That defeated the EchoKey-to-Parle migration outright:
+    // FIRST at startup. That defeated the data-directory migration outright:
     // by the time `data_dir()` looked, the new directory already existed, so it
     // skipped the rename and the app started on an empty history beside two
     // gigabytes of models it could no longer see. Observed on the first launch
@@ -192,6 +229,7 @@ pub fn run() {
             spawn_platform(&handle, state.clone(), platform_tx, platform_rx);
             state.set_app_handle(handle.clone());
             register_chord_shortcuts(&handle, &state);
+            reconcile_autostart(&handle, &state);
 
             // Pre-warm the model so the first dictation is instant.
             if state.settings.lock().onboarding_complete {
@@ -579,5 +617,58 @@ pub(crate) fn register_chord_shortcuts(app: &AppHandle, state: &Arc<AppState>) {
             tracing::warn!("failed to register shortcut '{}': {e}", binding.key);
             let _ = app.emit("shortcut-error", format!("{}: {e}", binding.key));
         }
+    }
+}
+
+#[cfg(test)]
+mod shortcut_defaults_tests {
+    //! The guard that was missing.
+    //!
+    //! `parle-core` cannot check its own shortcut defaults, because the thing
+    //! that decides whether a chord is real is the global-shortcut plugin's
+    //! parser, which only this crate depends on. So the default was free to be
+    //! a string nobody could register, and it was: `Fn+Shift+V` logged
+    //! "unparseable shortcut" at every launch for as long as it was set, while
+    //! Settings displayed it as though it worked.
+
+    use tauri_plugin_global_shortcut::Shortcut;
+
+    /// Every shortcut default must survive the parser that actually registers it.
+    #[test]
+    fn every_default_chord_parses_with_the_real_parser() {
+        let s = parle_core::settings::Settings::default();
+        for (what, binding) in [
+            ("history_palette", &s.hotkeys.history_palette),
+            ("dictation", &s.hotkeys.dictation),
+            ("dictation_alt", &s.hotkeys.dictation_alt),
+            ("cancel", &s.hotkeys.cancel),
+        ] {
+            if binding.key.is_empty() {
+                continue;
+            }
+            // Keys owned by the native listener never reach this parser, and
+            // `Fn` deliberately cannot parse here. Skip exactly those, the way
+            // `register_chord_shortcuts` does.
+            if crate::platform::NativeKey::parse(&binding.key).is_some() {
+                continue;
+            }
+            assert!(
+                binding.key.parse::<Shortcut>().is_ok(),
+                "the default for {what} is '{}', which the global-shortcut parser rejects, \
+                 so it would silently never fire",
+                binding.key
+            );
+        }
+    }
+
+    /// The specific string this test was written for.
+    #[test]
+    fn an_fn_chord_really_is_rejected_by_the_parser() {
+        // Proves the assertion above can fail, rather than passing because
+        // everything parses. Without this, the test is theatre.
+        assert!(
+            "Fn+Shift+V".parse::<Shortcut>().is_err(),
+            "if Fn chords ever start parsing, the migration in parle-core can be removed"
+        );
     }
 }

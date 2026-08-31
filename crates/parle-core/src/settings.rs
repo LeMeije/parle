@@ -326,11 +326,32 @@ fn default_dictation_key() -> &'static str {
     { "RightCtrl" }
 }
 
+/// The history-palette chord.
+///
+/// NOT `Cmd+Shift+V` on macOS: that is paste-and-match-style almost everywhere,
+/// so taking it globally breaks a keystroke people use constantly in every
+/// other app. `Ctrl+Cmd+V` keeps the V mnemonic and is not bound by macOS to
+/// anything (unlike `Cmd+Opt+V`, which is Finder's "Move Item Here").
+///
+/// Never `Fn+<anything>`: `Fn` is not a modifier the global-shortcut API can
+/// register, so such a binding parses as nothing and silently never fires. See
+/// `migrate` for the rewrite of installs that already stored one.
 fn default_palette_key() -> &'static str {
     #[cfg(target_os = "macos")]
-    { "Cmd+Shift+V" }
+    { "Ctrl+Cmd+V" }
     #[cfg(not(target_os = "macos"))]
     { "Ctrl+Shift+V" }
+}
+
+/// Can this chord ever be registered as a global shortcut?
+///
+/// `Fn` is a hardware-level modifier the OS does not deliver as part of a
+/// chord, so any binding using it as one is dead on arrival. `Fn` ALONE is
+/// fine and is the dictation default: that goes to the native listener, not
+/// to the global-shortcut API. Only the combining form is broken.
+pub fn is_unregisterable_chord(key: &str) -> bool {
+    let k = key.trim();
+    k.contains('+') && k.split('+').any(|part| part.trim().eq_ignore_ascii_case("fn"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -572,13 +593,25 @@ pub enum SettingsError {
 
 impl Settings {
     pub fn load(path: &Path) -> Result<Self, SettingsError> {
+        Self::load_migrated(path).map(|(s, _)| s)
+    }
+
+    /// Load, and report whether migrating changed anything.
+    ///
+    /// A migration that only ever runs in memory is not a migration: it repeats
+    /// its work and its log line at every launch, and the file on disk stays
+    /// wrong for anything that reads it directly. Until now the only startup
+    /// write was gated on `ensure_device_identity`, which fires once in an
+    /// install's life, so every later migration relied on the user happening to
+    /// change a setting afterwards.
+    pub fn load_migrated(path: &Path) -> Result<(Self, bool), SettingsError> {
         match std::fs::read_to_string(path) {
             Ok(s) => {
                 let mut loaded: Self = serde_json::from_str(&s)?;
-                loaded.migrate();
-                Ok(loaded)
+                let changed = loaded.migrate();
+                Ok((loaded, changed))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((Self::default(), false)),
             Err(e) => Err(e.into()),
         }
     }
@@ -601,7 +634,31 @@ impl Settings {
     /// gets it back once, which is the lesser wrong: the alternative is
     /// silently leaving a password manager unprotected because of a decision
     /// they may not remember making.
-    fn migrate(&mut self) {
+    fn migrate(&mut self) -> bool {
+        let mut changed = false;
+        // A chord using `Fn` can never register, so it is not a preference to
+        // be respected: it is a shortcut the user believes they have and does
+        // not. Settings displayed `Fn+Shift+V` while the app logged
+        // "unparseable shortcut" at every single launch and the palette had no
+        // binding at all.
+        //
+        // Rewritten rather than merely disabled, because disabling it would
+        // leave the user with no palette shortcut and no indication why. This
+        // is not gated on having been offered once, the way the excluded-apps
+        // union is: that guards a real choice, and there is no choice to guard
+        // in a value that cannot work.
+        for b in [&mut self.hotkeys.history_palette, &mut self.hotkeys.dictation_alt] {
+            if is_unregisterable_chord(&b.key) {
+                changed = true;
+                let was = std::mem::replace(&mut b.key, default_palette_key().into());
+                tracing::warn!(
+                    "'{was}' cannot be registered as a global shortcut (Fn is not a chord \
+                     modifier); reset to '{}'",
+                    b.key
+                );
+            }
+        }
+
         // NO VERSION GATE. What gates the union is whether this install has been
         // OFFERED that particular entry before.
         //
@@ -642,8 +699,12 @@ impl Settings {
                     !have.contains(&k) && (first_run_of_this_scheme || !seen.contains(&k))
                 })
                 .collect();
+            if self.excluded_defaults_seen != defaults {
+                changed = true;
+            }
             self.excluded_defaults_seen = defaults;
             if !added.is_empty() {
+                changed = true;
                 tracing::info!(
                     "settings: adding {} password managers to the exclusion list that shipped \
                      after this install was created: {:?}",
@@ -653,7 +714,11 @@ impl Settings {
                 self.history.excluded_apps.extend(added);
             }
         }
+        if self.version != SETTINGS_VERSION {
+            changed = true;
+        }
         self.version = SETTINGS_VERSION;
+        changed
     }
 
     /// Atomic write: temp file + rename, so a crash never corrupts settings.
@@ -668,14 +733,25 @@ impl Settings {
     }
 }
 
+/// The pre-rename data folder name.
+///
+/// This is the ONLY place the old product name survives, and it must stay. It
+/// is the folder `data_dir` migrates FROM: a sweep that renames it to the new
+/// name turns the migration into a no-op that silently loses the user's history
+/// and every downloaded model. (That is exactly what the first pass of the
+/// rename did.) It is a constant rather than a literal so that a future sweep
+/// has one clearly-labelled thing to skip instead of a bare string in a
+/// function body.
+const OLD_DATA_DIR: &str = "EchoKey";
+
 /// Application data directory (settings, history DB, models).
 ///
 /// `%LOCALAPPDATA%\Parle` on Windows (models must NOT live in Program Files),
 /// `~/Library/Application Support/Parle` on macOS.
 ///
-/// The folder was called `EchoKey` before the rename, and it holds the user's
-/// entire history plus every model they have downloaded, which runs to
-/// gigabytes. So an install that still has the old folder is MIGRATED by
+/// The folder had a different name before the rename (see `OLD_DATA_DIR`), and
+/// it holds the user's entire history plus every model they have downloaded,
+/// which runs to gigabytes. So an install that still has the old folder is MIGRATED by
 /// renaming it, which is instant and atomic on the same volume rather than a
 /// multi-gigabyte copy, and the old name is never read again afterwards.
 ///
@@ -683,11 +759,69 @@ impl Settings {
 /// the worst case is the previous behaviour rather than an app that has
 /// silently lost its history.
 pub fn data_dir() -> PathBuf {
+    let (dir, outcome) = resolve_data_dir(&os_data_base());
+    outcome.log();
+    dir
+}
+
+/// The OS directory the data folder lives inside.
+fn os_data_base() -> PathBuf {
     #[cfg(target_os = "windows")]
     let base = dirs::data_local_dir();
     #[cfg(not(target_os = "windows"))]
     let base = dirs::data_dir();
-    let base = base.unwrap_or_else(|| PathBuf::from("."));
+    base.unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// What `resolve_data_dir` found, so the caller can report it and a retirement
+/// check can ask without guessing. See `LegacyOutcome::still_needed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyOutcome {
+    /// No legacy folder anywhere. On this machine the migration is finished.
+    NoLegacy,
+    /// The legacy folder was renamed wholesale onto the new name.
+    Migrated,
+    /// An empty new folder already existed, so entries were moved across.
+    Merged,
+    /// The move failed. The legacy folder is STILL the live data directory.
+    LegacyKept,
+}
+
+impl LegacyOutcome {
+    /// Does `OLD_DATA_DIR` still have work to do on this machine?
+    ///
+    /// `NoLegacy` is the only answer that means "nothing here needs it any
+    /// more". `Migrated` and `Merged` mean it did its job THIS run, which is
+    /// the opposite of safe to remove.
+    pub fn still_needed(self) -> bool {
+        self != LegacyOutcome::NoLegacy
+    }
+
+    fn log(self) {
+        match self {
+            LegacyOutcome::NoLegacy => {}
+            LegacyOutcome::Migrated => {
+                tracing::info!("migrated the data directory from its old location to Parle")
+            }
+            LegacyOutcome::Merged => {
+                tracing::info!("merged the old data directory into Parle")
+            }
+            LegacyOutcome::LegacyKept => tracing::warn!(
+                "could not rename the old data directory to Parle; \
+                 continuing to use the old one so nothing is lost"
+            ),
+        }
+    }
+}
+
+/// Resolve the data directory under `base`, migrating the legacy folder if one
+/// is there.
+///
+/// Split out from `data_dir` so it can be tested against a temp directory. The
+/// untested version of this is what silently destroyed a user's history the
+/// first time the rename was attempted, and "it reads the real OS directory so
+/// it cannot be tested" is exactly what let that through.
+pub fn resolve_data_dir(base: &Path) -> (PathBuf, LegacyOutcome) {
     let new = base.join("Parle");
     // "Has real data", not "exists".
     //
@@ -699,14 +833,9 @@ pub fn data_dir() -> PathBuf {
         d.join("history.db").exists() || d.join("settings.json").exists() || d.join("models").is_dir()
     };
     if occupied(&new) {
-        return new;
+        return (new, LegacyOutcome::NoLegacy);
     }
-    // The literal pre-rename name. This one string must NOT be renamed with
-    // the rest: it is the folder we are migrating FROM, and a sweep that
-    // renames it turns this whole function into a no-op that silently loses
-    // the user's history and every downloaded model. (That is exactly what the
-    // first pass of the rename did.)
-    let old = base.join("EchoKey");
+    let old = base.join(OLD_DATA_DIR);
     if occupied(&old) {
         // If an empty `new` is already there, the rename would fail on most
         // platforms, so its contents are moved across entry by entry instead.
@@ -722,28 +851,25 @@ pub fn data_dir() -> PathBuf {
                     }
                 }
             }
-            tracing::info!("merged the EchoKey data directory into Parle");
-            return new;
+            return (new, LegacyOutcome::Merged);
         }
-        match std::fs::rename(&old, &new) {
-            Ok(()) => {
-                tracing::info!(
-                    "migrated the data directory from EchoKey to Parle ({} -> {})",
-                    old.display(),
-                    new.display()
-                );
-                return new;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "could not rename the data directory from EchoKey to Parle ({e}); \
-                     continuing to use the old one so nothing is lost"
-                );
-                return old;
-            }
-        }
+        return match std::fs::rename(&old, &new) {
+            Ok(()) => (new, LegacyOutcome::Migrated),
+            Err(_) => (old, LegacyOutcome::LegacyKept),
+        };
     }
-    new
+    (new, LegacyOutcome::NoLegacy)
+}
+
+/// Is a legacy data folder still sitting beside the current one?
+///
+/// The retirement check for `OLD_DATA_DIR`: when this is false on every machine
+/// you care about, the constant and its migration branch can be deleted. It
+/// reads the disk and does not move anything.
+pub fn legacy_data_dir_present() -> bool {
+    let base = os_data_base();
+    let old = base.join(OLD_DATA_DIR);
+    old.join("history.db").exists() || old.join("settings.json").exists() || old.join("models").is_dir()
 }
 
 pub fn settings_path() -> PathBuf {
@@ -761,6 +887,209 @@ pub fn history_db_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- the history-palette chord ----
+
+    #[test]
+    fn the_palette_default_is_registerable_and_not_paste_and_match_style() {
+        let k = default_palette_key();
+        assert!(!is_unregisterable_chord(k), "the default must be a chord the OS can deliver");
+        // Cmd+Shift+V is paste-and-match-style nearly everywhere. Taking it
+        // globally breaks a keystroke people use constantly in other apps.
+        assert_ne!(k, "Cmd+Shift+V");
+    }
+
+    #[test]
+    fn an_fn_chord_is_recognised_as_unregisterable_but_fn_alone_is_not() {
+        assert!(is_unregisterable_chord("Fn+Shift+V"));
+        assert!(is_unregisterable_chord("Shift+fn+V"), "case and position must not matter");
+        // Fn alone is the dictation default and is handled by the native
+        // listener, not the global-shortcut API. Flagging it would break the
+        // app's primary hotkey.
+        assert!(!is_unregisterable_chord("Fn"));
+        assert!(!is_unregisterable_chord("Ctrl+Cmd+V"));
+        assert!(!is_unregisterable_chord(""));
+    }
+
+    #[test]
+    fn migrate_repairs_a_stored_fn_chord_and_leaves_a_working_one_alone() {
+        let mut s = Settings::default();
+        s.hotkeys.history_palette.key = "Fn+Shift+V".into();
+        s.migrate();
+        assert_eq!(s.hotkeys.history_palette.key, default_palette_key());
+        // Still enabled: the user wanted a palette shortcut, and the point is
+        // to give them a working one rather than to take it away.
+        assert!(s.hotkeys.history_palette.enabled);
+
+        let mut chosen = Settings::default();
+        chosen.hotkeys.history_palette.key = "Ctrl+Alt+P".into();
+        chosen.migrate();
+        assert_eq!(chosen.hotkeys.history_palette.key, "Ctrl+Alt+P", "a deliberate working chord must survive");
+    }
+
+    #[test]
+    fn migrate_never_touches_the_dictation_key() {
+        let mut s = Settings::default();
+        s.hotkeys.dictation.key = "Fn".into();
+        s.migrate();
+        assert_eq!(s.hotkeys.dictation.key, "Fn", "Fn alone is the whole point of the product");
+    }
+
+    #[test]
+    fn a_migration_that_changes_something_reports_it_so_startup_can_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+
+        let mut s = Settings::default();
+        s.hotkeys.history_palette.key = "Fn+Shift+V".into();
+        s.save(&p).unwrap();
+
+        let (loaded, changed) = Settings::load_migrated(&p).unwrap();
+        assert!(changed, "a rewritten shortcut must be reported, or it is never written to disk");
+        assert_eq!(loaded.hotkeys.history_palette.key, default_palette_key());
+
+        // Persist it the way startup does, then confirm the second load is quiet.
+        loaded.save(&p).unwrap();
+        let (_, changed_again) = Settings::load_migrated(&p).unwrap();
+        assert!(!changed_again, "a settled file must not re-migrate on every launch");
+    }
+
+    // ---- the legacy data-directory migration ----
+    //
+    // This is the code that silently destroyed a user's history the first time
+    // the rename was attempted, and it had no test at all until 30/08/2026.
+    // Every case below asserts on the RETURNED PATH and on the files actually
+    // present afterwards, never merely that the call returned.
+
+    /// A data directory that looks real to `occupied`.
+    fn seed(dir: &Path, marker: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("history.db"), marker).unwrap();
+    }
+
+    #[test]
+    fn a_fresh_install_uses_the_new_name_and_reports_no_legacy() {
+        let t = tempfile::tempdir().unwrap();
+        let (dir, outcome) = resolve_data_dir(t.path());
+        assert_eq!(dir, t.path().join("Parle"));
+        assert_eq!(outcome, LegacyOutcome::NoLegacy);
+        assert!(!outcome.still_needed());
+    }
+
+    #[test]
+    fn a_legacy_folder_alone_is_renamed_and_its_contents_survive() {
+        let t = tempfile::tempdir().unwrap();
+        seed(&t.path().join(OLD_DATA_DIR), "the user's history");
+
+        let (dir, outcome) = resolve_data_dir(t.path());
+
+        assert_eq!(outcome, LegacyOutcome::Migrated);
+        assert_eq!(dir, t.path().join("Parle"));
+        // The bytes moved, not just the directory entry.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("history.db")).unwrap(),
+            "the user's history"
+        );
+        assert!(!t.path().join(OLD_DATA_DIR).exists(), "the legacy folder should be gone");
+    }
+
+    #[test]
+    fn an_empty_new_folder_does_not_strand_the_legacy_one() {
+        // The case that makes a bare rename fail: something created `Parle`
+        // first (an installer, a log file, the user), so the migration has to
+        // move entries across instead.
+        let t = tempfile::tempdir().unwrap();
+        seed(&t.path().join(OLD_DATA_DIR), "still the user's history");
+        std::fs::create_dir_all(t.path().join("Parle")).unwrap();
+
+        let (dir, outcome) = resolve_data_dir(t.path());
+
+        assert_eq!(outcome, LegacyOutcome::Merged);
+        assert_eq!(dir, t.path().join("Parle"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("history.db")).unwrap(),
+            "still the user's history"
+        );
+    }
+
+    #[test]
+    fn a_merge_never_overwrites_a_file_already_in_the_new_folder() {
+        let t = tempfile::tempdir().unwrap();
+        seed(&t.path().join(OLD_DATA_DIR), "old");
+        std::fs::create_dir_all(t.path().join("Parle")).unwrap();
+        std::fs::write(t.path().join("Parle").join("history.db"), "new").unwrap();
+
+        let (dir, _) = resolve_data_dir(t.path());
+
+        // The live file wins; the legacy one is left behind rather than
+        // destroyed. Losing a file here would be the worst possible outcome.
+        assert_eq!(std::fs::read_to_string(dir.join("history.db")).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_to_string(t.path().join(OLD_DATA_DIR).join("history.db")).unwrap(),
+            "old"
+        );
+    }
+
+    #[test]
+    fn an_occupied_new_folder_wins_and_the_legacy_one_is_never_touched() {
+        let t = tempfile::tempdir().unwrap();
+        seed(&t.path().join(OLD_DATA_DIR), "old");
+        seed(&t.path().join("Parle"), "current");
+
+        let (dir, outcome) = resolve_data_dir(t.path());
+
+        assert_eq!(dir, t.path().join("Parle"));
+        assert_eq!(outcome, LegacyOutcome::NoLegacy, "an already-migrated install is finished");
+        assert_eq!(std::fs::read_to_string(dir.join("history.db")).unwrap(), "current");
+        // Untouched, so a user who wants the old copy back still has it.
+        assert_eq!(
+            std::fs::read_to_string(t.path().join(OLD_DATA_DIR).join("history.db")).unwrap(),
+            "old"
+        );
+    }
+
+    #[test]
+    fn an_empty_legacy_folder_is_not_treated_as_data() {
+        // A bare directory with nothing in it is not a data folder, and
+        // migrating it would be a no-op that reports success.
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join(OLD_DATA_DIR)).unwrap();
+
+        let (dir, outcome) = resolve_data_dir(t.path());
+
+        assert_eq!(dir, t.path().join("Parle"));
+        assert_eq!(outcome, LegacyOutcome::NoLegacy);
+    }
+
+    /// The guard on the guard.
+    ///
+    /// The tests above would all still pass if `OLD_DATA_DIR` were changed to
+    /// the CURRENT name, because they only ever refer to it through the
+    /// constant: the seed and the assertion would move together and agree with
+    /// each other while the real migration did nothing. This test writes the
+    /// pre-rename name as a LITERAL, so a sweep that rewrites the constant
+    /// makes it fail instead of passing quietly.
+    ///
+    /// If you are deliberately retiring `OLD_DATA_DIR`, this is the test that
+    /// is supposed to stop you, and `docs/RENAME_AUDIT.md` has the checklist.
+    #[test]
+    fn the_legacy_folder_name_is_still_the_pre_rename_one() {
+        assert_eq!(
+            OLD_DATA_DIR, "EchoKey",
+            "OLD_DATA_DIR is the folder we migrate FROM. Renaming it makes the \
+             migration a no-op that silently loses the user's history and every \
+             downloaded model. See docs/RENAME_AUDIT.md before changing this."
+        );
+
+        let t = tempfile::tempdir().unwrap();
+        seed(&t.path().join("EchoKey"), "history written before the rename");
+        let (dir, outcome) = resolve_data_dir(t.path());
+        assert_eq!(outcome, LegacyOutcome::Migrated);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("history.db")).unwrap(),
+            "history written before the rename"
+        );
+    }
 
     #[test]
     fn roundtrip_and_defaults() {

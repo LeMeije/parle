@@ -11,6 +11,12 @@
   --shadow-2: 0 4px 12px rgba(15, 20, 40, 0.12), 0 12px 40px rgba(15, 20, 40, 0.1);
   --ease-spring: cubic-bezier(0.34, 1.3, 0.5, 1);
   --accent: #2b5cff;
+
+  /* Native controls (number steppers, scrollbars, select popups) are painted by
+     the engine, not by our tokens. Without this they stay in light dress on a
+     dark palette, which is how the latch-window stepper came out black on
+     black. Declared here and flipped in the dark block below. */
+  color-scheme: light;
 }
 
 /* ---------- Paper (default light) ---------- */
@@ -35,6 +41,7 @@
 
 /* ---------- Midnight (dark) ---------- */
 [data-mode='dark'] {
+  color-scheme: dark;
   --bg: #14151c;
   --bg-raised: #1d1f29;
   --bg-sunken: #0e0f14;

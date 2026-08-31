@@ -54,15 +54,31 @@ enum Work {
 
 impl AppState {
     pub fn new(app: &AppHandle) -> Arc<Self> {
-        let mut loaded = Settings::load(&parle_core::settings::settings_path()).unwrap_or_default();
+        let (mut loaded, migrated) = Settings::load_migrated(&parle_core::settings::settings_path())
+            .unwrap_or_else(|_| (Settings::default(), false));
         // Assign this install's identity on first run and persist it straight
         // away: a device id that changed between launches would orphan every
         // row already stamped with the old one.
-        if loaded.ensure_device_identity() {
+        //
+        // `migrated` joins it because the two share the only write that happens
+        // at startup. Without that, a migration ran in memory and was thrown
+        // away at exit, so it repeated its work and its log line at every
+        // launch and the file on disk never caught up.
+        let assigned_identity = loaded.ensure_device_identity();
+        if assigned_identity || migrated {
             let path = parle_core::settings::settings_path();
+            // Say which of the two caused the write. One log line covering both
+            // would report a device identity being assigned on every launch
+            // that merely migrated something, which is exactly the kind of
+            // false record that sends you looking in the wrong place later.
+            let why = match (assigned_identity, migrated) {
+                (true, true) => "assigned a device identity and migrated settings",
+                (true, false) => "assigned a device identity",
+                _ => "migrated settings",
+            };
             match loaded.save(&path) {
-                Ok(()) => tracing::info!("assigned device identity {}", loaded.sync.device_id),
-                Err(e) => tracing::warn!("could not persist device identity: {e}"),
+                Ok(()) => tracing::info!("{why}; saved (device {})", loaded.sync.device_id),
+                Err(e) => tracing::warn!("{why} but could not save settings: {e}"),
             }
         }
         let device_id = loaded.sync.device_id.clone();
