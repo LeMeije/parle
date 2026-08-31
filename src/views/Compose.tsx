@@ -1,31 +1,33 @@
-// Compose: dictate in the app with a live waveform, and paste/type content
-// mid-recording. Each insert is pinned to the audio timestamp and spliced
-// verbatim into the final text exactly where you were speaking.
+// Compose: dictate in the app with a live waveform, and watch what you have
+// pinned into the recording build up. Each insert is tied to the audio
+// timestamp and spliced verbatim into the final text exactly where you were
+// speaking.
+//
+// The insert box itself is NOT here any more: it lives in the dictation bar
+// (src/DictationBar.tsx), which floats over every tab so a paste never costs a
+// trip back to this screen. This view is the detailed record of what that box
+// has done, plus the transcript when it lands.
 
 import { useEffect, useRef, useState } from 'react';
-import { Link2, Mic, Square } from 'lucide-react';
+import { Mic, Square } from 'lucide-react';
 import { api, onLevel, onPartial, onPipelineEvent } from '../api';
+import { fmtTime } from '../format';
 import { useT } from '../i18n/useT';
+import type { Mark } from '../types';
 
 const BAR_COUNT = 48;
 
-interface Mark {
-  at_ms: number;
-  text: string;
-}
-
-export default function ComposeView() {
+/// `marks` is owned by App: it has to outlive this view being unmounted every
+/// time you look at another tab.
+export default function ComposeView({ marks }: { marks: Mark[] }) {
   const t = useT();
   const [state, setState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
   const [elapsed, setElapsed] = useState(0);
   const [partial, setPartial] = useState('');
-  const [marks, setMarks] = useState<Mark[]>([]);
   const [result, setResult] = useState<string | null>(null);
-  const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
   const barsRef = useRef<number[]>(new Array(BAR_COUNT).fill(0.04));
   const [, force] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     // A hotkey may have started recording before this view mounted.
@@ -36,16 +38,13 @@ export default function ComposeView() {
       if (e.kind === 'state_changed') {
         setState(e.state);
         if (e.state === 'recording') {
-          setMarks([]);
           setResult(null);
           setPartial('');
           setError(null);
           setElapsed(0);
           barsRef.current = new Array(BAR_COUNT).fill(0.04);
-          inputRef.current?.focus();
         }
       }
-      if (e.kind === 'mark_added') setMarks((m) => [...m, { at_ms: e.at_ms, text: e.text }]);
       // `withheld` first: the event is broadcast to EVERY window, so a
       // password-field dictation aimed at a browser lands here too, and this
       // view paints the result in full and offers a Copy button for it.
@@ -73,17 +72,6 @@ export default function ComposeView() {
       un3.then((f) => f());
     };
   }, []);
-
-  async function insert(text: string) {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    try {
-      await api.insertMark(trimmed);
-      setDraft('');
-    } catch (e) {
-      setError(String(e));
-    }
-  }
 
   const time = fmtTime(elapsed);
   const recording = state === 'recording';
@@ -122,26 +110,9 @@ export default function ComposeView() {
 
         {recording && partial && <div className="compose-partial">{partial}</div>}
 
-        <div className="mark-input">
-          <input
-            ref={inputRef}
-            placeholder={recording ? t('compose.markPlaceholder.recording') : t('compose.markPlaceholder.idle')}
-            value={draft}
-            disabled={!recording}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && insert(draft)}
-            onPaste={(e) => {
-              const text = e.clipboardData.getData('text');
-              if (text.trim()) {
-                e.preventDefault();
-                insert(text);
-              }
-            }}
-          />
-          <button className="btn" disabled={!recording || !draft.trim()} onClick={() => insert(draft)}>
-            <Link2 size={14} /> {t('compose.insert')}
-          </button>
-        </div>
+        <p className="mark-note faint">
+          {recording ? t('compose.barActive') : t('compose.markPlaceholder.idle')}
+        </p>
 
         {marks.length > 0 && (
           <div className="mark-chips">
@@ -173,10 +144,4 @@ export default function ComposeView() {
       </div>
     </div>
   );
-}
-
-function fmtTime(ms: number): string {
-  const mm = Math.floor(ms / 60000);
-  const ss = Math.floor((ms % 60000) / 1000);
-  return `${mm}:${ss.toString().padStart(2, '0')}`;
 }

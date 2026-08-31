@@ -8,17 +8,25 @@
   display: flex;
   height: 100vh;
   background: var(--bg);
+  /* The dictation bar is positioned against this, and grows out of the record
+     button's own box: one set of numbers drives the sidebar's padding and the
+     bar's insets so the two edges line up exactly and the morph never shifts
+     sideways, it only expands. */
+  position: relative;
+  --sidebar-w: 208px;
+  --sidebar-pad-x: 10px;
+  --sidebar-pad-y: 14px;
 }
 
 /* ---------- Sidebar ---------- */
 
 .sidebar {
-  width: 208px;
+  width: var(--sidebar-w);
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 14px 10px;
+  padding: var(--sidebar-pad-y) var(--sidebar-pad-x);
   background: var(--bg-sunken);
   border-right: 1px solid var(--border);
 }
@@ -90,15 +98,22 @@
   cursor: pointer;
   font-family: var(--font-ui);
   box-shadow: var(--shadow-1);
-  transition: transform 140ms var(--ease-spring), background 140ms ease;
+  transition: transform 140ms var(--ease-spring), background 140ms ease, opacity 120ms ease 210ms;
 }
 
 .record-btn:hover {
   transform: translateY(-1px);
 }
 
-.record-btn.recording {
-  background: var(--danger);
+/* While a recording runs this button has become the dictation bar, which
+   carries stop. It keeps its place in the layout so the sidebar does not
+   jump, and drifts down as the bar rises. */
+.record-btn.stowed {
+  opacity: 0;
+  pointer-events: none;
+  /* Out fast (the bar has taken its shape over) and back in late, once the
+     bar has finished collapsing onto it. */
+  transition: opacity 70ms ease;
 }
 
 .record-dot {
@@ -108,10 +123,6 @@
   background: currentColor;
 }
 
-.record-btn.recording .record-dot {
-  animation: pulse 1.4s ease-in-out infinite;
-}
-
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
@@ -119,11 +130,25 @@
 
 /* ---------- Content ---------- */
 
+/* The scrolling column. The dictation bar is NOT in here: it spans the whole
+   window and half its morph happens over the sidebar. */
+.stage {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .content {
   flex: 1;
   min-width: 0;
   overflow-y: auto;
   padding: 26px 30px 40px;
+}
+
+/* Enough room to scroll the last row clear of the bar. */
+.content.with-bar {
+  padding-bottom: 124px;
 }
 
 .view-head h1 {
@@ -345,6 +370,9 @@ textarea:focus {
   z-index: 50;
 }
 .toast-error { color: var(--danger); }
+
+/* The bar owns the bottom of the window while it is up. */
+.app.has-bar .toast { bottom: 106px; }
 
 @keyframes toast-in {
   from { opacity: 0; transform: translateX(-50%) translateY(10px); }
@@ -1036,13 +1064,12 @@ textarea:focus {
   user-select: text;
 }
 
-.mark-input { display: flex; gap: 8px; }
-.mark-input input { flex: 1; }
+.mark-note { margin: 0; font-size: 12.5px; line-height: 1.5; }
 
 .mark-chips { display: flex; flex-direction: column; gap: 6px; }
 .mark-chip {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   padding: 7px 12px;
   border-radius: var(--radius-s);
@@ -1051,8 +1078,17 @@ textarea:focus {
   font-size: 12.5px;
   animation: ob-in 200ms var(--ease-spring);
 }
-.mark-chip .mark-time { font-family: var(--font-mono); font-size: 11px; color: var(--accent); flex: 0 0 auto; }
-.mark-chip .mark-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; }
+.mark-chip .mark-time { font-family: var(--font-mono); font-size: 11px; color: var(--accent); flex: 0 0 auto; padding-top: 2px; }
+/* A pasted mark can be several lines: show the first three rather than one
+   ellipsised line, and keep the line breaks the transcript will keep. */
+.mark-chip .mark-text {
+  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  user-select: text;
+}
 
 .compose-result {
   border: 1px solid var(--border);
@@ -1234,4 +1270,147 @@ button.linkish {
   margin-top: 8px;
   color: var(--text-dim);
   opacity: 0.85;
+}
+
+/* ---------- Dictation bar ---------- */
+
+/* Always mounted, parked below the fold when idle. Mounted rather than
+   conditionally rendered so an unsent draft survives the recording that ends
+   before you press Enter. */
+.dictation-bar {
+  position: absolute;
+  /* Flush with the record button's own edges: same left inset, same bottom
+     inset, full window width. */
+  left: var(--sidebar-pad-x);
+  right: var(--sidebar-pad-x);
+  bottom: var(--sidebar-pad-y);
+  z-index: 40;
+  padding: 10px;
+  border-radius: var(--radius-l);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-2);
+  /* Top left, because the morph maps this box onto the button's box with one
+     translate plus scale and that maths assumes this origin. */
+  transform-origin: 0 0;
+  transform: translateY(calc(100% + 24px));
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 280ms var(--ease-spring), opacity 160ms ease;
+}
+
+.dictation-bar[data-open='true'] {
+  transform: none;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* While the morph is running it owns transform and radius outright: the
+   transition above would otherwise fight the animation for them. */
+.dictation-bar[data-morph='true'] {
+  transition: none;
+  opacity: 1;
+}
+
+/* Centred, so the stop and insert buttons stay level with the middle of the
+   box as it grows to two or three lines instead of hanging off its bottom. */
+.bar-inner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bar-left {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bar-meter {
+  flex: 0 0 auto;
+  width: 62px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.bar-meter .wave-bar {
+  flex: 1;
+  min-height: 8%;
+  border-radius: 2px;
+  background: var(--wave, var(--accent));
+  opacity: 0.85;
+  transition: height 60ms linear;
+}
+
+.bar-time {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The count of what you have pinned, and the way through to the detail. The
+   bar deliberately does not list the marks: Compose does that properly. */
+.bar-marks {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.bar-marks:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+
+.bar-box {
+  flex: 1;
+  min-width: 90px;
+  position: relative;
+  display: flex;
+}
+.bar-box textarea {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  /* The ceiling for a huge paste. Proportional to the window so a short one
+     never has the box growing over the sidebar's nav, capped so a tall one
+     does not hand you a wall of text either. Read back by the auto-grow. */
+  max-height: min(38vh, 240px);
+  overflow-y: auto;
+  line-height: 1.45;
+  background: var(--bg-sunken);
+}
+
+.bar-error {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  padding: 7px 10px;
+  border-radius: var(--radius-s);
+  background: color-mix(in srgb, var(--danger) 14%, var(--bg-raised));
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.bar-stop, .bar-insert { flex: 0 0 auto; }
+
+/* A 720px window (the minimum) leaves about 470px here, so the decoration
+   goes first and the labels second. The icons keep their tooltips. */
+@media (max-width: 940px) {
+  .bar-meter { display: none; }
+}
+@media (max-width: 860px) {
+  .bar-time { display: none; }
+  .bar-stop-label,
+  .bar-insert-label { display: none; }
 }

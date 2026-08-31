@@ -85,6 +85,14 @@ export const de: Record<string, string> = {
   'compose.noSpeech': 'Keine Sprache erkannt.',
   'compose.copyResult': 'Ergebnis kopieren',
   'compose.alsoInserted': 'Außerdem an der Einfügemarke eingefügt und im Verlauf gespeichert.',
+  'compose.barActive':
+    'Fügen Sie Text in der Diktierleiste am unteren Fensterrand ein oder tippen Sie dort, aus jedem Tab. Enter heftet ihn hier an.',
+
+  // ---------- Diktierleiste ----------
+  'bar.pinnedCount': 'Einfügungen: {n}',
+  'bar.pinnedAt': 'Eingefügt bei {time}',
+  'bar.openCompose': 'Verfassen öffnen, um Ihre Einfügungen zu sehen',
+  'bar.insertHint': 'Enter fügt ein. Shift + Enter macht eine neue Zeile.',
 
   // ---------- Models ----------
   'models.title': 'Modelle',

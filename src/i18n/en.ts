@@ -85,6 +85,14 @@ export const en: Record<string, string> = {
   'compose.noSpeech': 'No speech detected.',
   'compose.copyResult': 'Copy result',
   'compose.alsoInserted': 'Also inserted at your cursor and saved to History.',
+  'compose.barActive':
+    'Paste or type into the dictation bar at the bottom of the window, from any tab. Enter pins it here.',
+
+  // ---------- Dictation bar ----------
+  'bar.pinnedCount': '{n} inserted',
+  'bar.pinnedAt': 'Inserted at {time}',
+  'bar.openCompose': 'Open Compose to see what you have inserted',
+  'bar.insertHint': 'Enter inserts. Shift + Enter adds a line.',
 
   // ---------- Models ----------
   'models.title': 'Models',

@@ -89,6 +89,10 @@ Target latencies (measured, not aspirational: benchmarks in `bench/`):
 - HUD: non-activating overlay, waveform, streaming text, click stop/cancel, configurable position/style.
 - Themes: system light/dark + manual; accent colours; pastel + bold palettes; Retro 80s/90s theme
   (cassette reels spin while recording, VU meter) as a first-class option; selectable app icons.
+- Dictation bar: while recording, the sidebar record button stows and a floating bar rises at the
+  bottom of the main window (stop, clock, level, insert box) so pasted or typed content can be
+  pinned into the recording from any tab. Paste fills the box, Enter (or Insert) commits it, which
+  leaves room to edit clipboard text before it is spliced in verbatim. Compose lists the inserts.
 - 60 fps micro-interactions (motion library), Lucide icons.
 - Onboarding: polished first-run flow: mic permission, accessibility permission (mac), model
   download with auto-recommendation, hotkey choice, test dictation playground.

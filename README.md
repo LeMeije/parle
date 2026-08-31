@@ -20,6 +20,13 @@ behind a fallback ladder that never loses a recording.
   (AX insertion fast path on macOS, clipboard+paste fallback with your previous
   clipboard restored), copied, and saved to history. Nothing is ever lost:
   even a total engine failure saves the audio as a recoverable WAV.
+- **Dictation bar, on every tab**: the moment a recording starts, the sidebar's
+  record button becomes a floating bar at the bottom of the window: stop,
+  elapsed time, level, and a box for pasting or typing content straight into
+  the recording, wherever you are in the app. A paste FILLS the box and waits
+  for Enter, so you can strip the quote marks or the tracking suffix before it
+  is spliced into the transcript verbatim. Compose keeps the detail: every
+  insert with the audio timestamp it was pinned to.
 - **Smart cleanup (deterministic, per-rule toggles)**: fillers, stutters,
   self-corrections ("Thursday no actually Wednesday" -> "Wednesday") with
   trimmed spans reviewable and restorable in History, dictated punctuation

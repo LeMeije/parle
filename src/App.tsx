@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AudioLines, BookA, Cpu, History as HistoryIcon, MonitorSmartphone, Settings as SettingsIcon } from 'lucide-react';
 import appIcon from './assets/icon.png';
 import { api, onPipelineEvent } from './api';
 import { PASTE_KEYS } from './types';
 import { applyLang } from './i18n/apply';
-import type { PipelineEvent, Settings } from './types';
+import DictationBar from './DictationBar';
+import type { Mark, PipelineEvent, Settings } from './types';
 import { onFocusPalette } from './api';
 import { useT } from './i18n/useT';
 import HistoryView from './views/History';
@@ -24,6 +25,13 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('compose');
   const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'error' } | null>(null);
   const [recording, setRecording] = useState(false);
+  // Held here, not in Compose. Marks arrive whenever the dictation bar sends
+  // one, and Compose is unmounted whenever you are on another tab: keeping the
+  // list in the view meant switching to Compose to check what you had pinned
+  // showed an empty list, which is exactly the trip the bar exists to save.
+  const [marks, setMarks] = useState<Mark[]>([]);
+  // The shape the dictation bar grows out of and collapses back into.
+  const recordBtnRef = useRef<HTMLButtonElement>(null);
 
   const reload = useCallback(() => {
     api.getSettings().then((s) => {
@@ -37,7 +45,11 @@ export default function App() {
     reload();
     api.pipelineState().then((st) => setRecording(st === 'recording'));
     const un = onPipelineEvent((e: PipelineEvent) => {
-      if (e.kind === 'state_changed') setRecording(e.state === 'recording');
+      if (e.kind === 'state_changed') {
+        setRecording(e.state === 'recording');
+        if (e.state === 'recording') setMarks([]);
+      }
+      if (e.kind === 'mark_added') setMarks((m) => [...m, { at_ms: e.at_ms, text: e.text }]);
       if (e.kind === 'completed') {
         // A withheld dictation has already had its own toast from the `empty`
         // event, and `e.text` is the thing we withheld. Rendering a preview of
@@ -100,7 +112,7 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app ${recording ? 'has-bar' : ''}`}>
       <aside className="sidebar">
         <div className="brand">
           <img className="brand-mark-img" src={appIcon} alt="" draggable={false} />
@@ -116,22 +128,35 @@ export default function App() {
           <NavItem icon={<MonitorSmartphone size={17} />} label={t('app.nav.sync')} active={tab === 'sync'} onClick={() => setTab('sync')} />
           <NavItem icon={<SettingsIcon size={17} />} label={t('app.nav.settings')} active={tab === 'settings'} onClick={() => setTab('settings')} />
         </nav>
+        {/* Stowed, not hidden: while a recording runs this button has become
+            the dictation bar at the bottom of the window, which carries stop.
+            Leaving it in the layout keeps the sidebar from jumping. */}
         <button
-          className={`record-btn ${recording ? 'recording' : ''}`}
-          onClick={() => (recording ? api.stopRecording() : api.startRecording())}
+          ref={recordBtnRef}
+          className={`record-btn ${recording ? 'stowed' : ''}`}
+          onClick={() => api.startRecording()}
+          inert={recording}
         >
           <span className="record-dot" />
-          {recording ? t('app.record.stop') : t('app.record.start')}
+          {t('app.record.start')}
         </button>
       </aside>
-      <main className="content">
-        {tab === 'history' && <HistoryView />}
-        {tab === 'compose' && <ComposeView />}
-        {tab === 'dictionary' && <DictionaryView />}
-        {tab === 'models' && <ModelsView />}
-        {tab === 'sync' && <SyncView settings={settings} />}
-        {tab === 'settings' && <SettingsView settings={settings} onSave={save} />}
-      </main>
+      <div className="stage">
+        <main className={`content ${recording ? 'with-bar' : ''}`}>
+          {tab === 'history' && <HistoryView />}
+          {tab === 'compose' && <ComposeView marks={marks} />}
+          {tab === 'dictionary' && <DictionaryView />}
+          {tab === 'models' && <ModelsView />}
+          {tab === 'sync' && <SyncView settings={settings} />}
+          {tab === 'settings' && <SettingsView settings={settings} onSave={save} />}
+        </main>
+      </div>
+      <DictationBar
+        recording={recording}
+        marks={marks}
+        originRef={recordBtnRef}
+        onOpenCompose={() => setTab('compose')}
+      />
       {toast && <div className={`toast toast-${toast.kind}`}>{toast.text}</div>}
     </div>
   );

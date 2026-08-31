@@ -146,6 +146,13 @@ export interface DictEntry {
   enabled: boolean;
 }
 
+/// Content pasted or typed into a recording, pinned to the audio timestamp it
+/// was added at and spliced verbatim into the transcript at that point.
+export interface Mark {
+  at_ms: number;
+  text: string;
+}
+
 export interface LevelUpdate {
   rms: number;
   peak: number;

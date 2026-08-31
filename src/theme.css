@@ -149,6 +149,10 @@ body {
 
 body[data-window='main'] {
   background: var(--bg);
+  /* The shell itself never scrolls (`.content` does). Stated, because the
+     dictation bar parks below the fold when idle and would otherwise put a
+     scrollbar on the window. */
+  overflow: hidden;
 }
 
 [data-reduce-motion='true'] * {
