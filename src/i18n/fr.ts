@@ -346,6 +346,8 @@ export const fr: Record<string, string> = {
     'Augmentez-la si les barres bougent à peine quand vous parlez, baissez-la si elles restent en haut. Elle change ce qu’affiche l’indicateur, jamais ce qui est enregistré ni transcrit.',
   'settings.showPartial.label': 'Transcription en direct dans l’incrustation',
   'settings.reduceMotion.label': 'Réduire les animations',
+  'settings.reduceMotion.hint':
+    'Plus rien ne s’animera sans nécessité. La barre de dictée apparaît en bas de la fenêtre au lieu de se déployer depuis le bouton d’enregistrement, et les bobines de cassette cessent de tourner. Utile si les animations vous gênent, ou sur une machine plus ancienne.',
 
   // ---------- Settings: history & privacy ----------
   'settings.clipboardCapture.label': 'Capturer le presse-papiers',

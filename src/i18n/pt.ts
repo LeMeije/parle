@@ -351,6 +351,8 @@ export const pt: Record<string, string> = {
     'Aumente se as barras mal se mexem quando você fala, diminua se elas ficam no topo. Isso muda o que o medidor mostra, nunca o que é gravado ou transcrito.',
   'settings.showPartial.label': 'Mostrar transcrição ao vivo na sobreposição',
   'settings.reduceMotion.label': 'Reduzir movimento',
+  'settings.reduceMotion.hint':
+    'Nada é animado sem necessidade. A barra de ditado aparece na parte inferior da janela em vez de crescer a partir do botão de gravação, e os rolos da cassete param de girar. Útil se as animações incomodam, ou em uma máquina mais antiga.',
 
   // ---------- Settings: history & privacy ----------
   'settings.clipboardCapture.label': 'Capturar a área de transferência',

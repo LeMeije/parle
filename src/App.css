@@ -1305,11 +1305,30 @@ button.linkish {
   pointer-events: auto;
 }
 
-/* While the morph is running it owns transform and radius outright: the
-   transition above would otherwise fight the animation for them. */
+/* While the morph is running it owns transform outright: the transition above
+   would otherwise fight the animation for it. `will-change` asks for the layer
+   up front, so the first frame is not the one that pays for promotion. */
 .dictation-bar[data-morph='true'] {
   transition: none;
   opacity: 1;
+  will-change: transform;
+}
+
+/* The record button's fill, laid over the bar's own surface and faded out as
+   the shape opens. This is here rather than a background-color animation
+   because opacity is composited and background-color is a repaint. */
+.bar-tint {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Above the tint. */
+.bar-inner {
+  position: relative;
 }
 
 /* Centred, so the stop and insert buttons stay level with the middle of the

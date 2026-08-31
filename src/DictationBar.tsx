@@ -54,6 +54,12 @@ export default function DictationBar({
   const innerRef = useRef<HTMLDivElement>(null);
   const firstRender = useRef(true);
   const morphRef = useRef<Animation | null>(null);
+  const tintRef = useRef<HTMLDivElement>(null);
+  // True for the length of a morph. The level meter stops asking React to
+  // re-render while it is set: those renders land in the middle of the
+  // animation, and the meter is faded out for all of it anyway.
+  const morphing = useRef(false);
+  const lastElapsed = useRef(0);
   const barsRef = useRef<number[]>(new Array(BAR_COUNT).fill(0.04));
   const [, force] = useState(0);
 
@@ -62,12 +68,16 @@ export default function DictationBar({
   // only arrive while a recording exists anyway.
   useEffect(() => {
     const un = onLevel((u) => {
-      setElapsed(u.elapsed_ms);
       const db = 20 * Math.log10(Math.max(u.rms, 1e-6));
       const v = Math.pow(Math.max(0, Math.min(1, (db + 44) / 32)), 1.7);
       const bars = barsRef.current;
       bars.push(v);
       if (bars.length > BAR_COUNT) bars.shift();
+      lastElapsed.current = u.elapsed_ms;
+      // The samples are still collected mid-morph, only the paint is deferred,
+      // so the meter is correct and current the moment it becomes visible.
+      if (morphing.current) return;
+      setElapsed(u.elapsed_ms);
       force((n) => n + 1);
     });
     return () => {
@@ -132,22 +142,16 @@ export default function DictationBar({
     const dy = origin.offsetTop - bar.offsetTop;
     const sx = Math.max(origin.offsetWidth / bar.offsetWidth, 0.05);
     const sy = Math.max(origin.offsetHeight / bar.offsetHeight, 0.05);
-    // Corners are scaled along with the box, so the radius is divided back out
-    // to land on the button's real 12px rather than a squashed 3px.
-    const shut = {
-      transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`,
-      borderRadius: `${Math.round(12 / sy)}px / ${Math.round(12 / sx)}px`,
-      // The surface cross-fades from the button's accent fill to the bar's, so
-      // the blue pill becomes the bar rather than being replaced by it.
-      backgroundColor: getComputedStyle(origin).backgroundColor,
-      opacity: '1',
-    };
-    const open = {
-      transform: 'none',
-      borderRadius: '18px',
-      backgroundColor: getComputedStyle(bar).backgroundColor,
-      opacity: '1',
-    };
+
+    // TRANSFORM AND OPACITY ONLY, deliberately. The first version of this
+    // animated `border-radius` and `background-color` as well, which are not
+    // compositable: every frame repainted a full-width element that carries a
+    // large soft shadow, the frames could not be delivered, and a 320ms
+    // expansion arrived in three visible jumps. The accent fill now lives on
+    // its own overlay (`.bar-tint`) that fades out instead, which is the same
+    // effect on the compositor's terms.
+    const shut = { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, opacity: '1' };
+    const open = { transform: 'none', opacity: '1' };
 
     // The contents cross-fade instead of stretching with the box: a bar scaled
     // to a fifth of its width has visibly squashed text in it otherwise.
@@ -160,15 +164,25 @@ export default function DictationBar({
       // frame instead, so the collapse IS the whole animation.
       : [open, { ...shut, offset: 0.82 }, { ...shut, opacity: '0' }];
     const fadeFrames = recording
-      ? [{ opacity: '0', offset: 0 }, { opacity: '0', offset: 0.45 }, { opacity: '1', offset: 1 }]
-      : [{ opacity: '1', offset: 0 }, { opacity: '0', offset: 0.35 }, { opacity: '0', offset: 1 }];
+      ? [{ opacity: '0', offset: 0 }, { opacity: '0', offset: 0.5 }, { opacity: '1', offset: 1 }]
+      : [{ opacity: '1', offset: 0 }, { opacity: '0', offset: 0.4 }, { opacity: '0', offset: 1 }];
+    // The button's blue, on top, clearing as the shape opens out.
+    const tintFrames = recording
+      ? [{ opacity: '1', offset: 0 }, { opacity: '0', offset: 0.65 }, { opacity: '0', offset: 1 }]
+      : [{ opacity: '0', offset: 0 }, { opacity: '1', offset: 0.7 }, { opacity: '1', offset: 1 }];
 
-    // Deliberately quick. This is a control changing shape, not a scene
-    // transition: anything longer than this reads as the app being slow, and
-    // the way out (stop) has to feel more immediate than the way in.
-    const duration = recording ? 320 : 200;
-    const easing = recording ? 'cubic-bezier(0.32, 1.18, 0.5, 1)' : 'cubic-bezier(0.35, 0, 0.6, 0.2)';
+    // Long enough to read as one continuous expansion. Under about half a
+    // second the eye samples a fast, wide movement as a few discrete positions
+    // rather than a movement, however many frames actually land.
+    const duration = recording ? 520 : 360;
+    // Plain ease-out both ways. The spring that was here overshot the final
+    // width and then settled back, which added its own second beat to
+    // something already being read as steppy.
+    const easing = recording
+      ? 'cubic-bezier(0.16, 0.68, 0.18, 1)'
+      : 'cubic-bezier(0.45, 0.05, 0.4, 1)';
 
+    morphing.current = true;
     const shape = bar.animate(shapeFrames, {
       duration,
       easing,
@@ -176,13 +190,20 @@ export default function DictationBar({
     });
     morphRef.current = shape;
     inner.animate(fadeFrames, { duration, easing: 'linear' });
+    tintRef.current?.animate(tintFrames, { duration, easing: 'linear' });
     shape.finished
       .catch(() => {})
       .finally(() => {
         delete bar.dataset.morph;
+        morphing.current = false;
+        // Catch the meter and the clock up on whatever arrived while they were
+        // holding still.
+        setElapsed(lastElapsed.current);
+        force((n) => n + 1);
       });
     return () => {
       delete bar.dataset.morph;
+      morphing.current = false;
     };
   }, [recording, originRef]);
 
@@ -254,6 +275,7 @@ export default function DictationBar({
 
   return (
     <div className="dictation-bar" ref={barRef} data-open={recording} inert={!recording}>
+      <div className="bar-tint" ref={tintRef} aria-hidden="true" />
       <div className="bar-inner" ref={innerRef}>
         <div className="bar-left">
           <button className="btn danger bar-stop" onClick={() => api.stopRecording()} title={t('app.record.stop')}>

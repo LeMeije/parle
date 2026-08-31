@@ -364,6 +364,8 @@ export const es: Record<string, string> = {
     'Súbala si las barras apenas se mueven al hablar, bájela si se quedan arriba del todo. Cambia lo que muestra el medidor, nunca lo que se graba ni lo que se transcribe.',
   'settings.showPartial.label': 'Mostrar transcripción en directo en la superposición',
   'settings.reduceMotion.label': 'Reducir movimiento',
+  'settings.reduceMotion.hint':
+    'No se anima nada que no lo necesite. La barra de dictado aparece en la parte inferior de la ventana en vez de desplegarse desde el botón de grabación, y las bobinas de casete dejan de girar. Útil si las animaciones le molestan, o en un equipo más antiguo.',
 
   // ---------- Settings: history & privacy ----------
   'settings.clipboardCapture.label': 'Capturar el portapapeles',

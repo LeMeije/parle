@@ -573,7 +573,7 @@ export default function SettingsView({
           </div>
         </Field>
         <Toggle label={t('settings.showPartial.label')} value={s.overlay.show_partial_text} onChange={(v) => set((d) => (d.overlay.show_partial_text = v))} />
-        <Toggle label={t('settings.reduceMotion.label')} value={s.appearance.reduce_motion} onChange={(v) => set((d) => (d.appearance.reduce_motion = v))} />
+        <Toggle label={t('settings.reduceMotion.label')} hint={t('settings.reduceMotion.hint')} value={s.appearance.reduce_motion} onChange={(v) => set((d) => (d.appearance.reduce_motion = v))} />
       </Section>
 
       <Section title={t('settings.section.historyPrivacy')}>

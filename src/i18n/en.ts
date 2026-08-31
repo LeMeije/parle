@@ -349,6 +349,8 @@ export const en: Record<string, string> = {
     'Raise it if the bars barely move when you speak, lower it if they sit at the top. It changes what the meter shows, never what is recorded or transcribed.',
   'settings.showPartial.label': 'Show live transcript in overlay',
   'settings.reduceMotion.label': 'Reduce motion',
+  'settings.reduceMotion.hint':
+    'Nothing animates that does not have to. The dictation bar appears at the bottom of the window instead of growing out of the record button, and the cassette reels stop spinning. Useful if animation bothers you, or on an older machine.',
 
   // ---------- Settings: history & privacy ----------
   'settings.clipboardCapture.label': 'Capture clipboard',

@@ -349,6 +349,8 @@ export const de: Record<string, string> = {
     'Erhöhen Sie sie, wenn sich die Balken beim Sprechen kaum bewegen, senken Sie sie, wenn sie oben anstehen. Das ändert nur die Anzeige, nie das, was aufgenommen oder transkribiert wird.',
   'settings.showPartial.label': 'Live-Transkript im Overlay anzeigen',
   'settings.reduceMotion.label': 'Bewegung reduzieren',
+  'settings.reduceMotion.hint':
+    'Nichts wird animiert, was nicht animiert sein muss. Die Diktierleiste erscheint am unteren Fensterrand, statt aus der Aufnahmeschaltfläche herauszuwachsen, und die Kassettenspulen drehen sich nicht mehr. Sinnvoll, wenn Animationen störend sind, oder auf einem älteren Rechner.',
 
   // ---------- Settings: history & privacy ----------
   'settings.clipboardCapture.label': 'Zwischenablage erfassen',
