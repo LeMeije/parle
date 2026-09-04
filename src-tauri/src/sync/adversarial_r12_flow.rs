@@ -276,7 +276,7 @@ fn sync_bounded(
 
 /// The withholding notice is emitted, and then superseded, in the same burst.
 ///
-/// `Pipeline::stop_and_process` emits `PipelineEvent::Empty { reason }` and
+/// `Pipeline::process_inner` emits `PipelineEvent::Empty { reason }` and
 /// then, unconditionally, `PipelineEvent::Completed { injection, .. }`.
 /// `Hud.tsx` is a last-writer-wins reducer over that stream:
 ///

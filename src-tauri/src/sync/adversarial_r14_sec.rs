@@ -362,8 +362,14 @@ fn r14_sec_b1_the_copy_only_branch_replaces_the_clipboard_and_reports_copied_fal
          must write the clipboard and evaluate to None, on both dictation paths."
     );
     // ANCHOR 2: `copied` is the second half of the store call.
+    //
+    // `app_id`/`app_name` lost their `&` when the latched app stopped being read
+    // back off `Pipeline::start_app` (which the NEXT dictation overwrites) and
+    // started travelling with the take as borrows. Only the spelling of those
+    // two arguments moved; the claim below, that `copied` is the argument after
+    // `secrecy` and is about the clipboard, is untouched.
     assert!(
-        p.matches("store_transcription(&self.store,&tr,&app_id,&app_name,secrecy,").count() >= 2,
+        p.matches("store_transcription(&self.store,&tr,app_id,app_name,secrecy,").count() >= 2,
         "ANCHOR MISSING: the store call no longer takes a `copied` argument in this position"
     );
     // ANCHOR 3: `copied` is what selects the clipboard sentence.

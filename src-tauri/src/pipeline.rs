@@ -16,6 +16,7 @@ use parle_core::settings::{data_dir, Settings};
 use parle_core::types::{LowConfidenceSpan, Segment, TranscriptionResult};
 use parking_lot::Mutex;
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -69,6 +70,30 @@ pub struct Pipeline {
     sink: EventSink,
     /// Latched app id/name captured at recording START (focus may move later).
     start_app: Mutex<(Option<String>, Option<String>)>,
+    /// Dictations taken off the recorder but not yet finished processing.
+    ///
+    /// Idle is emitted only when this is zero AND nothing is recording. Without
+    /// it, stopping twice in a row put the HUD back to Idle the moment the
+    /// FIRST take finished, while the second was still queued behind it.
+    pending: AtomicUsize,
+    /// Bumped on every `start`. Each partial loop carries the value it was
+    /// spawned with, so a loop belonging to a finished recording cannot wake up
+    /// and start emitting partials for the NEXT one through the shared slot.
+    generation: AtomicU64,
+}
+
+/// A stopped recording plus everything that was latched to it, handed to the
+/// worker as one value.
+///
+/// `marks` and `start_app` used to be read off the Pipeline's own slots when
+/// the worker eventually ran, and `start` overwrites both. Starting a second
+/// dictation while the first was still transcribing therefore wiped the first
+/// one's spliced marks and stamped its history row with the second one's app.
+/// Anything that belongs to ONE take travels with it from here on.
+pub struct PendingDictation {
+    recorder: Recorder,
+    marks: Vec<(u64, String)>,
+    start_app: (Option<String>, Option<String>),
 }
 
 /// What the accessibility tree says about the field the user is typing into.
@@ -244,6 +269,8 @@ impl Pipeline {
             marks: Mutex::new(Vec::new()),
             sink,
             start_app: Mutex::new((None, None)),
+            pending: AtomicUsize::new(0),
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -253,6 +280,12 @@ impl Pipeline {
 
     /// Returns true when recording actually started.
     pub fn start(self: &Arc<Self>) -> bool {
+        // A full slot now means a LIVE recording and nothing else: `take_pending`
+        // empties it on the stop keypress rather than when the worker gets round
+        // to the job. While the worker owned that step, a stop followed by a
+        // start found the slot still full, returned "already recording" without
+        // starting anything, and captured the second dictation into the first
+        // one's buffer.
         if self.recorder.lock().is_some() {
             return true; // already recording
         }
@@ -262,12 +295,13 @@ impl Pipeline {
         let sink = self.sink.clone();
         let on_level = move |u: LevelUpdate| sink(PipelineEvent::Level(u));
         self.marks.lock().clear();
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         match Recorder::start(&device, on_level) {
             Ok(rec) => {
                 *self.recorder.lock() = Some(rec);
                 (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Recording });
                 if self.settings.lock().overlay.show_partial_text {
-                    self.spawn_partial_loop();
+                    self.spawn_partial_loop(generation);
                 }
                 true
             }
@@ -284,7 +318,7 @@ impl Pipeline {
     /// transcribe a snapshot of the audio so far. Best-effort by design —
     /// engine `try_lock` means partials NEVER queue behind (or delay) the final
     /// pass, and the loop exits the moment the recorder is taken for stop.
-    fn spawn_partial_loop(self: &Arc<Self>) {
+    fn spawn_partial_loop(self: &Arc<Self>, generation: u64) {
         let this = self.clone();
         std::thread::Builder::new()
             .name("parle-partials".into())
@@ -292,6 +326,14 @@ impl Pipeline {
                 const MAX_PARTIAL_SECS: usize = 30 * 16_000;
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(2000));
+                    // Ours only while the slot still holds OUR recording. The
+                    // slot alone is not enough: by the time this wakes, the
+                    // recording it was spawned for can have been taken and a
+                    // new one started, and it would then transcribe and emit
+                    // partials for a recording that already has its own loop.
+                    if this.generation.load(Ordering::SeqCst) != generation {
+                        break;
+                    }
                     let snapshot = {
                         let guard = this.recorder.lock();
                         match guard.as_ref() {
@@ -314,8 +356,11 @@ impl Pipeline {
                     };
                     if let Ok((out, _)) = engine.transcribe(&snapshot, &opts, None) {
                         drop(engine);
-                        // Recorder may have been taken while we transcribed.
-                        if this.recorder.lock().is_none() {
+                        // Recorder may have been taken, or replaced by a newer
+                        // recording, while we transcribed.
+                        if this.recorder.lock().is_none()
+                            || this.generation.load(Ordering::SeqCst) != generation
+                        {
                             break;
                         }
                         let text: String = out
@@ -390,35 +435,103 @@ impl Pipeline {
     pub fn cancel(&self) {
         if let Some(rec) = self.recorder.lock().take() {
             rec.cancel();
+            // The marks belong to the audio being thrown away. Left behind they
+            // would be spliced into whatever is recorded next, since only
+            // `start` clears them.
+            self.marks.lock().clear();
         }
-        (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Idle });
+        // Through the same gate as everything else. Emitted unconditionally,
+        // cancelling the recording you just STARTED would clear the overlay
+        // while an earlier take was still transcribing behind it, and the text
+        // that take is about to paste would arrive with nothing on screen having
+        // said it was still coming.
+        self.emit_idle_if_quiescent();
     }
 
-    /// Emit Idle unless a new recording started while we were processing —
-    /// its Recording state must not be clobbered by our late Idle.
+    /// Emit Idle unless a new recording started while we were processing (its
+    /// Recording state must not be clobbered by our late Idle) or another take
+    /// is still queued or running behind us.
     fn emit_idle_if_quiescent(&self) {
-        if self.recorder.lock().is_none() {
+        if self.recorder.lock().is_none() && self.pending.load(Ordering::SeqCst) == 0 {
             (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Idle });
         }
     }
 
-    /// Stop recording and run the full pipeline (blocking; call on a worker).
-    pub fn stop_and_process(&self) {
-        let Some(rec) = self.recorder.lock().take() else {
-            return;
-        };
+    /// Detach the current recording so it can be transcribed off this thread,
+    /// freeing the recorder slot immediately so the next dictation gets its own.
+    ///
+    /// Capture is ended HERE rather than on the worker. The worker can be busy
+    /// with a queued transcription or a model prewarm, and until the flag is set
+    /// the microphone keeps appending to this recording: a user who stopped and
+    /// started again had the second dictation captured into the first one's
+    /// buffer and transcribed as one blob, while the second stop found an empty
+    /// slot and silently did nothing. The joins are left for the worker, so this
+    /// stays cheap enough for the hotkey thread.
+    ///
+    /// Returns None when there was nothing recording, so a stray stop cannot
+    /// queue a job that does nothing but still counts as pending.
+    pub fn take_pending(&self) -> Option<PendingDictation> {
+        let recorder = self.recorder.lock().take()?;
+        recorder.request_stop();
+        let marks = std::mem::take(&mut *self.marks.lock());
+        let start_app = self.start_app.lock().clone();
+        self.pending.fetch_add(1, Ordering::SeqCst);
         (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Transcribing });
-        let recording = rec.stop();
+        Some(PendingDictation { recorder, marks, start_app })
+    }
+
+    /// Give up on a take that never reached the worker.
+    ///
+    /// The count is raised the moment a take is detached, so whatever refuses it
+    /// afterwards has to hand it back, or the HUD sits on "Transcribing" for the
+    /// rest of the session waiting for a job that will never run. The user is
+    /// told, because a dictation they finished speaking has just been lost and
+    /// the spinner alone would say the opposite.
+    pub fn abandon_pending(&self, pending: PendingDictation) {
+        drop(pending);
+        self.pending.fetch_sub(1, Ordering::SeqCst);
+        (self.sink)(PipelineEvent::Error {
+            message: "That dictation could not be transcribed and has been lost. \
+                      Please restart Parle."
+                .into(),
+        });
+        self.emit_idle_if_quiescent();
+    }
+
+    /// Run one detached dictation to completion. Called on the serial worker,
+    /// so takes queue behind each other rather than racing.
+    pub fn process(&self, pending: PendingDictation) {
+        self.process_inner(pending);
+        // The count drops BEFORE the single idle check, and the check happens
+        // only here. Every early return inside `process_inner` used to emit its
+        // own Idle, which is why a still-queued second take could not be
+        // consulted at the point the first one finished.
+        self.pending.fetch_sub(1, Ordering::SeqCst);
+        self.emit_idle_if_quiescent();
+    }
+
+    /// Run the full pipeline for one detached dictation (blocking; worker only).
+    ///
+    /// Never emits Idle: `process` owns that, once, after the pending count has
+    /// been dropped.
+    fn process_inner(&self, pending: PendingDictation) {
+        let PendingDictation { recorder, marks, start_app } = pending;
+        // Capture already ended in `take_pending`; this just collects the
+        // threads and takes the buffer.
+        let recording = recorder.stop();
+        // Borrowed for the whole function. Read off `self.start_app` down here
+        // instead, and a dictation started while this one was transcribing had
+        // already overwritten the slot, so this row was filed under the wrong
+        // application.
+        let (app_id, app_name) = (&start_app.0, &start_app.1);
 
         let settings = self.settings.lock().clone();
         if recording.duration_ms < settings.audio.min_duration_ms {
             (self.sink)(PipelineEvent::Empty { reason: "Too short".into() });
-            self.emit_idle_if_quiescent();
             return;
         }
         if is_silence(&recording.samples) {
             (self.sink)(PipelineEvent::Empty { reason: "No speech detected".into() });
-            self.emit_idle_if_quiescent();
             return;
         }
         if recording.dropped_chunks > 0 {
@@ -447,10 +560,11 @@ impl Pipeline {
             sink(PipelineEvent::Partial { text: t.to_string() });
         });
 
-        // Insert marks (pasted links/text mid-recording): split the audio at
-        // each mark's timestamp so speech on either side is transcribed and
-        // cleaned separately, and the mark text is spliced in verbatim.
-        let marks = std::mem::take(&mut *self.marks.lock());
+        // Marks (pasted links/text mid-recording) split the audio at their
+        // timestamps so speech on either side is transcribed and cleaned
+        // separately, and the mark text is spliced in verbatim. They arrive
+        // WITH the take: read off `self.marks` here instead, and starting the
+        // next dictation before the worker reached this line cleared them.
 
         // Code-switching: whisper detects ONE language per pass, so with
         // language=auto we split at natural pauses and let every stretch
@@ -465,7 +579,7 @@ impl Pipeline {
         };
 
         if !marks.is_empty() {
-            self.process_with_marks(recording, marks, &opts, &settings, &dict);
+            self.process_with_marks(recording, marks, &opts, &settings, &dict, &start_app);
             return;
         }
 
@@ -496,7 +610,6 @@ impl Pipeline {
                         path.display()
                     ),
                 });
-                self.emit_idle_if_quiescent();
                 return;
             }
         };
@@ -567,7 +680,6 @@ impl Pipeline {
             // ("scratch that", pure filler) — keep the raw transcript in
             // history without injecting anything.
             if !raw_text.is_empty() {
-                let (app_id, app_name) = self.start_app.lock().clone();
                 let tr = TranscriptionResult {
                     raw_text: raw_text.clone(),
                     text: raw_text.clone(),
@@ -581,10 +693,9 @@ impl Pipeline {
                     cleanup_tier: 0,
                 };
                 let (_, notice) =
-                    store_transcription(&self.store, &tr, &app_id, &app_name, secrecy, false);
+                    store_transcription(&self.store, &tr, app_id, app_name, secrecy, false);
                 if let Some(reason) = notice {
                     (self.sink)(PipelineEvent::Empty { reason });
-                    self.emit_idle_if_quiescent();
                     return;
                 }
             }
@@ -594,7 +705,6 @@ impl Pipeline {
                     // Only claim to have kept something when we did.
                     "Nothing left after cleanup (kept raw in history)".to_string()
                 } });
-            self.emit_idle_if_quiescent();
             return;
         }
 
@@ -635,7 +745,6 @@ impl Pipeline {
             None
         };
 
-        let (app_id, app_name) = self.start_app.lock().clone();
         let tr = TranscriptionResult {
             raw_text: raw_text.clone(),
             text: text.clone(),
@@ -674,7 +783,7 @@ impl Pipeline {
             copied_to_clipboard = true;
         }
         let (item_id, notice) =
-            store_transcription(&self.store, &tr, &app_id, &app_name, secrecy, copied_to_clipboard);
+            store_transcription(&self.store, &tr, app_id, app_name, secrecy, copied_to_clipboard);
         if let Some(reason) = notice {
             (self.sink)(PipelineEvent::Empty { reason });
         }
@@ -722,7 +831,6 @@ impl Pipeline {
             injection,
             low_confidence_count: low_confidence.len(),
         });
-        self.emit_idle_if_quiescent();
     }
 }
 
@@ -730,6 +838,9 @@ impl Pipeline {
     /// Mark-splice flow: audio split at mark timestamps; each speech piece is
     /// transcribed (with per-piece language auto-detection) and cleaned
     /// independently; mark text goes in verbatim — URLs never touch cleanup.
+    ///
+    /// Never emits Idle, for the same reason as `process_inner`: `process` owns
+    /// that.
     fn process_with_marks(
         &self,
         recording: parle_audio::recorder::Recording,
@@ -737,8 +848,11 @@ impl Pipeline {
         opts: &TranscribeOptions,
         settings: &Settings,
         dict: &Dictionary,
+        // Latched at recording START and carried with the take, not read back
+        // off the Pipeline, which the next `start` overwrites.
+        start_app: &(Option<String>, Option<String>),
     ) {
-        use crate::pipeline::PipelineState;
+        let (app_id, app_name) = (&start_app.0, &start_app.1);
         marks.sort_by_key(|(ms, _)| *ms);
         let sr = parle_audio::ASR_SAMPLE_RATE as u64;
         let total = recording.samples.len();
@@ -877,7 +991,6 @@ impl Pipeline {
         let raw_text = raw_parts.join(" ").trim().to_string();
         if text.is_empty() {
             (self.sink)(PipelineEvent::Empty { reason: "No speech detected".into() });
-            self.emit_idle_if_quiescent();
             return;
         }
 
@@ -914,7 +1027,6 @@ impl Pipeline {
             None
         };
 
-        let (app_id, app_name) = self.start_app.lock().clone();
         let detected_language = if langs.is_empty() { None } else { Some(langs.join("+")) };
         let tr = TranscriptionResult {
             raw_text,
@@ -943,7 +1055,7 @@ impl Pipeline {
             copied_to_clipboard = true;
         }
         let (item_id, notice) =
-            store_transcription(&self.store, &tr, &app_id, &app_name, secrecy, copied_to_clipboard);
+            store_transcription(&self.store, &tr, app_id, app_name, secrecy, copied_to_clipboard);
         if let Some(reason) = notice {
             (self.sink)(PipelineEvent::Empty { reason });
         }
@@ -984,7 +1096,6 @@ impl Pipeline {
             injection,
             low_confidence_count: 0,
         });
-        self.emit_idle_if_quiescent();
     }
 }
 

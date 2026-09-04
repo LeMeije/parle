@@ -1,7 +1,7 @@
 //! Shared application state and the platform-event dispatcher.
 
 use crate::hotkey_logic::{GestureAction, GestureMachine, KeyPhase};
-use crate::pipeline::{Pipeline, PipelineEvent};
+use crate::pipeline::{PendingDictation, Pipeline, PipelineEvent};
 use crate::platform::{self, HotkeyId, NativeBindings, NativeKey, PlatformEvent};
 use parle_asr::download::CancelToken;
 use parle_asr::manager::EngineManager;
@@ -45,7 +45,11 @@ pub struct AppState {
 }
 
 enum Work {
-    StopAndProcess,
+    /// The recording is detached from the pipeline BEFORE it is queued, so the
+    /// job carries its own audio, marks and latched app. Queuing a bare "go and
+    /// stop whatever is recording" meant the job read shared slots that the
+    /// next dictation had already overwritten.
+    StopAndProcess(PendingDictation),
     Prewarm(AppHandle),
     /// Arbitrary job on the serial worker (engine reconfiguration etc.) so it
     /// queues after any in-flight transcription instead of blocking the caller.
@@ -178,7 +182,7 @@ impl AppState {
                     // ONE worker: transcription jobs are strictly ordered.
                     for job in work_rx {
                         match job {
-                            Work::StopAndProcess => pipeline.stop_and_process(),
+                            Work::StopAndProcess(pending) => pipeline.process(pending),
                             Work::Run(job) => job(),
                             Work::Prewarm(app) => {
                                 let state = app.state::<Arc<AppState>>();
@@ -268,7 +272,29 @@ impl AppState {
 
     pub fn pipeline_stop(&self) {
         self.set_recording_flag(false);
-        let _ = self.work_tx.send(Work::StopAndProcess);
+        // Detached HERE, on the caller's thread, not when the worker reaches the
+        // job: the microphone has to stop when the user says stop, and the
+        // recorder slot has to be free before the next `pipeline_start`. See
+        // `Pipeline::take_pending`. Cheap by design (three mutex takes and an
+        // event), the thread joins stay on the worker.
+        //
+        // Nothing queued when nothing was recording, so a stray stop cannot
+        // leave a phantom job holding the HUD out of Idle.
+        let Some(pending) = self.pipeline.take_pending() else {
+            return;
+        };
+        if let Err(crossbeam_channel::SendError(job)) =
+            self.work_tx.send(Work::StopAndProcess(pending))
+        {
+            // The worker is gone, so nothing will ever transcribe this. Hand the
+            // take back instead of swallowing the error: the count it raised
+            // would otherwise hold the HUD on "Transcribing" for the rest of the
+            // session, telling the user their dictation is on its way.
+            tracing::error!("dictation worker is gone; this take cannot be transcribed");
+            if let Work::StopAndProcess(pending) = job {
+                self.pipeline.abandon_pending(pending);
+            }
+        }
     }
 
     /// Stop initiated outside the hotkey path (HUD click, tray, UI button).

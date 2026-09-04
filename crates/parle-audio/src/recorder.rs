@@ -134,9 +134,22 @@ impl Recorder {
             .unwrap_or(0)
     }
 
+    /// End capture WITHOUT waiting for the threads to wind down.
+    ///
+    /// Split out of `stop` so the caller can cut the microphone the instant the
+    /// user asks and pay the joins later on a worker thread. Until this flag is
+    /// set the consumer keeps appending, so a stop that waits for a busy worker
+    /// keeps recording in the meantime.
+    ///
+    /// Idempotent, and `stop`/`cancel` remain correct without it: calling this
+    /// first only makes their joins return sooner.
+    pub fn request_stop(&self) {
+        self.stop_flag.store(true, Ordering::SeqCst);
+    }
+
     /// Stop and take the recording. Blocks briefly while the consumer drains.
     pub fn stop(mut self) -> Recording {
-        self.stop_flag.store(true, Ordering::SeqCst);
+        self.request_stop();
         if let Some(j) = self.stream_owner.take() {
             let _ = j.join();
         }
@@ -161,7 +174,7 @@ impl Recorder {
 
     /// Abort without keeping audio.
     pub fn cancel(mut self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
+        self.request_stop();
         if let Some(j) = self.stream_owner.take() {
             let _ = j.join();
         }
