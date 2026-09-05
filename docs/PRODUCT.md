@@ -87,10 +87,13 @@ Target latencies (measured, not aspirational: benchmarks in `bench/`):
   Windows: never swallow key-down while letting key-up escape (stuck-modifier bug).
 - AltGr trap: Right Alt is AltGr on many layouts: never default to it on Windows.
 - Default dictation key is chosen by POSITION so muscle memory carries between machines: the
-  bottom-left corner key on both. Globe/Fn on macOS, Left Ctrl on Windows, gesture DoubleTap on
-  both, and holding Shift makes it a Refine take. Left Ctrl is only safe to bind because DoubleTap
-  is the one mode that never swallows its key; in any other mode it would eat every Ctrl chord, so
-  the key and the gesture have to change together.
+  bottom-left corner key on both. Globe/Fn on macOS, Left Ctrl on Windows. Holding Shift makes it
+  a Refine take on both.
+- The GESTURE deliberately does NOT match, and must not be "aligned" without reading this.
+  Windows is DoubleTap because it is the only mode that never swallows its key, and Left Ctrl in
+  any other mode eats every Ctrl chord: key and gesture change together. macOS is Hybrid
+  (hold Globe) because macOS binds a DOUBLE-PRESS of Globe to its own dictation, and DoubleTap
+  does not swallow, so defaulting to it there would race the OS on every take.
 
 ### Output/injection
 - macOS: AX insertion first, clipboard+⌘V fallback, secure-input detection -> clipboard-only + toast.

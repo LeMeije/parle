@@ -313,20 +313,13 @@ impl Default for HotkeySettings {
     fn default() -> Self {
         Self {
             dictation: HotkeyBinding {
-                // Platform defaults applied on first launch. Both platforms use
-                // the same gesture on the key in the same PLACE — bottom-left
-                // corner — so the product feels identical on either machine:
-                // Globe/Fn on macOS, Left Ctrl on Windows.
-                //
-                // DoubleTap is not a taste choice here, it is what makes the
-                // Windows default safe. It is the only mode that does not
-                // swallow its key (`swallow: b.mode != DoubleTap` in state.rs),
-                // and Left Ctrl bound in Hold/Hybrid/Toggle would eat Ctrl+C,
-                // Ctrl+V and every other Ctrl chord system-wide. Double-tap to
-                // start, single tap to stop, and the key otherwise behaves
-                // exactly as it always did.
+                // Platform defaults applied on first launch. The KEY is chosen
+                // by position so muscle memory carries between machines - the
+                // bottom-left corner key on both - and holding Shift is the
+                // Refine trigger on both. The GESTURE deliberately differs; see
+                // `default_dictation_mode` for why it cannot be made to match.
                 key: default_dictation_key().into(),
-                mode: HotkeyMode::DoubleTap,
+                mode: default_dictation_mode(),
                 enabled: true,
             },
             dictation_alt: HotkeyBinding::default(),
@@ -361,6 +354,32 @@ fn default_dictation_key() -> &'static str {
     { "Fn" }
     #[cfg(not(target_os = "macos"))]
     { "LeftCtrl" }
+}
+
+/// The default gesture, which CANNOT be the same on both platforms.
+///
+/// Windows: DoubleTap, and it is load-bearing rather than a preference. It is
+/// the only mode that does not swallow its key (`swallow: b.mode != DoubleTap`
+/// in state.rs), and Left Ctrl bound in Hold, Hybrid or Toggle would eat Ctrl+C,
+/// Ctrl+V and every other Ctrl chord system-wide. The key and the gesture have
+/// to change together.
+///
+/// macOS: Hybrid — hold Globe and talk, or tap it quickly to latch. NOT
+/// DoubleTap, however tempting the symmetry is: macOS binds a DOUBLE-PRESS of
+/// the Globe key to its OWN dictation by default (see `open_keyboard_settings`
+/// in platform/macos.rs), and since DoubleTap never swallows the key, both
+/// would fire and the user would get whichever won the race. Onboarding already
+/// asks people to set "Press 🌐 key to" to Do Nothing; defaulting to the very
+/// gesture the OS has taken would make that a requirement instead of a tip.
+///
+/// So the alignment between platforms is the key's POSITION and the Shift
+/// trigger, not the gesture. Holding a key you already hold costs nothing on
+/// macOS; on Windows the same hold would cost the user Ctrl.
+fn default_dictation_mode() -> HotkeyMode {
+    #[cfg(target_os = "macos")]
+    { HotkeyMode::Hybrid }
+    #[cfg(not(target_os = "macos"))]
+    { HotkeyMode::DoubleTap }
 }
 
 /// The suggested Refine key.
@@ -1471,13 +1490,24 @@ mod tests {
     }
 
     #[test]
-    fn the_default_dictation_gesture_never_swallows_its_key() {
+    fn the_windows_default_gesture_never_swallows_its_key() {
         // Load-bearing, not cosmetic. DoubleTap is the only mode that leaves
         // the key's normal system behaviour intact, and the Windows default is
         // Left Ctrl — bound in any other mode it would eat Ctrl+C, Ctrl+V and
         // every other Ctrl chord. If this assertion is ever relaxed, the
         // Windows default key has to change in the same commit.
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(HotkeySettings::default().dictation.mode, HotkeyMode::DoubleTap);
+    }
+
+    #[test]
+    fn macos_does_not_default_to_the_gesture_the_os_already_took() {
+        // macOS binds a double-press of Globe to its own dictation. DoubleTap
+        // does not swallow the key, so defaulting to it would put Parle in a
+        // race with the OS on every take. Hold-to-talk sidesteps that entirely,
+        // which is why the two platforms deliberately differ here.
+        #[cfg(target_os = "macos")]
+        assert_eq!(HotkeySettings::default().dictation.mode, HotkeyMode::Hybrid);
     }
 
     #[test]
