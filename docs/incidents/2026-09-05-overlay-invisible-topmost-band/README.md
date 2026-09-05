@@ -120,12 +120,26 @@ a plain Tauri window plus the topmost bit.
 `WS_EX_NOACTIVATE` is load-bearing: `hud.rs`'s own header comment calls it the detail that keeps
 paste-at-cursor working. Losing it means the overlay can take focus.
 
-**Not proven:** whether these bits were stripped later or never applied. `harden_overlay` runs
-immediately after `.build()`, and TAO may apply its own window attributes afterwards; TAO also
-implements `skip_taskbar` through `ITaskbarList`, not `WS_EX_TOOLWINDOW`, so the missing
-`TOOLWINDOW` may never have been set at all. Distinguishing the two needs a measurement on a
-freshly started process, which was deliberately not taken because it would have destroyed the live
-failing state. The fix re-applies the bits on every show either way.
+**Now settled — they were stripped at runtime.** The measurement that decides it was taken after
+installing the fixed build (2026-09-05 15:55), on a freshly started process:
+
+```
+fresh process  : ExStyle 0x08040198   TOPMOST=True  NOACTIVATE=True   TOOLWINDOW=True
+failing process: ExStyle 0x00040118   TOPMOST=True  NOACTIVATE=False  TOOLWINDOW=False
+```
+
+So `harden_overlay` **does** apply all three bits at creation, and they survive into a healthy
+running app. The failing process had lost two of them. It had been deliberately left un-measured
+during the diagnosis because taking it would have meant restarting and destroying the live failing
+state — the one mistake the 2026-08-28 attempt could not afford to repeat.
+
+That makes the eviction and the style-stripping almost certainly **one event, not two**: something
+rewrote the HUD's extended style and moved it out of the topmost band at the same moment, leaving
+a window that looked correctly configured by its own bits while being neither topmost nor
+non-activating. It also means the "or never applied" branch — TAO applying its own attributes
+after `.build()`, or `skip_taskbar` going through `ITaskbarList` rather than `WS_EX_TOOLWINDOW` —
+is ruled out as an explanation for what was observed. `reassert_overlay` re-applies both halves on
+every show, which covers the single event whatever produced it.
 
 ## 4. The trigger is still not identified — and the fix does not depend on it
 
