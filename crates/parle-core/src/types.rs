@@ -49,8 +49,25 @@ pub struct TranscriptionResult {
     pub segments: Vec<Segment>,
     pub trimmed: Vec<TrimmedSpan>,
     pub low_confidence: Vec<LowConfidenceSpan>,
-    /// Which cleanup tier produced `text`: 0 = raw, 1 = deterministic, 2 = local LLM.
+    /// Which cleanup tier produced `text`: 0 = raw, 1 = deterministic,
+    /// 2 = local LLM, 3 = Refine (an AI CLI on this machine rewrote it).
     pub cleanup_tier: u8,
+    /// Present when `text` is an AI rewrite. `raw_text` then holds the cleaned
+    /// transcript the AI was given, so "restore raw" gives back the speaker's
+    /// own words rather than the recogniser's.
+    #[serde(default)]
+    pub refine: Option<RefineMeta>,
+}
+
+/// How a Refine dictation was produced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RefineMeta {
+    /// "claude" | "codex" | "gemini" | "custom".
+    pub provider: String,
+    /// The model the CLI reported, when it did.
+    pub model: Option<String>,
+    /// Wall time of the CLI call.
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

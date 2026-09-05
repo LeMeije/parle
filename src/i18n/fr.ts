@@ -27,6 +27,8 @@ export const fr: Record<string, string> = {
   'app.toast.pasteInstruction': 'Copié. Appuyez sur {keys} pour coller',
   'app.toast.inserted': '« {text} » inséré',
   'app.toast.copied': '« {text} » copié',
+  'app.toast.refinedInserted': 'Reformulé et inséré « {text} »',
+  'app.toast.refinedCopied': 'Reformulé et copié « {text} »',
 
   // ---------- Recording overlay (HUD) ----------
   'hud.pasteInstruction': 'Copié. Appuyez sur {keys} pour coller',
@@ -37,6 +39,11 @@ export const fr: Record<string, string> = {
   'hud.cancel': 'Annuler (Échap)',
   'hud.deck.rec': 'REC',
   'hud.deck.proc': 'PROC',
+  'hud.deck.ai': 'IA',
+  'hud.deck.aiTag': '· IA',
+  'hud.stopAndRefine': 'Arrêter et reformuler',
+  'hud.refining': 'Reformulation avec {provider}… {secs}s',
+  'hud.refineTag': 'Reformuler',
 
   // ---------- History ----------
   'history.searchPlaceholder': 'Rechercher dans les dictées et le presse-papiers…  (↑↓ · Entrée colle · {copyKeys} copie)',
@@ -55,6 +62,8 @@ export const fr: Record<string, string> = {
   'history.localOnly.title':
     'Parle n’a pas pu exclure qu’il s’agisse d’un champ de mot de passe : cet élément est donc conservé sur cet appareil et n’est jamais envoyé à vos autres appareils',
   'history.fromDevice.title': 'Écrit sur un autre de vos appareils et synchronisé ici',
+  'history.refined.badge': 'reformulé',
+  'history.refined.title': 'Réécrit par {by} en {secs}s. « Restaurer le brut » rend vos propres mots.',
   'history.action.paste': 'Coller',
   'history.action.pasteTitle': 'Coller dans l’app précédente (Entrée)',
   'history.action.copy': 'Copier',
@@ -76,6 +85,12 @@ export const fr: Record<string, string> = {
   'compose.transcribing': 'Transcription…',
   'compose.recording': 'enregistrement',
   'compose.processing': 'traitement',
+  'compose.recordingRefine': 'enregistrement · reformuler',
+  'compose.refining': 'Reformulation…',
+  'compose.refiningPill': 'reformulation',
+  'compose.startRefine': 'Reformuler',
+  'compose.startRefine.title': 'Dictez, puis l’IA réécrit le texte avant de le coller',
+  'compose.refinedNote': 'Réécrit par l’IA, inséré au curseur et enregistré dans l’Historique. Vos propres mots sont le texte brut de cette ligne.',
   'compose.markPlaceholder.recording': 'Collez un lien ou saisissez du texte, Entrée l’épingle à cet instant…',
   'compose.markPlaceholder.idle': 'Lancez la dictée pour insérer liens et texte',
   'compose.insert': 'Insérer',
@@ -169,6 +184,7 @@ export const fr: Record<string, string> = {
   'settings.section.cleanup': 'Nettoyage',
   'settings.section.dictionary': 'Dictionnaire',
   'settings.section.output': 'Sortie',
+  'settings.section.refine': 'Reformuler avec l’IA',
   'settings.section.appearance': 'Apparence',
   'settings.section.historyPrivacy': 'Historique et confidentialité',
   'settings.section.audio': 'Audio',
@@ -298,6 +314,83 @@ export const fr: Record<string, string> = {
   'settings.pressEnter.label': 'Appuyer sur Entrée après l’insertion',
   'settings.pressEnter.hint':
     'Envoie le message juste après le collage, pratique pour les messageries. Ne se déclenche jamais dans un champ sécurisé.',
+
+  // ---------- Settings: refine ----------
+  'settings.refine.enable.label': 'Mode Reformuler',
+  'settings.refine.enable.hint':
+    'Une seconde façon de dicter. Parlez en vrac et, au lieu de coller la transcription, Parle la confie à une IA installée sur cette machine et colle sa réécriture : organisée, ponctuée, prête à envoyer. La transcription reste copiée et conservée dans l’Historique. C’est la seule chose dans Parle qui envoie vos mots hors de cet appareil, et cela n’arrive que quand vous appuyez sur cette touche.',
+  'settings.refine.provider.label': 'IA',
+  'settings.refine.provider.hint': 'Un outil en ligne de commande déjà installé et connecté. Parle ne détient jamais de clé API.',
+  'settings.refine.provider.claude': 'Claude Code (claude)',
+  'settings.refine.provider.codex': 'OpenAI Codex CLI (codex)',
+  'settings.refine.provider.gemini': 'Google Gemini CLI (gemini)',
+  'settings.refine.provider.custom': 'Commande personnalisée',
+  'settings.refine.programPath.label': 'Chemin de l’outil',
+  'settings.refine.programPath.hint': 'Vide : Parle le trouve tout seul. Renseignez-le si la vérification ci-dessous n’y arrive pas.',
+  'settings.refine.programPath.placeholder': 'auto',
+  'settings.refine.customCommand.label': 'Commande',
+  'settings.refine.customCommand.hint':
+    'La ligne de commande complète. Elle reçoit la consigne sur l’entrée standard et doit écrire la réécriture sur la sortie standard. Pas de shell : tubes et variables sont passés tels quels.',
+  'settings.refine.model.label': 'Modèle',
+  'settings.refine.model.hint': 'Transmis à l’outil comme option de modèle. Vide : le modèle par défaut de l’outil.',
+  'settings.refine.model.placeholder': 'par défaut',
+  'settings.refine.status.checking': 'Vérification…',
+  'settings.refine.status.notChecked': 'Pas encore vérifié. Activez Reformuler, ou cliquez sur Revérifier.',
+  'settings.refine.status.found': '{program} trouvé',
+  'settings.refine.status.version': 'version {version}',
+  'settings.refine.status.signedIn': 'connecté',
+  'settings.refine.status.notSignedIn': 'non connecté',
+  'settings.refine.status.recheck': 'Revérifier',
+  'settings.refine.status.voiceMissing': 'Le fichier de voix est illisible ; les dictées seront reformulées sans lui.',
+  'settings.refine.key.label': 'Touche Reformuler',
+  'settings.refine.key.hintMac': 'Option droite est suggérée. Les combinaisons comme ⌥E fonctionnent toujours : elles annulent la prise et passent.',
+  'settings.refine.key.hintWin': 'Une combinaison est suggérée. Une touche modificatrice seule cesserait d’agir comme modificateur une fois liée.',
+  'settings.refine.key.clash': 'C’est aussi la touche de dictée. La dictée l’emporte, donc Reformuler ne démarrerait jamais. Choisissez une autre touche.',
+  'settings.refine.gesture.label': 'Geste Reformuler',
+  'settings.refine.accent.label': 'Couleur Reformuler',
+  'settings.refine.accent.hint': 'La superposition et la barre de dictée prennent cette couleur pendant une prise Reformuler, pour toujours savoir dans quel mode vous êtes.',
+  'settings.refine.rules.label': 'Vos règles',
+  'settings.refine.rules.hint': 'Consignes permanentes intégrées à chaque réécriture : orthographe, ton, caractères à éviter, signature.',
+  'settings.refine.rules.placeholder':
+    'Orthographe française soignée. Jamais de tirets cadratins. Garde ma première personne. Paragraphes courts. Si cela ressemble à un e-mail, termine par mon prénom seul, [votre prénom].',
+  'settings.refine.voice.label': 'Fichier de voix',
+  'settings.refine.voice.hint': 'Fichier Markdown facultatif décrivant votre façon d’écrire. Relu à chaque fois : continuez d’éditer celui que vous avez déjà. Limité à 64 Ko.',
+  'settings.refine.voice.choose': 'Choisir…',
+  'settings.refine.voice.clear': 'Effacer',
+  'settings.refine.voice.picker': 'Choisir un fichier de voix',
+  'settings.refine.voice.filter': 'Markdown ou texte',
+  'settings.refine.timeout.label': 'Abandonner après',
+  'settings.refine.timeout.hint': 'L’outil est arrêté à ce moment et le repli ci-dessous s’applique.',
+  'settings.refine.fallback.label': 'Si l’IA échoue',
+  'settings.refine.fallback.clipboard': 'Copier la transcription brute, ne pas l’insérer',
+  'settings.refine.fallback.insert': 'Insérer la transcription brute comme d’habitude',
+  'settings.refine.fallback.hint': 'Vous avez demandé Reformuler parce que la dictée brute n’était pas prête à envoyer : par défaut elle reste hors de votre document et va dans le presse-papiers et l’Historique.',
+  'settings.refine.test.button': 'Essayer',
+  'settings.refine.test.running': 'Reformulation d’un exemple…',
+  'settings.refine.test.result': 'Réécrit en {secs}s{model} :',
+  'settings.refine.test.hint': 'Fait passer une dictée d’exemple par tout le parcours, exactement comme une vraie prise.',
+  'settings.refine.privacy':
+    'Ce qui est envoyé : la transcription, vos règles et votre fichier de voix. Ce qui ne l’est pas : l’audio, l’Historique, le presse-papiers, ni rien sur l’application où vous tapez. L’outil tourne avec ses propres outils, extensions et fichiers de projet désactivés, donc une dictée ne peut jamais devenir une action.',
+
+  // ---------- Settings: refine trigger ----------
+  'settings.refine.trigger.label': 'Comment le déclencher',
+  'settings.refine.trigger.hint':
+    'Soit vous maintenez une touche de modification en utilisant votre touche de dictée habituelle, soit vous donnez à Reformuler sa propre touche.',
+  'settings.refine.trigger.modifier': 'Maintenir un modificateur',
+  'settings.refine.trigger.ownKey': 'Sa propre touche',
+  'settings.refine.modifier.label': 'Modificateur',
+  'settings.refine.trigger.gestureHint':
+    'Maintenez {mod}, puis {gesture} {key} exactement comme aujourd’hui. Maintenez d’abord le modificateur : il est lu au moment où l’enregistrement démarre. Celle de gauche comme celle de droite fonctionne.',
+  'settings.refine.trigger.verb.hold': 'maintenez',
+  'settings.refine.trigger.verb.tap': 'appuyez sur',
+  'settings.refine.trigger.verb.doubleTap': 'appuyez deux fois sur',
+  'settings.refine.trigger.verb.hybrid': 'maintenez ou appuyez sur',
+  'settings.refine.trigger.clashModifier':
+    'Votre touche de dictée est {key}, c’est-à-dire le même modificateur que {mod} : la maintenir ne peut rien signifier de plus. Choisissez un autre modificateur, ou donnez à Reformuler sa propre touche.',
+  'settings.refine.trigger.chordKey':
+    'Votre touche de dictée est la combinaison {key}. Un déclencheur par modificateur ne fonctionne qu’avec une touche unique, comme la touche Globe, la touche Copilot ou un modificateur seul. Donnez plutôt à Reformuler sa propre touche.',
+  'settings.refine.trigger.copilotModifier':
+    'La touche Copilot envoie elle-même Maj et la touche Windows : Parle ne peut pas distinguer {mod} que vous maintenez de celle envoyée par le clavier. Utilisez Ctrl ou Alt avec la touche Copilot.',
 
   // ---------- Settings: appearance ----------
   'settings.theme.label': 'Thème',

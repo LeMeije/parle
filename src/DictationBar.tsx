@@ -35,6 +35,8 @@ export default function DictationBar({
   marks,
   originRef,
   onOpenCompose,
+  accent,
+  refine,
 }: {
   recording: boolean;
   /// Everything pinned into the recording so far, owned by App. The bar shows
@@ -43,6 +45,11 @@ export default function DictationBar({
   /// The sidebar record button: the rectangle this grows out of.
   originRef: React.RefObject<HTMLButtonElement | null>;
   onOpenCompose: () => void;
+  /// Overrides the accent for the bar's own subtree (tint, meter, buttons)
+  /// while a Refine take runs. Undefined keeps the app accent.
+  accent?: string;
+  /// The take will go to the AI: the bar says so next to the clock.
+  refine?: boolean;
 }) {
   const t = useT();
   const [draft, setDraft] = useState('');
@@ -274,7 +281,17 @@ export default function DictationBar({
   }
 
   return (
-    <div className="dictation-bar" ref={barRef} data-open={recording} inert={!recording}>
+    <div
+      className="dictation-bar"
+      ref={barRef}
+      data-open={recording}
+      data-refine={refine ? 'true' : undefined}
+      inert={!recording}
+      // Scoped accent: everything inside the bar (tint, meter, stop button)
+      // reads `--accent`, so one variable on the root recolours the whole bar
+      // for a Refine take and leaves the rest of the window alone.
+      style={accent ? ({ '--accent': accent } as React.CSSProperties) : undefined}
+    >
       <div className="bar-tint" ref={tintRef} aria-hidden="true" />
       <div className="bar-inner" ref={innerRef}>
         <div className="bar-left">
@@ -290,6 +307,7 @@ export default function DictationBar({
           </div>
 
           <span className="bar-time">{fmtTime(elapsed)}</span>
+          {refine && <span className="bar-mode">{t('hud.refineTag')}</span>}
 
           {marks.length > 0 && (
             <button className="bar-marks" onClick={onOpenCompose} title={t('bar.openCompose')}>

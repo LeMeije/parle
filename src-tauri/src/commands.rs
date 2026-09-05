@@ -44,9 +44,19 @@ pub async fn set_settings(state: State<'_, Arc<AppState>>, app: AppHandle, setti
         // model the user had added.
         let owned_sync = guard.sync.clone();
         let owned_custom = guard.models.custom.clone();
+        // The ACTIVE MODEL and its fallback chain are server-owned too: they are
+        // set by `select_model`, `complete_onboarding` and the custom-model
+        // commands, and the UI never writes them. The main window loads its
+        // settings copy once at mount, so after "Use" on another model any
+        // toggle in Settings sent the OLD active model back here, which
+        // reconfigured the engine to it and silently undid the switch.
+        let owned_active = guard.models.active_model.clone();
+        let owned_chain = guard.models.fallback_chain.clone();
         *guard = settings.clone();
         guard.sync = owned_sync;
         guard.models.custom = owned_custom;
+        guard.models.active_model = owned_active;
+        guard.models.fallback_chain = owned_chain;
         guard.save(&settings_path()).map_err(err)?;
     }
     // apply_settings queues engine reconfiguration on the serial worker, so
@@ -357,7 +367,19 @@ fn stable_hash(s: &str) -> String {
 pub fn download_model(state: State<'_, Arc<AppState>>, app: AppHandle, model_id: String) -> Result<()> {
     let info = registry::by_id(&model_id).ok_or("unknown model")?;
     let token = CancelToken::default();
-    state.downloads.lock().insert(model_id.clone(), token.clone());
+    {
+        // ONE download per model. The button stays visible until the first
+        // progress event (after the connection opens), so a second click was
+        // easy, and two threads then opened the same `.part` with truncation
+        // and both wrote into it: a corrupt model file, and the first thread's
+        // completion removed the second's cancel token. Idempotent: the second
+        // click is simply the first one still running.
+        let mut downloads = state.downloads.lock();
+        if downloads.contains_key(&model_id) {
+            return Ok(());
+        }
+        downloads.insert(model_id.clone(), token.clone());
+    }
     let dir = models_dir();
     std::thread::spawn(move || {
         let emit = |p: &DownloadProgress| {
@@ -366,6 +388,12 @@ pub fn download_model(state: State<'_, Arc<AppState>>, app: AppHandle, model_id:
         match download::download(&dir, info, &token, |p| emit(&p)) {
             Ok(_) => {
                 let _ = app.emit("model-download-complete", &model_id);
+            }
+            // A cancel is the user's own action, not an error: reporting it as
+            // one showed a red callout and wiped every other download's
+            // progress bar in the UI.
+            Err(download::DownloadError::Cancelled) => {
+                let _ = app.emit("model-download-cancelled", &model_id);
             }
             Err(e) => {
                 let _ = app.emit("model-download-error", format!("{model_id}: {e}"));
@@ -397,9 +425,16 @@ pub fn delete_model(state: State<'_, Arc<AppState>>, model_id: String) -> Result
 
 #[tauri::command]
 pub async fn select_model(state: State<'_, Arc<AppState>>, app: AppHandle, model_id: String) -> Result<()> {
-    registry::by_id(&model_id).ok_or("unknown model")?;
     {
         let mut s = state.settings.lock();
+        // A registry model OR one of the user's own files. This checked the
+        // registry alone, so the "Use" button the Models view shows on a custom
+        // model answered "unknown model" every time: a file could be added but
+        // never selected.
+        let known = registry::by_id(&model_id).is_some() || s.models.custom.iter().any(|c| c.id == model_id);
+        if !known {
+            return Err("unknown model".into());
+        }
         s.models.active_model = model_id.clone();
         s.save(&settings_path()).map_err(err)?;
     }
@@ -465,13 +500,59 @@ pub fn dict_delete(state: State<'_, Arc<AppState>>, id: i64) -> Result<()> {
 
 // -- Recording control (UI buttons mirror the hotkeys) -------------------------
 
+/// `mode` is "standard" (default) or "refine".
 #[tauri::command]
-pub async fn start_recording(state: State<'_, Arc<AppState>>) -> Result<()> {
+pub async fn start_recording(state: State<'_, Arc<AppState>>, mode: Option<String>) -> Result<()> {
+    let mode = crate::pipeline::DictationMode::parse(mode.as_deref().unwrap_or("standard"));
+    if mode == crate::pipeline::DictationMode::Refine && !state.settings.lock().refine.enabled {
+        return Err("Refine is switched off. Turn it on in Settings first.".into());
+    }
     // Recorder init can block (CoreAudio cold open) — keep it off the main thread.
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.pipeline_start())
+    tauri::async_runtime::spawn_blocking(move || state.pipeline_start(mode))
         .await
         .map_err(err)
+}
+
+/// Where the Refine CLI is, whether it is signed in, whether the voice file
+/// reads. Probes child processes, so never on the main thread.
+#[tauri::command]
+pub async fn refine_status(state: State<'_, Arc<AppState>>) -> Result<crate::refine::Status> {
+    let cfg = state.settings.lock().refine.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::refine::status(&cfg))
+        .await
+        .map_err(err)
+}
+
+/// Run a fixed sample transcript through the whole Refine path, exactly as a
+/// dictation would, and report the rewrite. The one honest way to tell the
+/// user "this will work" before they rely on it mid-email.
+#[tauri::command]
+pub async fn refine_test(state: State<'_, Arc<AppState>>) -> Result<crate::refine::Outcome> {
+    let mut cfg = state.settings.lock().refine.clone();
+    // The test is allowed while the switch is still off: it is how the user
+    // decides whether to turn it on.
+    cfg.enabled = true;
+    let (language, locale) = {
+        let s = state.settings.lock();
+        (s.language.language.clone(), s.language.locale.clone())
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let ctx = crate::refine::Context {
+            spoken_language: if language == "auto" { None } else { Some(language) },
+            locale,
+        };
+        crate::refine::run(
+            &cfg,
+            "um so hi it's me, I just wanted to to say that the the meeting is moved to thursday, \
+             no wait friday at 3, and uh can you bring the slides, the ones from last week, thanks",
+            &ctx,
+            &crate::refine::CancelToken::default(),
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
@@ -550,14 +631,22 @@ pub fn insert_mark(state: State<'_, Arc<AppState>>, text: String) -> Result<u64>
     state.pipeline.add_mark(&text)
 }
 
+#[derive(Serialize)]
+pub struct PipelineSnapshot {
+    /// "recording" | "idle". Transcribing and refining are transient and are
+    /// announced by events; a view that mounts during them sees "idle" until
+    /// the next event, which is at most a few seconds away.
+    pub state: &'static str,
+    pub mode: crate::pipeline::DictationMode,
+}
+
 /// Current pipeline state, for views that mount mid-recording (a hotkey can
 /// start dictation before the Compose screen exists).
 #[tauri::command]
-pub fn pipeline_state(state: State<'_, Arc<AppState>>) -> &'static str {
-    if state.pipeline.is_recording() {
-        "recording"
-    } else {
-        "idle"
+pub fn pipeline_state(state: State<'_, Arc<AppState>>) -> PipelineSnapshot {
+    PipelineSnapshot {
+        state: if state.pipeline.is_recording() { "recording" } else { "idle" },
+        mode: state.pipeline.current_mode(),
     }
 }
 

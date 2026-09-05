@@ -613,6 +613,7 @@ impl Store {
             "low_confidence": r.low_confidence,
             "cleanup_tier": r.cleanup_tier,
             "transcribe_ms": r.transcribe_ms,
+            "refine": r.refine,
         })
         .to_string();
         let now = now_ms();
@@ -2286,6 +2287,7 @@ mod tests {
             trimmed: vec![],
             low_confidence: vec![],
             cleanup_tier: 1,
+            refine: None,
         }
     }
 

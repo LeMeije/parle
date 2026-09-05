@@ -9,7 +9,7 @@
 //! Secure input (password fields) is detected and degrades to clipboard-only.
 
 use super::{
-    HotkeyId, InjectionMethod, InjectionOutcome, NativeBindings, NativeKey, PermissionStatus,
+    HotkeyId, InjectionMethod, InjectionOutcome, Mods, NativeBindings, NativeKey, PermissionStatus,
     PlatformEvent,
 };
 use crate::hotkey_logic::KeyPhase;
@@ -237,6 +237,11 @@ pub fn secure_input_active() -> bool {
 /// Set while a bound dictation modifier is physically held; any other key
 /// going down during that window aborts the gesture (Fn+C, Fn+arrow, ...).
 static BOUND_MOD_HELD: AtomicBool = AtomicBool::new(false);
+/// The cancel key's DOWN was swallowed, so its UP must be too, whatever the
+/// recording flag says by then. The dispatcher clears the flag on the down
+/// edge, about 80 ms before the up edge arrives, and an app that receives a
+/// keyUp for a keyDown it never saw is left with inconsistent state.
+static CANCEL_DOWN_SWALLOWED: AtomicBool = AtomicBool::new(false);
 
 pub struct HotkeyListener {
     state: Arc<Mutex<NativeBindings>>,
@@ -400,7 +405,7 @@ fn handle_event(
                     KeyPhase::Up
                 }
             };
-            dispatch_key(&bindings, is_recording, &key, phase, tx)
+            dispatch_key(&bindings, is_recording, &key, phase, mods_of(flags), tx)
         }
         CGEventType::KeyDown | CGEventType::KeyUp => {
             let keycode =
@@ -413,22 +418,24 @@ fn handle_event(
                 let _ = tx.send(PlatformEvent::AbortGesture);
             }
             if keycode == KVK_ESCAPE {
-                if is_recording {
+                // The UP that belongs to a swallowed DOWN is swallowed
+                // unconditionally: by the time it arrives the recording flag
+                // has already been cleared by the cancel itself.
+                if phase == KeyPhase::Up && CANCEL_DOWN_SWALLOWED.swap(false, Ordering::SeqCst) {
+                    return true;
+                }
+                if is_recording && phase == KeyPhase::Down {
                     if let Some(ci) = bindings.cancel.as_ref() {
                         if *ci == NativeKey::Escape {
-                            // BOTH EDGES are swallowed, not just the down.
-                            //
-                            // The rule this file and the Windows hook both
-                            // state is "never swallow a key-down and let its
-                            // key-up escape": an app that receives a keyUp for
-                            // a keyDown it never saw is left with inconsistent
-                            // state. Windows followed the rule and macOS did
-                            // not. The event is only SENT on the down edge, so
-                            // cancelling still happens exactly once.
-                            if phase == KeyPhase::Down {
-                                let _ =
-                                    tx.send(PlatformEvent::Hotkey { id: HotkeyId::Cancel, phase });
-                            }
+                            // BOTH EDGES are swallowed, not just the down; the
+                            // event is only SENT on the down edge, so cancelling
+                            // still happens exactly once.
+                            CANCEL_DOWN_SWALLOWED.store(true, Ordering::SeqCst);
+                            let _ = tx.send(PlatformEvent::Hotkey {
+                                id: HotkeyId::Cancel,
+                                phase,
+                                mods: Mods::default(),
+                            });
                             return true; // consume Escape only while recording
                         }
                     }
@@ -441,33 +448,70 @@ fn handle_event(
     }
 }
 
+/// The modifiers this event carries, read straight off its own flag set.
+///
+/// Side-agnostic: `CGEventFlagShift` is set for either Shift key, which is
+/// exactly the granularity `RefineModifier` promises. The device-dependent
+/// left/right bits exist but are not used, so no left/right claim is made
+/// anywhere that could turn out to be wrong on one keyboard layout.
+fn mods_of(flags: CGEventFlags) -> Mods {
+    Mods {
+        shift: flags.contains(CGEventFlags::CGEventFlagShift),
+        ctrl: flags.contains(CGEventFlags::CGEventFlagControl),
+        alt: flags.contains(CGEventFlags::CGEventFlagAlternate),
+        cmd: flags.contains(CGEventFlags::CGEventFlagCommand),
+    }
+}
+
 fn dispatch_key(
     bindings: &NativeBindings,
     is_recording: bool,
     key: &NativeKey,
     phase: KeyPhase,
+    mods: Mods,
     tx: &Sender<PlatformEvent>,
 ) -> bool {
     let mut swallow = false;
-    if let Some(w) = bindings.dictation.as_ref().filter(|w| &w.key == key) {
+    // FIRST MATCH WINS, in the same order the Windows helper uses
+    // (`WireBindings::binding_for`): dictation, then the alternate, then
+    // Refine. One physical key must map to one action; firing two gestures
+    // from one press started two conflicting takes and the Settings clash
+    // warning exists because this is the fallback for the case it misses.
+    let slots = [
+        (bindings.dictation.as_ref(), HotkeyId::Dictation),
+        (bindings.dictation_alt.as_ref(), HotkeyId::DictationAlt),
+        (bindings.refine.as_ref(), HotkeyId::Refine),
+    ];
+    if let Some((w, id)) = slots.iter().find_map(|(w, id)| w.filter(|w| &w.key == key).map(|w| (w, *id))) {
         // Hold/hybrid gestures need the other-key abort; DoubleTap taps are
         // too brief to matter and must not suppress normal chording.
         if w.swallow {
             BOUND_MOD_HELD.store(phase == KeyPhase::Down, Ordering::SeqCst);
         }
-        let _ = tx.send(PlatformEvent::Hotkey { id: HotkeyId::Dictation, phase });
+        // The pressed key's OWN modifier bit removed: a dictation key that is
+        // itself a modifier would otherwise satisfy a Refine trigger on the
+        // same family and make every dictation a Refine take.
+        let mods = match key.mod_family() {
+            Some(family) => mods.without(family),
+            None => mods,
+        };
+        let _ = tx.send(PlatformEvent::Hotkey { id, phase, mods });
         swallow |= w.swallow;
     }
-    if let Some(w) = bindings.dictation_alt.as_ref().filter(|w| &w.key == key) {
-        if w.swallow {
-            BOUND_MOD_HELD.store(phase == KeyPhase::Down, Ordering::SeqCst);
+    if bindings.cancel.as_ref() == Some(key) {
+        // Same up-edge rule as Escape for a modifier bound as the cancel key.
+        if phase == KeyPhase::Up && CANCEL_DOWN_SWALLOWED.swap(false, Ordering::SeqCst) {
+            return true;
         }
-        let _ = tx.send(PlatformEvent::Hotkey { id: HotkeyId::DictationAlt, phase });
-        swallow |= w.swallow;
-    }
-    if bindings.cancel.as_ref() == Some(key) && is_recording {
-        let _ = tx.send(PlatformEvent::Hotkey { id: HotkeyId::Cancel, phase });
-        swallow = true;
+        if is_recording && phase == KeyPhase::Down {
+            CANCEL_DOWN_SWALLOWED.store(true, Ordering::SeqCst);
+            let _ = tx.send(PlatformEvent::Hotkey {
+                id: HotkeyId::Cancel,
+                phase,
+                mods: Mods::default(),
+            });
+            swallow = true;
+        }
     }
     swallow
 }

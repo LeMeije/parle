@@ -1,10 +1,19 @@
 // Full settings surface. Every control writes through to Rust immediately.
 
-import { useEffect, useState } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { RefreshCw, Sparkles } from 'lucide-react';
 import { enable as enableAutostart, disable as disableAutostart } from '@tauri-apps/plugin-autostart';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { api, onSyncStatus } from '../api';
-import type { Settings, SyncStatus } from '../types';
+import type {
+  RefineModifier,
+  RefineOutcome,
+  RefineProvider,
+  RefineStatus,
+  RefineTrigger,
+  Settings,
+  SyncStatus,
+} from '../types';
 import { t } from '../i18n';
 import { useT } from '../i18n/useT';
 import { getLang, setLang, LANGUAGES as I18N_LANGUAGES, type Lang } from '../i18n';
@@ -135,6 +144,27 @@ const LANGUAGES: [string, string][] = [
 ];
 
 const ACCENTS = ['#2b5cff', '#e0642f', '#178a50', '#8b5cf6', '#d5382f', '#0d9aa8', '#b06a00', '#d6336c'];
+// The Refine palette leads with coral, the shipped default, so the two modes
+// read as different at a glance even before anyone customises anything.
+const REFINE_ACCENTS = ['#ff7a59', '#8b5cf6', '#178a50', '#d6336c', '#0d9aa8', '#b06a00', '#2b5cff', '#d5382f'];
+
+// The modifiers offered as a Refine trigger, with the glyph each platform
+// uses. Side-agnostic on purpose (see RefineModifier in Rust): either Shift is
+// Shift, because holding the wrong one of a pair and getting an ordinary
+// dictation is a failure with nothing on screen to explain it.
+const REFINE_MODIFIERS: [RefineModifier, string, string][] = [
+  ['shift', '\u21e7', 'Shift'],
+  ['ctrl', '\u2303', 'Ctrl'],
+  ['alt', '\u2325', 'Alt'],
+  ['cmd', '\u2318', 'Win'],
+];
+
+const REFINE_PROVIDERS: [RefineProvider, string][] = [
+  ['claude', 'settings.refine.provider.claude'],
+  ['codex', 'settings.refine.provider.codex'],
+  ['gemini', 'settings.refine.provider.gemini'],
+  ['custom', 'settings.refine.provider.custom'],
+];
 
 const IS_MAC = navigator.userAgent.includes('Mac');
 
@@ -207,7 +237,14 @@ export default function SettingsView({
   const [needsRestart, setNeedsRestart] = useState(false);
 
   const [customPicked, setCustomPicked] = useState(false);
-  const [capturing, setCapturing] = useState(false);
+  const [customPickedRefine, setCustomPickedRefine] = useState(false);
+  // Which binding the next keypress is captured into, or null.
+  const [capturing, setCapturing] = useState<null | 'dictation' | 'refine'>(null);
+  // Refine: the CLI probe and the sample run. Both spawn processes, so they
+  // are triggered by the user (and once on open), never on every keystroke.
+  const [refineStatus, setRefineStatus] = useState<RefineStatus | null>(null);
+  const [refineChecking, setRefineChecking] = useState(false);
+  const [refineTest, setRefineTest] = useState<{ running: boolean; out?: RefineOutcome; error?: string } | null>(null);
   // Clearing history is not a local action once anything is paired: `clear()`
   // writes a tombstone for EVERY unpinned row whoever authored it, and a
   // tombstone is absorbing and travels to every paired device. That is the
@@ -236,21 +273,68 @@ export default function SettingsView({
   // While listening, swallow the keypress entirely and turn it into a binding.
   useEffect(() => {
     if (!capturing) return;
+    const target = capturing;
     const onKeyDown = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
       if (e.code === 'Escape') {
-        setCapturing(false);
+        setCapturing(null);
         return;
       }
       const binding = bindingFromEvent(e);
       if (!binding) return;
-      setCapturing(false);
-      set((d) => (d.hotkeys.dictation.key = binding));
+      setCapturing(null);
+      set((d) => {
+        if (target === 'refine') d.hotkeys.refine.key = binding;
+        else d.hotkeys.dictation.key = binding;
+      });
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [capturing, s]);
+
+  const checkRefine = useCallback(() => {
+    setRefineChecking(true);
+    api
+      .refineStatus()
+      .then(setRefineStatus)
+      .catch((e) => setRefineStatus({ provider: s.refine.provider, program: null, version: null, logged_in: null, problem: String(e), voice_file_ok: null }))
+      .finally(() => setRefineChecking(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.refine.provider]);
+
+  // Probe when the panel opens and when the provider changes, but ONLY while
+  // Refine is on. The probe runs the login shell and the CLI itself, and a
+  // user who never enabled the feature should not have Parle spawning their
+  // shell profile every time they open Settings. The path and command fields
+  // re-probe on blur, not on every character; Recheck is always available.
+  const refineEnabled = s.refine.enabled;
+  useEffect(() => {
+    if (refineEnabled) checkRefine();
+    else setRefineStatus(null);
+  }, [checkRefine, refineEnabled]);
+
+  async function pickVoiceFile() {
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        directory: false,
+        title: t('settings.refine.voice.picker'),
+        filters: [{ name: t('settings.refine.voice.filter'), extensions: ['md', 'markdown', 'txt'] }],
+      });
+      if (typeof picked === 'string') set((d) => (d.refine.voice_file = picked));
+    } catch {
+      // The dialog was dismissed or is unavailable; nothing to record.
+    }
+  }
+
+  function runRefineTest() {
+    setRefineTest({ running: true });
+    api
+      .refineTest()
+      .then((out) => setRefineTest({ running: false, out }))
+      .catch((e) => setRefineTest({ running: false, error: String(e) }));
+  }
 
   // "auto" is a Windows concept; on macOS it simply means the monochrome
   // template icon, so show it as such rather than leaving the picker blank.
@@ -260,6 +344,18 @@ export default function SettingsView({
   const dictationKey = s.hotkeys.dictation.key;
   const isCustom = customPicked || !SPECIAL_KEYS.includes(dictationKey);
   const warning = SPECIAL_KEYS.includes(dictationKey) ? null : bindingWarning(dictationKey);
+  const refineKey = s.hotkeys.refine.key;
+  const isCustomRefine = customPickedRefine || !SPECIAL_KEYS.includes(refineKey);
+  const refineWarning = SPECIAL_KEYS.includes(refineKey) ? null : bindingWarning(refineKey);
+  // The same physical key cannot serve two bindings: the dictation bindings
+  // win in both listeners, and the palette chord is registered first, so a
+  // clash makes the Refine key silently dead. Say so.
+  const refineClash =
+    s.refine.enabled &&
+    s.refine.trigger === 'own_key' &&
+    (refineKey === dictationKey ||
+      (s.hotkeys.dictation_alt.enabled && refineKey === s.hotkeys.dictation_alt.key) ||
+      (s.hotkeys.history_palette.enabled && refineKey === s.hotkeys.history_palette.key));
 
   return (
     <div className="settings">
@@ -282,7 +378,7 @@ export default function SettingsView({
                 return;
               }
               setCustomPicked(false);
-              setCapturing(false);
+              setCapturing(null);
               set((d) => (d.hotkeys.dictation.key = v));
             }}
           >
@@ -297,10 +393,10 @@ export default function SettingsView({
         {isCustom && (
           <Field label={t('settings.customBinding.label')} hint={t('settings.customBinding.hint')}>
             <button
-              className={`btn key-capture ${capturing ? 'listening' : ''}`}
-              onClick={() => setCapturing(true)}
+              className={`btn key-capture ${capturing === 'dictation' ? 'listening' : ''}`}
+              onClick={() => setCapturing('dictation')}
             >
-              {capturing ? t('settings.customBinding.listening') : keyLabel(dictationKey)}
+              {capturing === 'dictation' ? t('settings.customBinding.listening') : keyLabel(dictationKey)}
             </button>
           </Field>
         )}
@@ -365,98 +461,6 @@ export default function SettingsView({
             </button>
           </div>
         )}
-      </Section>
-
-      <Section title={t('settings.section.language')}>
-        <Field label={t('settings.uiLanguage.label')} hint={t('settings.uiLanguage.hint')}>
-          <select
-            value={s.ui_language || getLang()}
-            onChange={(e) => {
-              const code = e.target.value as Lang;
-              // Applied IMMEDIATELY as well as saved, so the panel the user is
-              // looking at changes under them and they can see they picked the
-              // right one. Waiting for a reload would make it feel broken.
-              setLang(code);
-              set((d) => (d.ui_language = code));
-            }}
-          >
-            {UI_LANGUAGES.map((l) => (
-              <option key={l.code} value={l.code}>
-                {l.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label={t('settings.spokenLanguage.label')}>
-          <select value={s.language.language} onChange={(e) => set((d) => (d.language.language = e.target.value))}>
-            {LANGUAGES.map(([code, labelKey]) => (
-              <option key={code} value={code}>
-                {t(labelKey)}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label={t('settings.localeSpelling.label')} hint={t('settings.localeSpelling.hint')}>
-          <select value={s.language.locale} onChange={(e) => set((d) => (d.language.locale = e.target.value))}>
-            <option value="">{t('settings.locale.none')}</option>
-            <option value="en-AU">{t('settings.locale.enAU')}</option>
-            <option value="en-GB">{t('settings.locale.enGB')}</option>
-            <option value="en-US">{t('settings.locale.enUS')}</option>
-          </select>
-        </Field>
-        <Toggle
-          label={t('settings.applyLocaleSpelling.label')}
-          hint={t('settings.applyLocaleSpelling.hint')}
-          value={s.cleanup.locale_spelling}
-          onChange={(v) => set((d) => (d.cleanup.locale_spelling = v))}
-        />
-        <Toggle
-          label={t('settings.translate.label')}
-          hint={t('settings.translate.hint')}
-          value={s.language.translate_to_english}
-          onChange={(v) => set((d) => (d.language.translate_to_english = v))}
-        />
-      </Section>
-
-      <Section title={t('settings.section.cleanup')}>
-        <Toggle label={t('settings.smartCleanup.label')} hint={t('settings.smartCleanup.hint')} value={s.cleanup.enabled} onChange={(v) => set((d) => (d.cleanup.enabled = v))} />
-        <Toggle label={t('settings.removeFillers.label')} hint={t('settings.removeFillers.hint')} value={s.cleanup.remove_fillers} onChange={(v) => set((d) => (d.cleanup.remove_fillers = v))} />
-        <Toggle label={t('settings.removeHedges.label')} hint={t('settings.removeHedges.hint')} value={s.cleanup.remove_hedges} onChange={(v) => set((d) => (d.cleanup.remove_hedges = v))} />
-        <Toggle
-          label={t('settings.trimSelfCorrections.label')}
-          hint={t('settings.trimSelfCorrections.hint')}
-          value={s.cleanup.trim_self_corrections}
-          onChange={(v) => set((d) => (d.cleanup.trim_self_corrections = v))}
-        />
-        <Toggle label={t('settings.dictatedPunctuation.label')} hint={t('settings.dictatedPunctuation.hint')} value={s.cleanup.dictated_punctuation} onChange={(v) => set((d) => (d.cleanup.dictated_punctuation = v))} />
-        <Toggle label={t('settings.capitalise.label')} value={s.cleanup.capitalise_sentences} onChange={(v) => set((d) => (d.cleanup.capitalise_sentences = v))} />
-        <Toggle label={t('settings.terminalPunctuation.label')} value={s.cleanup.ensure_terminal_punctuation} onChange={(v) => set((d) => (d.cleanup.ensure_terminal_punctuation = v))} />
-        <Toggle label={t('settings.paragraphPause.label')} value={s.cleanup.paragraph_on_long_pause} onChange={(v) => set((d) => (d.cleanup.paragraph_on_long_pause = v))} />
-      </Section>
-
-      <Section title={t('settings.section.dictionary')}>
-        <Toggle label={t('settings.dictionary.enable')} value={s.dictionary.enabled} onChange={(v) => set((d) => (d.dictionary.enabled = v))} />
-        <Toggle label={t('settings.dictionary.bias.label')} hint={t('settings.dictionary.bias.hint')} value={s.dictionary.bias_recognition} onChange={(v) => set((d) => (d.dictionary.bias_recognition = v))} />
-        <Toggle label={t('settings.dictionary.fuzzy.label')} value={s.dictionary.fuzzy_correct} onChange={(v) => set((d) => (d.dictionary.fuzzy_correct = v))} />
-        <Toggle label={t('settings.dictionary.autoLearn.label')} hint={t('settings.dictionary.autoLearn.hint')} value={s.dictionary.auto_learn} onChange={(v) => set((d) => (d.dictionary.auto_learn = v))} />
-      </Section>
-
-      <Section title={t('settings.section.output')}>
-        <Toggle label={t('settings.insertAtCursor.label')} hint={t('settings.insertAtCursor.hint')} value={s.paste.inject} onChange={(v) => set((d) => (d.paste.inject = v))} />
-        <Toggle label={t('settings.copyToClipboard.label')} value={s.paste.copy_to_clipboard} onChange={(v) => set((d) => (d.paste.copy_to_clipboard = v))} />
-        <Toggle label={t('settings.restoreClipboard.label')} hint={t('settings.restoreClipboard.hint')} value={s.paste.restore_clipboard} onChange={(v) => set((d) => (d.paste.restore_clipboard = v))} />
-        <Field label={t('settings.restoreDelay.label')} hint={t('settings.restoreDelay.hint')}>
-          <NumberInput value={s.paste.restore_delay_ms} min={200} max={2000} step={100} suffix="ms" onChange={(v) => set((d) => (d.paste.restore_delay_ms = v))} />
-        </Field>
-        {IS_MAC && (
-          <Toggle label={t('settings.preferAxInsert.label')} hint={t('settings.preferAxInsert.hint')} value={s.paste.prefer_ax_insert} onChange={(v) => set((d) => (d.paste.prefer_ax_insert = v))} />
-        )}
-        <Toggle
-          label={t('settings.pressEnter.label')}
-          hint={t('settings.pressEnter.hint')}
-          value={s.paste.press_enter}
-          onChange={(v) => set((d) => (d.paste.press_enter = v))}
-        />
       </Section>
 
       <Section title={t('settings.section.appearance')}>
@@ -574,6 +578,367 @@ export default function SettingsView({
         </Field>
         <Toggle label={t('settings.showPartial.label')} value={s.overlay.show_partial_text} onChange={(v) => set((d) => (d.overlay.show_partial_text = v))} />
         <Toggle label={t('settings.reduceMotion.label')} hint={t('settings.reduceMotion.hint')} value={s.appearance.reduce_motion} onChange={(v) => set((d) => (d.appearance.reduce_motion = v))} />
+      </Section>
+
+      <Section title={t('settings.section.language')}>
+        <Field label={t('settings.uiLanguage.label')} hint={t('settings.uiLanguage.hint')}>
+          <select
+            value={s.ui_language || getLang()}
+            onChange={(e) => {
+              const code = e.target.value as Lang;
+              // Applied IMMEDIATELY as well as saved, so the panel the user is
+              // looking at changes under them and they can see they picked the
+              // right one. Waiting for a reload would make it feel broken.
+              setLang(code);
+              set((d) => (d.ui_language = code));
+            }}
+          >
+            {UI_LANGUAGES.map((l) => (
+              <option key={l.code} value={l.code}>
+                {l.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label={t('settings.spokenLanguage.label')}>
+          <select value={s.language.language} onChange={(e) => set((d) => (d.language.language = e.target.value))}>
+            {LANGUAGES.map(([code, labelKey]) => (
+              <option key={code} value={code}>
+                {t(labelKey)}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label={t('settings.localeSpelling.label')} hint={t('settings.localeSpelling.hint')}>
+          <select value={s.language.locale} onChange={(e) => set((d) => (d.language.locale = e.target.value))}>
+            <option value="">{t('settings.locale.none')}</option>
+            <option value="en-AU">{t('settings.locale.enAU')}</option>
+            <option value="en-GB">{t('settings.locale.enGB')}</option>
+            <option value="en-US">{t('settings.locale.enUS')}</option>
+          </select>
+        </Field>
+        <Toggle
+          label={t('settings.applyLocaleSpelling.label')}
+          hint={t('settings.applyLocaleSpelling.hint')}
+          value={s.cleanup.locale_spelling}
+          onChange={(v) => set((d) => (d.cleanup.locale_spelling = v))}
+        />
+        <Toggle
+          label={t('settings.translate.label')}
+          hint={t('settings.translate.hint')}
+          value={s.language.translate_to_english}
+          onChange={(v) => set((d) => (d.language.translate_to_english = v))}
+        />
+      </Section>
+
+      <Section title={t('settings.section.cleanup')}>
+        <Toggle label={t('settings.smartCleanup.label')} hint={t('settings.smartCleanup.hint')} value={s.cleanup.enabled} onChange={(v) => set((d) => (d.cleanup.enabled = v))} />
+        <Toggle label={t('settings.removeFillers.label')} hint={t('settings.removeFillers.hint')} value={s.cleanup.remove_fillers} onChange={(v) => set((d) => (d.cleanup.remove_fillers = v))} />
+        <Toggle label={t('settings.removeHedges.label')} hint={t('settings.removeHedges.hint')} value={s.cleanup.remove_hedges} onChange={(v) => set((d) => (d.cleanup.remove_hedges = v))} />
+        <Toggle
+          label={t('settings.trimSelfCorrections.label')}
+          hint={t('settings.trimSelfCorrections.hint')}
+          value={s.cleanup.trim_self_corrections}
+          onChange={(v) => set((d) => (d.cleanup.trim_self_corrections = v))}
+        />
+        <Toggle label={t('settings.dictatedPunctuation.label')} hint={t('settings.dictatedPunctuation.hint')} value={s.cleanup.dictated_punctuation} onChange={(v) => set((d) => (d.cleanup.dictated_punctuation = v))} />
+        <Toggle label={t('settings.capitalise.label')} value={s.cleanup.capitalise_sentences} onChange={(v) => set((d) => (d.cleanup.capitalise_sentences = v))} />
+        <Toggle label={t('settings.terminalPunctuation.label')} value={s.cleanup.ensure_terminal_punctuation} onChange={(v) => set((d) => (d.cleanup.ensure_terminal_punctuation = v))} />
+        <Toggle label={t('settings.paragraphPause.label')} value={s.cleanup.paragraph_on_long_pause} onChange={(v) => set((d) => (d.cleanup.paragraph_on_long_pause = v))} />
+      </Section>
+
+      <Section title={t('settings.section.dictionary')}>
+        <Toggle label={t('settings.dictionary.enable')} value={s.dictionary.enabled} onChange={(v) => set((d) => (d.dictionary.enabled = v))} />
+        <Toggle label={t('settings.dictionary.bias.label')} hint={t('settings.dictionary.bias.hint')} value={s.dictionary.bias_recognition} onChange={(v) => set((d) => (d.dictionary.bias_recognition = v))} />
+        <Toggle label={t('settings.dictionary.fuzzy.label')} value={s.dictionary.fuzzy_correct} onChange={(v) => set((d) => (d.dictionary.fuzzy_correct = v))} />
+        <Toggle label={t('settings.dictionary.autoLearn.label')} hint={t('settings.dictionary.autoLearn.hint')} value={s.dictionary.auto_learn} onChange={(v) => set((d) => (d.dictionary.auto_learn = v))} />
+      </Section>
+
+      <Section title={t('settings.section.output')}>
+        <Toggle label={t('settings.insertAtCursor.label')} hint={t('settings.insertAtCursor.hint')} value={s.paste.inject} onChange={(v) => set((d) => (d.paste.inject = v))} />
+        <Toggle label={t('settings.copyToClipboard.label')} value={s.paste.copy_to_clipboard} onChange={(v) => set((d) => (d.paste.copy_to_clipboard = v))} />
+        <Toggle label={t('settings.restoreClipboard.label')} hint={t('settings.restoreClipboard.hint')} value={s.paste.restore_clipboard} onChange={(v) => set((d) => (d.paste.restore_clipboard = v))} />
+        <Field label={t('settings.restoreDelay.label')} hint={t('settings.restoreDelay.hint')}>
+          <NumberInput value={s.paste.restore_delay_ms} min={200} max={2000} step={100} suffix="ms" onChange={(v) => set((d) => (d.paste.restore_delay_ms = v))} />
+        </Field>
+        {IS_MAC && (
+          <Toggle label={t('settings.preferAxInsert.label')} hint={t('settings.preferAxInsert.hint')} value={s.paste.prefer_ax_insert} onChange={(v) => set((d) => (d.paste.prefer_ax_insert = v))} />
+        )}
+        <Toggle
+          label={t('settings.pressEnter.label')}
+          hint={t('settings.pressEnter.hint')}
+          value={s.paste.press_enter}
+          onChange={(v) => set((d) => (d.paste.press_enter = v))}
+        />
+      </Section>
+
+      <Section title={t('settings.section.refine')}>
+        <Toggle
+          label={t('settings.refine.enable.label')}
+          hint={t('settings.refine.enable.hint')}
+          value={s.refine.enabled}
+          onChange={(v) => set((d) => {
+            d.refine.enabled = v;
+            // The separate binding follows BOTH the switch and the trigger.
+            // With the default modifier trigger, turning Refine on claims no
+            // new system-wide key at all: it adds a meaning to the key the
+            // user already has.
+            d.hotkeys.refine.enabled = v && d.refine.trigger === 'own_key';
+          })}
+        />
+        <Field label={t('settings.refine.provider.label')} hint={t('settings.refine.provider.hint')}>
+          <select
+            value={s.refine.provider}
+            onChange={(e) => {
+              setRefineTest(null);
+              set((d) => (d.refine.provider = e.target.value as RefineProvider));
+            }}
+          >
+            {REFINE_PROVIDERS.map(([v, k]) => (
+              <option key={v} value={v}>
+                {t(k)}
+              </option>
+            ))}
+          </select>
+        </Field>
+        {s.refine.provider === 'custom' ? (
+          <Field label={t('settings.refine.customCommand.label')} hint={t('settings.refine.customCommand.hint')}>
+            <input
+              className="wide-input mono"
+              value={s.refine.custom_command}
+              placeholder="/usr/local/bin/my-rewriter --fast"
+              onChange={(e) => set((d) => (d.refine.custom_command = e.target.value))}
+              onBlur={checkRefine}
+            />
+          </Field>
+        ) : (
+          <>
+            <Field label={t('settings.refine.programPath.label')} hint={t('settings.refine.programPath.hint')}>
+              <input
+                className="wide-input mono"
+                value={s.refine.program_path}
+                placeholder={t('settings.refine.programPath.placeholder')}
+                onChange={(e) => set((d) => (d.refine.program_path = e.target.value))}
+                onBlur={checkRefine}
+              />
+            </Field>
+            <Field label={t('settings.refine.model.label')} hint={t('settings.refine.model.hint')}>
+              <input
+                className="key-input"
+                value={s.refine.model}
+                placeholder={t('settings.refine.model.placeholder')}
+                onChange={(e) => set((d) => (d.refine.model = e.target.value))}
+              />
+            </Field>
+          </>
+        )}
+        <div className={`callout refine-status ${refineStatus?.problem ? 'warn' : ''}`}>
+          {refineChecking ? (
+            <span>{t('settings.refine.status.checking')}</span>
+          ) : !refineStatus ? (
+            <span>{t('settings.refine.status.notChecked')}</span>
+          ) : refineStatus.problem ? (
+            <span>{refineStatus.problem}</span>
+          ) : (
+            <span>
+              {t('settings.refine.status.found', { program: refineStatus.program ?? '' })}
+              {refineStatus.version ? ` · ${t('settings.refine.status.version', { version: refineStatus.version })}` : ''}
+              {refineStatus.logged_in === true ? ` · ${t('settings.refine.status.signedIn')}` : ''}
+              {refineStatus.logged_in === false ? ` · ${t('settings.refine.status.notSignedIn')}` : ''}
+            </span>
+          )}
+          {refineStatus?.voice_file_ok === false && <span> {t('settings.refine.status.voiceMissing')}</span>}
+          <button onClick={checkRefine} disabled={refineChecking}>
+            <RefreshCw size={12} /> {t('settings.refine.status.recheck')}
+          </button>
+        </div>
+        <Field label={t('settings.refine.trigger.label')} hint={t('settings.refine.trigger.hint')}>
+          <div className="seg">
+            {(['modifier', 'own_key'] as const).map((tr) => (
+              <button
+                key={tr}
+                className={s.refine.trigger === tr ? 'active' : ''}
+                onClick={() => set((d) => {
+                  d.refine.trigger = tr as RefineTrigger;
+                  // The separate binding follows the choice, so a key is never
+                  // armed system-wide for a trigger that does not use it.
+                  d.hotkeys.refine.enabled = d.refine.enabled && tr === 'own_key';
+                })}
+              >
+                {tr === 'modifier' ? t('settings.refine.trigger.modifier') : t('settings.refine.trigger.ownKey')}
+              </button>
+            ))}
+          </div>
+        </Field>
+        {s.refine.trigger === 'modifier' ? (
+          <>
+            <Field
+              label={t('settings.refine.modifier.label')}
+              hint={t('settings.refine.trigger.gestureHint', {
+                mod: modLabel(s.refine.modifier),
+                gesture: gestureVerb(s.hotkeys.dictation.mode),
+                key: keyLabel(dictationKey),
+              })}
+            >
+              <div className="seg">
+                {REFINE_MODIFIERS.map(([m, mac, win]) => (
+                  <button
+                    key={m}
+                    className={s.refine.modifier === m ? 'active' : ''}
+                    onClick={() => set((d) => (d.refine.modifier = m))}
+                  >
+                    {IS_MAC ? mac : win}
+                  </button>
+                ))}
+              </div>
+            </Field>
+            {modifierTriggerProblem(s) && (
+              <div className="callout warn">{modifierTriggerProblem(s)}</div>
+            )}
+          </>
+        ) : (
+          <>
+            <Field label={t('settings.refine.key.label')} hint={IS_MAC ? t('settings.refine.key.hintMac') : t('settings.refine.key.hintWin')}>
+              <select
+                value={isCustomRefine ? CUSTOM : refineKey}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === CUSTOM) {
+                    setCustomPickedRefine(true);
+                    return;
+                  }
+                  setCustomPickedRefine(false);
+                  setCapturing(null);
+                  set((d) => (d.hotkeys.refine.key = v));
+                }}
+              >
+                {SPECIAL_KEYS.map((k) => (
+                  <option key={k} value={k}>
+                    {keyLabel(k)}
+                  </option>
+                ))}
+                <option value={CUSTOM}>{t('settings.dictationKey.custom')}</option>
+              </select>
+            </Field>
+            {isCustomRefine && (
+              <Field label={t('settings.customBinding.label')} hint={t('settings.customBinding.hint')}>
+                <button
+                  className={`btn key-capture ${capturing === 'refine' ? 'listening' : ''}`}
+                  onClick={() => setCapturing('refine')}
+                >
+                  {capturing === 'refine' ? t('settings.customBinding.listening') : keyLabel(refineKey)}
+                </button>
+              </Field>
+            )}
+            {isCustomRefine && refineWarning && <div className="callout warn">{refineWarning}</div>}
+            {refineClash && <div className="callout warn">{t('settings.refine.key.clash')}</div>}
+            <Field label={t('settings.refine.gesture.label')} hint={t('settings.gesture.hint')}>
+              <div className="seg">
+                {(['hold', 'toggle', 'hybrid', 'double_tap'] as const).map((m) => (
+                  <button
+                    key={m}
+                    className={s.hotkeys.refine.mode === m ? 'active' : ''}
+                    onClick={() => set((d) => (d.hotkeys.refine.mode = m))}
+                  >
+                    {m === 'hold'
+                      ? t('settings.gesture.hold')
+                      : m === 'toggle'
+                        ? t('settings.gesture.toggle')
+                        : m === 'hybrid'
+                          ? t('settings.gesture.hybrid')
+                          : t('settings.gesture.doubleTap')}
+                  </button>
+                ))}
+              </div>
+            </Field>
+          </>
+        )}
+        <Field label={t('settings.refine.accent.label')} hint={t('settings.refine.accent.hint')}>
+          <div className="accent-row">
+            {REFINE_ACCENTS.map((c) => (
+              <button
+                key={c}
+                className={`accent-dot ${s.refine.accent === c ? 'active' : ''}`}
+                style={{ background: c }}
+                onClick={() => set((d) => (d.refine.accent = c))}
+              />
+            ))}
+            <label className="accent-custom" title={t('settings.accent.custom')}>
+              <input
+                type="color"
+                value={s.refine.accent}
+                onChange={(e) => set((d) => (d.refine.accent = e.target.value))}
+              />
+            </label>
+          </div>
+        </Field>
+        <Field label={t('settings.refine.rules.label')} hint={t('settings.refine.rules.hint')}>
+          <textarea
+            className="refine-rules"
+            value={s.refine.rules}
+            placeholder={t('settings.refine.rules.placeholder')}
+            onChange={(e) => set((d) => (d.refine.rules = e.target.value))}
+          />
+        </Field>
+        <Field label={t('settings.refine.voice.label')} hint={t('settings.refine.voice.hint')}>
+          <span className="voice-file">
+            {s.refine.voice_file ? (
+              <span className="voice-path mono" title={s.refine.voice_file}>
+                {s.refine.voice_file.split(/[\\/]/).pop()}
+              </span>
+            ) : null}
+            <button className="btn" onClick={pickVoiceFile}>
+              {t('settings.refine.voice.choose')}
+            </button>
+            {s.refine.voice_file && (
+              <button className="btn" onClick={() => set((d) => (d.refine.voice_file = ''))}>
+                {t('settings.refine.voice.clear')}
+              </button>
+            )}
+          </span>
+        </Field>
+        <Field label={t('settings.refine.timeout.label')} hint={t('settings.refine.timeout.hint')}>
+          <NumberInput
+            value={Math.round(s.refine.timeout_ms / 1000)}
+            min={10}
+            max={300}
+            step={10}
+            suffix="s"
+            onChange={(v) => set((d) => (d.refine.timeout_ms = v * 1000))}
+          />
+        </Field>
+        <Field label={t('settings.refine.fallback.label')} hint={t('settings.refine.fallback.hint')}>
+          <select
+            value={s.refine.fallback}
+            onChange={(e) => set((d) => (d.refine.fallback = e.target.value as Settings['refine']['fallback']))}
+          >
+            <option value="clipboard_only">{t('settings.refine.fallback.clipboard')}</option>
+            <option value="insert_transcript">{t('settings.refine.fallback.insert')}</option>
+          </select>
+        </Field>
+        <Field label={t('settings.refine.test.button')} hint={t('settings.refine.test.hint')}>
+          <button className="btn primary" style={{ '--accent': s.refine.accent } as React.CSSProperties} onClick={runRefineTest} disabled={refineTest?.running}>
+            <Sparkles size={14} /> {refineTest?.running ? t('settings.refine.test.running') : t('settings.refine.test.button')}
+          </button>
+        </Field>
+        {refineTest?.error && <div className="callout error">{refineTest.error}</div>}
+        {refineTest?.out && (
+          <div className="refine-result">
+            <small>
+              {t('settings.refine.test.result', {
+                secs: (refineTest.out.elapsed_ms / 1000).toFixed(1),
+                model: refineTest.out.model ? ` · ${refineTest.out.model}` : '',
+              })}
+            </small>
+            <p>{refineTest.out.text}</p>
+            {refineTest.out.warnings.map((w) => (
+              <small key={w} className="warn-text">
+                {w}
+              </small>
+            ))}
+          </div>
+        )}
+        <p className="faint refine-privacy">{t('settings.refine.privacy')}</p>
       </Section>
 
       <Section title={t('settings.section.historyPrivacy')}>
@@ -757,15 +1122,30 @@ function NumberInput({
   suffix: string;
   onChange: (v: number) => void;
 }) {
+  // Typed text is held locally and clamped on blur (or Enter), not on every
+  // keystroke: clamping live turned typing "180" into a field with min 150
+  // into "150" after the first two characters and then "900" once the 0
+  // landed, so a value inside the range could not be typed at all.
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = (raw: string) => {
+    const n = Number(raw);
+    setDraft(null);
+    if (!Number.isFinite(n)) return;
+    onChange(Math.min(max, Math.max(min, n)));
+  };
   return (
     <span className="number-input">
       <input
         type="number"
-        value={value}
+        value={draft ?? value}
         min={min}
         max={max}
         step={step}
-        onChange={(e) => onChange(Math.min(max, Math.max(min, Number(e.target.value))))}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={(e) => commit(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit((e.target as HTMLInputElement).value);
+        }}
       />
       <span className="suffix">{suffix}</span>
     </span>
@@ -1394,6 +1774,94 @@ function keyLabel(k: string): string {
     LeftWin: 'keys.leftWin',
   };
   return map[k] ? t(map[k]) : k;
+}
+
+/// The glyph or word for a Refine modifier, in this platform's language.
+function modLabel(m: RefineModifier): string {
+  const row = REFINE_MODIFIERS.find(([id]) => id === m);
+  if (!row) return String(m);
+  return IS_MAC ? row[1] : row[2];
+}
+
+/// How the dictation key is used, in words, so the trigger hint can describe
+/// the whole gesture ("hold Shift and then double tap the Globe key").
+function gestureVerb(mode: Settings['hotkeys']['dictation']['mode']): string {
+  switch (mode) {
+    case 'hold':
+      return t('settings.refine.trigger.verb.hold');
+    case 'toggle':
+      return t('settings.refine.trigger.verb.tap');
+    case 'double_tap':
+      return t('settings.refine.trigger.verb.doubleTap');
+    default:
+      return t('settings.refine.trigger.verb.hybrid');
+  }
+}
+
+/// Native keys the modifier trigger can work with: the platform layer only
+/// reports held modifiers for keys the NATIVE listener owns. A chord binding
+/// goes through the portable shortcut plugin, which reports nothing.
+const NATIVE_DICTATION_KEYS = new Set<string>([
+  ...Object.values(NATIVE_BY_CODE),
+  'Fn',
+  'Globe',
+  'CopilotKey',
+  'Copilot',
+]);
+
+/// Why the modifier trigger cannot work with this combination, or null.
+///
+/// Every one of these would otherwise be a trigger the user has set, that
+/// Settings shows as set, and that silently never fires: the class of defect
+/// this project has fixed four times over.
+function modifierTriggerProblem(s: Settings): string | null {
+  if (!s.refine.enabled || s.refine.trigger !== 'modifier') return null;
+  const key = s.hotkeys.dictation.key;
+  // The dictation key IS the modifier: its own press supplies the bit, so it
+  // is stripped, and only the twin key could satisfy the trigger.
+  const family = modifierFamilyOf(key);
+  if (family && family === s.refine.modifier) {
+    return t('settings.refine.trigger.clashModifier', { key: keyLabel(key), mod: modLabel(s.refine.modifier) });
+  }
+  // A chord dictation key carries its own modifiers and reports no others.
+  if (!NATIVE_DICTATION_KEYS.has(key)) {
+    return t('settings.refine.trigger.chordKey', { key: keyLabel(key) });
+  }
+  // The Copilot key sends Shift and Win itself, so those two are indistinguishable.
+  if ((key === 'CopilotKey' || key === 'Copilot') && (s.refine.modifier === 'shift' || s.refine.modifier === 'cmd')) {
+    return t('settings.refine.trigger.copilotModifier', { mod: modLabel(s.refine.modifier) });
+  }
+  return null;
+}
+
+/// Mirrors `RefineModifier::of_native_key` in Rust. Both halves have to agree
+/// or Settings warns about a combination that works, or stays quiet about one
+/// that does not.
+function modifierFamilyOf(key: string): RefineModifier | null {
+  switch (key) {
+    case 'LeftShift':
+    case 'RightShift':
+      return 'shift';
+    case 'LeftCtrl':
+    case 'LeftControl':
+    case 'RightCtrl':
+    case 'RightControl':
+      return 'ctrl';
+    case 'LeftAlt':
+    case 'LeftOption':
+    case 'RightAlt':
+    case 'RightOption':
+      return 'alt';
+    case 'LeftCmd':
+    case 'LeftCommand':
+    case 'LeftWin':
+    case 'RightCmd':
+    case 'RightCommand':
+    case 'RightWin':
+      return 'cmd';
+    default:
+      return null;
+  }
 }
 
 function chordPartLabel(part: string): string {

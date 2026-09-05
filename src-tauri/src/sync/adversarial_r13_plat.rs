@@ -508,11 +508,14 @@ fn r13_plat_withheld_is_recomputed_from_a_live_global() {
         "{rel}: store_transcription no longer consults keep_local_only; premise gone"
     );
 
-    // CONTROL: and there is more than one `Completed` site to get wrong.
+    // CONTROL: the `Completed` site exists. There used to be two (one per
+    // dictation path) and the finding was that they could disagree; the paths
+    // were merged into `deliver` with the Refine work, which is the stronger
+    // fix, and the claim below still holds against the one that remains.
     let completed_sites = code.matches("PipelineEvent::Completed {").count();
     assert!(
-        completed_sites >= 2,
-        "{rel}: expected at least two Completed emitters, found {completed_sites}"
+        completed_sites >= 1,
+        "{rel}: expected at least one Completed emitter, found {completed_sites}"
     );
 
     // THE CLAIM.

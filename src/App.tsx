@@ -5,7 +5,7 @@ import { api, onPipelineEvent } from './api';
 import { PASTE_KEYS } from './types';
 import { applyLang } from './i18n/apply';
 import DictationBar from './DictationBar';
-import type { Mark, PipelineEvent, Settings } from './types';
+import type { DictationMode, Mark, PipelineEvent, Settings } from './types';
 import { onFocusPalette } from './api';
 import { useT } from './i18n/useT';
 import HistoryView from './views/History';
@@ -25,6 +25,9 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('compose');
   const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'error' } | null>(null);
   const [recording, setRecording] = useState(false);
+  // Which key started the live take. The dictation bar and Compose take the
+  // Refine accent while a Refine take runs.
+  const [mode, setMode] = useState<DictationMode>('standard');
   // Held here, not in Compose. Marks arrive whenever the dictation bar sends
   // one, and Compose is unmounted whenever you are on another tab: keeping the
   // list in the view meant switching to Compose to check what you had pinned
@@ -43,10 +46,15 @@ export default function App() {
 
   useEffect(() => {
     reload();
-    api.pipelineState().then((st) => setRecording(st === 'recording'));
+    api.pipelineState().then((st) => {
+      setRecording(st.state === 'recording');
+      setMode(st.mode);
+    });
     const un = onPipelineEvent((e: PipelineEvent) => {
+      if (e.kind === 'mode_changed') setMode(e.mode);
       if (e.kind === 'state_changed') {
         setRecording(e.state === 'recording');
+        setMode(e.mode);
         if (e.state === 'recording') setMarks([]);
       }
       if (e.kind === 'mark_added') setMarks((m) => [...m, { at_ms: e.at_ms, text: e.text }]);
@@ -71,9 +79,13 @@ export default function App() {
             // asserted "(secure field)" on a path where the field may be known
             // ordinary and only a password manager is running.
             ? t('app.toast.pasteInstruction', { keys: PASTE_KEYS })
-            : e.injection
-              ? t('app.toast.inserted', { text: preview })
-              : t('app.toast.copied', { text: preview }),
+            : e.refined
+              ? e.injection
+                ? t('app.toast.refinedInserted', { text: preview })
+                : t('app.toast.refinedCopied', { text: preview })
+              : e.injection
+                ? t('app.toast.inserted', { text: preview })
+                : t('app.toast.copied', { text: preview }),
           'ok',
         );
       }
@@ -92,9 +104,17 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The previous toast's timer is cleared first: left running, it dismissed
+  // the NEXT toast early, which for an error following a success cut the
+  // error's six seconds down to whatever the success had left.
+  const toastTimer = useRef<number | null>(null);
   function showToast(text: string, kind: 'ok' | 'error') {
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
     setToast({ text, kind });
-    window.setTimeout(() => setToast(null), kind === 'error' ? 6000 : 2800);
+    toastTimer.current = window.setTimeout(() => {
+      toastTimer.current = null;
+      setToast(null);
+    }, kind === 'error' ? 6000 : 2800);
   }
 
   const save = useCallback(
@@ -111,8 +131,12 @@ export default function App() {
     return <Onboarding onDone={reload} />;
   }
 
+  // The Refine accent is scoped to the bar and Compose while a Refine take
+  // runs; the rest of the window keeps the ordinary accent.
+  const takeAccent = recording && mode === 'refine' ? settings.refine.accent : undefined;
+
   return (
-    <div className={`app ${recording ? 'has-bar' : ''}`}>
+    <div className={`app ${recording ? 'has-bar' : ''}`} data-dictation-mode={recording ? mode : ''}>
       <aside className="sidebar">
         <div className="brand">
           <img className="brand-mark-img" src={appIcon} alt="" draggable={false} />
@@ -144,7 +168,13 @@ export default function App() {
       <div className="stage">
         <main className={`content ${recording ? 'with-bar' : ''}`}>
           {tab === 'history' && <HistoryView />}
-          {tab === 'compose' && <ComposeView marks={marks} />}
+          {tab === 'compose' && (
+            <ComposeView
+              marks={marks}
+              refineEnabled={settings.refine.enabled}
+              refineAccent={settings.refine.accent}
+            />
+          )}
           {tab === 'dictionary' && <DictionaryView />}
           {tab === 'models' && <ModelsView />}
           {tab === 'sync' && <SyncView settings={settings} />}
@@ -156,6 +186,8 @@ export default function App() {
         marks={marks}
         originRef={recordBtnRef}
         onOpenCompose={() => setTab('compose')}
+        accent={takeAccent}
+        refine={recording && mode === 'refine'}
       />
       {toast && <div className={`toast toast-${toast.kind}`}>{toast.text}</div>}
     </div>

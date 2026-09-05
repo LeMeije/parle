@@ -151,6 +151,7 @@ fn tr(text: &str) -> TranscriptionResult {
         trimmed: Vec::new(),
         low_confidence: Vec::new(),
         cleanup_tier: 1,
+        refine: None,
     }
 }
 
@@ -327,28 +328,35 @@ fn r12_flow_the_withheld_dictation_notice_is_overwritten_by_the_next_event() {
         .match_indices("(self.sink)(PipelineEvent::Empty { reason });")
         .map(|(i, _)| i)
         .collect();
-    // THREE. Round 12 found a third store path (the empty-after-cleanup
-    // branch, which stored the raw transcript before the secrecy sample had
-    // even been taken) and routed it through the same gate, so it emits the
-    // same notice.
+    // TWO. Round 12 found a third store path (the empty-after-cleanup
+    // branch) and routed it through the same gate. The Refine work then MERGED
+    // the plain and mark-splice tails into one `deliver`, so the sites are:
+    // the empty-after-cleanup branch (which returns, and emits no Completed by
+    // design) and `deliver`, where the notice precedes Completed.
     assert_eq!(
         notice_sites.len(),
-        3,
-        "expected the withholding notice on every dictation path; found {} \
-         sites. If the paths were merged, re-point this test.",
+        2,
+        "expected the withholding notice on every store path; found {} \
+         sites. If the paths were split or merged again, re-point this test.",
         notice_sites.len()
     );
-    for at in &notice_sites {
-        let after = &pipe[*at..];
-        let completed = after
-            .find("(self.sink)(PipelineEvent::Completed {")
-            .expect("a withholding notice with no Completed after it");
-        let state_change = after.find("PipelineEvent::StateChanged").unwrap_or(usize::MAX);
-        assert!(
-            completed < state_change,
-            "Completed no longer follows the notice directly; re-check the ordering"
-        );
-    }
+    // The ordering claim is about `deliver`: its notice is followed by
+    // Completed with no state change in between, so the notice is the thing
+    // the Completed handlers have to preserve.
+    let deliver_at = pipe.find("fn deliver(").expect("anchor lost: deliver() is gone");
+    let deliver = &pipe[deliver_at..];
+    let notice_in_deliver = deliver
+        .find("(self.sink)(PipelineEvent::Empty { reason });")
+        .expect("anchor lost: deliver() no longer emits the store notice");
+    let after = &deliver[notice_in_deliver..];
+    let completed = after
+        .find("(self.sink)(PipelineEvent::Completed {")
+        .expect("a withholding notice with no Completed after it");
+    let state_change = after.find("PipelineEvent::StateChanged").unwrap_or(usize::MAX);
+    assert!(
+        completed < state_change,
+        "Completed no longer follows the notice directly; re-check the ordering"
+    );
 
     // --- 2. Hud.tsx handles 'completed' AFTER 'empty', with no guard. ---
     let empty_at = hud.find("e.kind === 'empty'").unwrap();

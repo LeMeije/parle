@@ -279,6 +279,7 @@ export default function HistoryView() {
                       {t('history.localOnly.badge')}
                     </span>
                   )}
+                  <RefineBadge item={item} />
                   {item.duration_ms != null && <span>· {(item.duration_ms / 1000).toFixed(1)}s</span>}
                   {item.model_id && <span>· {shortModel(item.model_id)}</span>}
                   {item.language && item.kind === 'transcription' && (
@@ -322,6 +323,29 @@ export default function HistoryView() {
         ))}
       </div>
     </div>
+  );
+}
+
+/// Marks a row whose text is an AI rewrite. The transcript the AI was given
+/// is the row's raw text, which "Restore raw" already brings back.
+function RefineBadge({ item }: { item: HistoryItem }) {
+  const t = useT();
+  if (item.kind !== 'transcription' || !item.meta) return null;
+  let refine: { provider?: string; model?: string | null; elapsed_ms?: number } | null = null;
+  try {
+    refine = JSON.parse(item.meta).refine ?? null;
+  } catch {
+    return null;
+  }
+  if (!refine) return null;
+  const by = refine.model || refine.provider || 'AI';
+  return (
+    <span
+      className="badge badge-refined"
+      title={t('history.refined.title', { by, secs: ((refine.elapsed_ms ?? 0) / 1000).toFixed(1) })}
+    >
+      {t('history.refined.badge')}
+    </span>
   );
 }
 

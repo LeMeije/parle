@@ -372,6 +372,7 @@ fn r12_data_clearing_history_announces_every_withheld_dictation_to_the_peer() {
         trimmed: Vec::new(),
         low_confidence: Vec::new(),
         cleanup_tier: 0,
+        refine: None,
     };
     let secret = a.lock().insert_transcription_local_only(&tr, None, None).unwrap();
     let (secret_origin, _) = a.lock().origin_and_text_for_test(secret).unwrap();

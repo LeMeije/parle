@@ -206,7 +206,7 @@ fn r15_queue_c_idle_is_gated_on_outstanding_takes_not_just_on_the_recorder() {
     // and each of them was a chance to answer "is everything quiet?" without
     // ever consulting what was still queued.
     assert_eq!(
-        p.matches("PipelineEvent::StateChanged{state:PipelineState::Idle}").count(),
+        p.matches("PipelineEvent::StateChanged{state:PipelineState::Idle,mode:DictationMode::Standard,}").count(),
         1,
         "Idle is emitted somewhere that is not `emit_idle_if_quiescent`. Every path to \
          Idle has to go through the gate, cancel included."
@@ -256,10 +256,14 @@ fn r15_queue_d_a_partial_loop_belongs_to_one_recording() {
 #[test]
 fn r15_queue_e_cancel_drops_the_marks_too() {
     let p = squashed("src-tauri/src/pipeline.rs");
+    // The take is bound to a local since 04/09/2026 (a cancel with a live
+    // recording must not also kill an EARLIER take's AI call, so `cancel`
+    // needs to know whether it found one). The claim is unchanged: the marks
+    // are cleared in the same arm that cancels the recorder.
     anchor(
         &p,
-        "pubfncancel(&self){ifletSome(rec)=self.recorder.lock().take(){rec.cancel();\
-         self.marks.lock().clear();}",
+        "pubfncancel(&self){lethad_live_recording=ifletSome(rec)=self.recorder.lock().take(){\
+         rec.cancel();self.marks.lock().clear();true}else{false};",
         "pipeline.rs cancel",
     );
 }

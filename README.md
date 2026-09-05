@@ -27,6 +27,14 @@ behind a fallback ladder that never loses a recording.
   for Enter, so you can strip the quote marks or the tracking suffix before it
   is spliced into the transcript verbatim. Compose keeps the detail: every
   insert with the audio timestamp it was pinned to.
+- **Refine mode (opt-in)**: hold Shift while using the dictation key you
+  already have, and the overlay turns coral. Speak a brain dump; instead of
+  pasting the transcript, Parle hands it to an AI command-line tool already
+  installed and signed in on your machine (Claude Code first; Codex, Gemini or
+  any command of your own) and pastes the rewrite. Your rules and an optional
+  voice file ride along. The modifier, its colour and the AI are all yours to
+  pick, or give Refine a key of its own. Off by default, and the only thing in
+  Parle that sends your words off the device. See `docs/REFINE.md`.
 - **Smart cleanup (deterministic, per-rule toggles)**: fillers, stutters,
   self-corrections ("Thursday no actually Wednesday" -> "Wednesday") with
   trimmed spans reviewable and restorable in History, dictated punctuation

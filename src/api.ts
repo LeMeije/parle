@@ -2,12 +2,15 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import type {
   DictEntry,
+  DictationMode,
   DownloadProgress,
   HistoryItem,
   LevelUpdate,
   ModelRow,
   PermissionStatus,
   PipelineEvent,
+  RefineOutcome,
+  RefineStatus,
   Settings,
   SyncStatus,
 } from './types';
@@ -54,7 +57,9 @@ export const api = {
   syncSetKinds: (dictations: boolean, clipboard: boolean) =>
     invoke<void>('sync_set_kinds', { dictations, clipboard }),
 
-  startRecording: () => invoke<void>('start_recording'),
+  startRecording: (mode: DictationMode = 'standard') => invoke<void>('start_recording', { mode }),
+  refineStatus: () => invoke<RefineStatus>('refine_status'),
+  refineTest: () => invoke<RefineOutcome>('refine_test'),
   stopRecording: () => invoke<void>('stop_recording'),
   cancelRecording: () => invoke<void>('cancel_recording'),
 
@@ -65,7 +70,7 @@ export const api = {
   setAppIcon: (iconId: string) => invoke<boolean>('set_app_icon', { iconId }),
   restartApp: () => invoke<void>('restart_app'),
   insertMark: (text: string) => invoke<number>('insert_mark', { text }),
-  pipelineState: () => invoke<'recording' | 'idle'>('pipeline_state'),
+  pipelineState: () => invoke<{ state: 'recording' | 'idle'; mode: DictationMode }>('pipeline_state'),
   openPermissionSettings: (which: string) => invoke<void>('open_permission_settings', { which }),
   listAudioDevices: () => invoke<string[]>('list_audio_devices'),
   recommendedSetup: () =>
@@ -97,6 +102,10 @@ export function onDownloadProgress(cb: (p: DownloadProgress) => void): Promise<U
 
 export function onDownloadComplete(cb: (modelId: string) => void): Promise<UnlistenFn> {
   return listen<string>('model-download-complete', (e) => cb(e.payload));
+}
+
+export function onDownloadCancelled(cb: (modelId: string) => void): Promise<UnlistenFn> {
+  return listen<string>('model-download-cancelled', (e) => cb(e.payload));
 }
 
 export function onDownloadError(cb: (message: string) => void): Promise<UnlistenFn> {

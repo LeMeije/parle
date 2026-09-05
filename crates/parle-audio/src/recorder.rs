@@ -87,7 +87,14 @@ impl Recorder {
         {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => return Err(e),
-            Err(_) => return Err(capture::CaptureError::Start("stream init timed out".into())),
+            Err(_) => {
+                // Tell the owner thread to let go if the device does finish
+                // opening later. Without this a slow CoreAudio/WASAPI start
+                // left a live microphone (indicator on) for the rest of the
+                // process, once per timed-out attempt.
+                stop_flag.store(true, Ordering::SeqCst);
+                return Err(capture::CaptureError::Start("stream init timed out".into()));
+            }
         };
 
         let result = Arc::new(Mutex::new(Some(RecordingState {

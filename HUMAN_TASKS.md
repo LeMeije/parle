@@ -27,6 +27,36 @@ using the machine):
 5. Copy a few things in different apps -> open Parle -> History: entries
    appear with the source app. Copy something from 1Password: must NOT appear.
 
+## 1a. Refine mode: verify on this Mac (~5 minutes)
+
+Added 04/09/2026, see `docs/REFINE.md`. I verified the CLI invocation live
+from a shell and the pipeline in tests; the keypress-to-rewrite loop needs a
+human at the keyboard.
+
+1. Open Parle > Settings > Refine with AI. Switch **Refine mode** on. The
+   status line should read "Found /opt/homebrew/bin/claude · version 2.1.x ·
+   signed in". If it says not found, type the path in "Path to the tool".
+2. Click **Test it**. Expect a tidy meeting note within about 10 s.
+3. Optionally fill "Your rules" (the placeholder is a starting point) and pick
+   your voice .md.
+4. Click into Notes. **Hold Shift and double-tap the Globe key** (the default
+   trigger is "hold a modifier plus your normal dictation key", so your Fn
+   double-tap still works on its own for ordinary dictation). Say a
+   deliberately messy email
+   ("um so basically tell Justin the deck is moved, no wait, it's Thursday,
+   and uh attach the pacing sheet"), release. The overlay should be coral,
+   say "Refine" under the waveform, then "Refining with Claude…" with a
+   seconds counter, then the rewritten email lands at the cursor.
+5. History: the row has a **refined** badge; "Restore raw" brings your words back.
+6. Ordinary dictation must be unchanged: double-tap Globe with no Shift and
+   check the overlay stays blue and the plain transcript is pasted.
+7. On Windows the Copilot key needs **Ctrl**, not Shift: the Copilot key sends
+   its own Shift, so Parle cannot tell yours from the keyboard's. Settings
+   warns about that combination and about a Refine modifier that is also your
+   dictation key.
+8. If a modifier fights with something you use, change it, or switch the
+   trigger to "Its own key" in Settings > Refine with AI.
+
 ## 1b. Duplicate Parle in Spotlight/Launchpad
 FIXED automatically: `scripts/install-local.sh` now deletes the build-output
 bundle after copying it to /Applications, so only one Parle is ever indexed.
@@ -49,6 +79,16 @@ Accessibility grant every time. Create one self-signed certificate:
 3. Rebuild. Grants now survive rebuilds. (Never sign with `-` / ad-hoc.)
 
 ## 3. Windows build (when you're at the G14)
+
+**04/09/2026: the Refine change touches the hook helper.** After pulling:
+`node scripts/build-hook.mjs` (rebuilds `parle-hook.exe`, whose wire protocol
+now carries the Refine key), then the usual `cargo test -p parle-core &&
+cargo test -p parle-hook && cargo test -p parle --lib` and `npm run tauri
+build`. Then check: Settings > Refine with AI finds `claude` (native installer
+puts it in `%USERPROFILE%\.local\bin`; npm puts `claude.cmd` in
+`%APPDATA%\npm`), Test it works, and the suggested `Ctrl+Shift+Space` chord
+starts a coral take. None of this has run on Windows yet.
+
 
 1. Sync/copy the repo to the Windows machine (git push to a private repo is
    simplest — no remote is configured yet; create one if you want).

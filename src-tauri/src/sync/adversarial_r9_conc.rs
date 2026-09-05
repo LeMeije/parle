@@ -171,6 +171,7 @@ fn dictation(text: &str) -> TranscriptionResult {
         trimmed: Vec::new(),
         low_confidence: Vec::new(),
         cleanup_tier: 0,
+        refine: None,
     }
 }
 

@@ -24,7 +24,7 @@
 #![cfg(target_os = "windows")]
 
 use super::{
-    HotkeyId, InjectionMethod, InjectionOutcome, NativeBindings, NativeKey, PermissionStatus,
+    HotkeyId, InjectionMethod, InjectionOutcome, Mods, NativeBindings, NativeKey, PermissionStatus,
     PlatformEvent,
 };
 use crate::hotkey_logic::KeyPhase;
@@ -268,7 +268,9 @@ impl Supervisor {
                 tracing::warn!("ignoring malformed hotkey event {frame:?}");
                 continue;
             };
-            if tx.send(PlatformEvent::Hotkey { id, phase }).is_err() {
+            // Byte 3: the modifiers held at the press, sampled in the hook.
+            let mods = Mods::from_bits(frame[3]);
+            if tx.send(PlatformEvent::Hotkey { id, phase, mods }).is_err() {
                 return Err("dispatcher gone".into());
             }
         }
@@ -474,6 +476,8 @@ fn to_wire(b: &NativeBindings) -> wire::WireBindings {
             .map_or(wire::KEY_NONE, |w| key_to_wire(&w.key)),
         dictation_alt_swallow: b.dictation_alt.as_ref().is_some_and(|w| w.swallow),
         cancel_key: b.cancel.as_ref().map_or(wire::KEY_NONE, key_to_wire),
+        refine_key: b.refine.as_ref().map_or(wire::KEY_NONE, |w| key_to_wire(&w.key)),
+        refine_swallow: b.refine.as_ref().is_some_and(|w| w.swallow),
     }
 }
 
@@ -483,6 +487,7 @@ fn hotkey_from_wire(id: u8) -> Option<HotkeyId> {
         wire::HK_DICTATION_ALT => HotkeyId::DictationAlt,
         wire::HK_CANCEL => HotkeyId::Cancel,
         wire::HK_PALETTE => HotkeyId::Palette,
+        wire::HK_REFINE => HotkeyId::Refine,
         _ => return None,
     })
 }

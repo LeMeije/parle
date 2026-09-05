@@ -135,7 +135,8 @@ fn r14_live_a_user_launch_shows_the_window_on_both_platforms() {
         .collect();
     assert!(!hides.is_empty(), "nothing hides the main window at startup any more");
     assert!(
-        code.contains("let launched_by_system = std::env::args().any(|a| a == \"--hidden\");"),
+        // `args_os`, since 04/09/2026: `args()` panics on a non-Unicode argument.
+        code.contains("let launched_by_system = std::env::args_os().any(|a| a == \"--hidden\");"),
         "the startup hide is not gated on whether the system asked for this launch, so a user \
          double-clicking the app sees the window flash up and vanish"
     );

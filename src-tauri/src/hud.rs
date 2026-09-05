@@ -135,7 +135,7 @@ pub fn sync_hud(app: &AppHandle, state: PipelineState) {
         return;
     };
     match state {
-        PipelineState::Recording | PipelineState::Transcribing => {
+        PipelineState::Recording | PipelineState::Transcribing | PipelineState::Refining => {
             let _ = hud.show();
         }
         PipelineState::Idle => {
@@ -145,8 +145,16 @@ pub fn sync_hud(app: &AppHandle, state: PipelineState) {
                 let app = app.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(hold - now));
-                    // Re-check: a new hold or a new recording may have started.
-                    if HOLD_UNTIL.load(Ordering::SeqCst) <= now_ms() {
+                    // Re-check BOTH: a new hold, and a new take. The comment
+                    // used to promise the second check and the code made only
+                    // the first, so a hotkey pressed within the two seconds
+                    // after "No speech detected" had its overlay pulled away
+                    // mid-recording, to come back only on the next state change.
+                    let busy = app
+                        .try_state::<std::sync::Arc<crate::state::AppState>>()
+                        .map(|s| s.pipeline.is_busy())
+                        .unwrap_or(false);
+                    if !busy && HOLD_UNTIL.load(Ordering::SeqCst) <= now_ms() {
                         if let Some(hud) = app.get_webview_window(HUD_LABEL) {
                             let _ = hud.hide();
                         }

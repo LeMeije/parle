@@ -30,6 +30,8 @@ export const es: Record<string, string> = {
   'app.toast.pasteInstruction': 'Copiado. Pulse {keys} para pegar',
   'app.toast.inserted': 'Insertado "{text}"',
   'app.toast.copied': 'Copiado "{text}"',
+  'app.toast.refinedInserted': 'Refinado e insertado "{text}"',
+  'app.toast.refinedCopied': 'Refinado y copiado "{text}"',
 
   // ---------- Recording overlay (HUD) ----------
   'hud.pasteInstruction': 'Copiado. Pulse {keys} para pegar',
@@ -40,6 +42,11 @@ export const es: Record<string, string> = {
   'hud.cancel': 'Cancelar (Esc)',
   'hud.deck.rec': 'REC',
   'hud.deck.proc': 'PROC',
+  'hud.deck.ai': 'IA',
+  'hud.deck.aiTag': '· IA',
+  'hud.stopAndRefine': 'Detener y refinar',
+  'hud.refining': 'Refinando con {provider}… {secs}s',
+  'hud.refineTag': 'Refinar',
 
   // ---------- History ----------
   'history.searchPlaceholder':
@@ -60,6 +67,8 @@ export const es: Record<string, string> = {
   'history.localOnly.title':
     'Parle no pudo descartar que esto fuera un campo de contraseña, así que se conserva en este dispositivo y nunca se envía a sus otros dispositivos',
   'history.fromDevice.title': 'Escrito en otro de tus dispositivos y sincronizado aquí',
+  'history.refined.badge': 'refinado',
+  'history.refined.title': 'Reescrito por {by} en {secs}s. "Restaurar original" devuelve tus propias palabras.',
   'history.action.paste': 'Pegar',
   'history.action.pasteTitle': 'Pegar en la app anterior (Enter)',
   'history.action.copy': 'Copiar',
@@ -81,6 +90,12 @@ export const es: Record<string, string> = {
   'compose.transcribing': 'Transcribiendo…',
   'compose.recording': 'grabando',
   'compose.processing': 'procesando',
+  'compose.recordingRefine': 'grabando · refinar',
+  'compose.refining': 'Refinando…',
+  'compose.refiningPill': 'refinando',
+  'compose.startRefine': 'Refinar',
+  'compose.startRefine.title': 'Dicta y la IA reescribe el texto antes de pegarlo',
+  'compose.refinedNote': 'Reescrito por la IA, insertado en el cursor y guardado en el Historial. Tus propias palabras son el texto original de esa fila.',
   'compose.markPlaceholder.recording': 'Pegue un enlace o escriba; Enter lo fija a este momento…',
   'compose.markPlaceholder.idle': 'Empiece a dictar para insertar enlaces y texto',
   'compose.insert': 'Insertar',
@@ -175,6 +190,7 @@ export const es: Record<string, string> = {
   'settings.section.cleanup': 'Limpieza',
   'settings.section.dictionary': 'Diccionario',
   'settings.section.output': 'Salida',
+  'settings.section.refine': 'Refinar con IA',
   'settings.section.appearance': 'Apariencia',
   'settings.section.historyPrivacy': 'Historial y privacidad',
   'settings.section.audio': 'Audio',
@@ -312,6 +328,83 @@ export const es: Record<string, string> = {
   'settings.pressEnter.label': 'Pulsar Enter después de insertar',
   'settings.pressEnter.hint':
     'Envía el mensaje justo después de pegar, práctico para apps de chat. Nunca se activa en campos seguros.',
+
+  // ---------- Settings: refine ----------
+  'settings.refine.enable.label': 'Modo Refinar',
+  'settings.refine.enable.hint':
+    'Una segunda forma de dictar. Habla sin orden y, en vez de pegar la transcripción, Parle se la entrega a una IA instalada en este equipo y pega su reescritura: organizada, con puntuación, lista para enviar. La transcripción se sigue copiando y guardando en el Historial. Es lo único de Parle que envía tus palabras fuera de este dispositivo, y solo ocurre cuando pulsas esta tecla.',
+  'settings.refine.provider.label': 'IA',
+  'settings.refine.provider.hint': 'Una herramienta de línea de comandos ya instalada y con sesión iniciada. Parle nunca guarda una clave de API.',
+  'settings.refine.provider.claude': 'Claude Code (claude)',
+  'settings.refine.provider.codex': 'OpenAI Codex CLI (codex)',
+  'settings.refine.provider.gemini': 'Google Gemini CLI (gemini)',
+  'settings.refine.provider.custom': 'Comando personalizado',
+  'settings.refine.programPath.label': 'Ruta de la herramienta',
+  'settings.refine.programPath.hint': 'Déjala vacía para encontrarla automáticamente. Indícala si la comprobación de abajo no lo consigue.',
+  'settings.refine.programPath.placeholder': 'auto',
+  'settings.refine.customCommand.label': 'Comando',
+  'settings.refine.customCommand.hint':
+    'La línea de comandos completa. Recibe la instrucción por la entrada estándar y debe imprimir la reescritura por la salida estándar. Sin shell: tuberías y variables se pasan como texto.',
+  'settings.refine.model.label': 'Modelo',
+  'settings.refine.model.hint': 'Se pasa a la herramienta como opción de modelo. Vacío usa el predeterminado de la herramienta.',
+  'settings.refine.model.placeholder': 'predeterminado',
+  'settings.refine.status.checking': 'Comprobando…',
+  'settings.refine.status.notChecked': 'Aún no comprobado. Activa Refinar o pulsa Comprobar de nuevo.',
+  'settings.refine.status.found': '{program} encontrado',
+  'settings.refine.status.version': 'versión {version}',
+  'settings.refine.status.signedIn': 'sesión iniciada',
+  'settings.refine.status.notSignedIn': 'sin sesión',
+  'settings.refine.status.recheck': 'Comprobar de nuevo',
+  'settings.refine.status.voiceMissing': 'El archivo de voz no se puede leer; los dictados se refinarán sin él.',
+  'settings.refine.key.label': 'Tecla Refinar',
+  'settings.refine.key.hintMac': 'Se sugiere Opción derecha. Las combinaciones como ⌥E siguen funcionando: cancelan la toma y pasan.',
+  'settings.refine.key.hintWin': 'Se sugiere una combinación. Un modificador solo dejaría de actuar como modificador mientras esté asignado.',
+  'settings.refine.key.clash': 'También es la tecla de dictado. El dictado gana, así que Refinar nunca empezaría. Elige otra tecla.',
+  'settings.refine.gesture.label': 'Gesto de Refinar',
+  'settings.refine.accent.label': 'Color de Refinar',
+  'settings.refine.accent.hint': 'La superposición y la barra de dictado toman este color mientras dura una toma de Refinar, para que siempre sepas en qué modo estás.',
+  'settings.refine.rules.label': 'Tus reglas',
+  'settings.refine.rules.hint': 'Instrucciones fijas incluidas en cada reescritura: ortografía, tono, caracteres a evitar, despedida.',
+  'settings.refine.rules.placeholder':
+    'Ortografía cuidada. Nunca uses rayas. Mantén mi primera persona. Párrafos cortos. Si parece un correo, termina solo con mi nombre, [tu nombre].',
+  'settings.refine.voice.label': 'Archivo de voz',
+  'settings.refine.voice.hint': 'Archivo Markdown opcional sobre cómo escribes. Se lee de nuevo cada vez, así que sigue editando el que ya tienes. Límite de 64 KB.',
+  'settings.refine.voice.choose': 'Elegir…',
+  'settings.refine.voice.clear': 'Quitar',
+  'settings.refine.voice.picker': 'Elegir un archivo de voz',
+  'settings.refine.voice.filter': 'Markdown o texto',
+  'settings.refine.timeout.label': 'Abandonar tras',
+  'settings.refine.timeout.hint': 'La herramienta se detiene en ese punto y se aplica la alternativa de abajo.',
+  'settings.refine.fallback.label': 'Si la IA falla',
+  'settings.refine.fallback.clipboard': 'Copiar la transcripción tal cual, sin insertarla',
+  'settings.refine.fallback.insert': 'Insertar la transcripción tal cual, como siempre',
+  'settings.refine.fallback.hint': 'Pediste Refinar porque el dictado en bruto no estaba listo para enviar, así que por defecto se queda fuera de tu documento y va al portapapeles y al Historial.',
+  'settings.refine.test.button': 'Probar',
+  'settings.refine.test.running': 'Refinando una muestra…',
+  'settings.refine.test.result': 'Reescrito en {secs}s{model}:',
+  'settings.refine.test.hint': 'Pasa un dictado de muestra fijo por todo el recorrido, exactamente como una toma real.',
+  'settings.refine.privacy':
+    'Lo que se envía: la transcripción, tus reglas y tu archivo de voz. Lo que no: el audio, el Historial, el portapapeles ni nada sobre la aplicación en la que escribes. La herramienta se ejecuta con sus propias herramientas, extensiones y archivos de proyecto desactivados, así que un dictado nunca puede convertirse en una acción.',
+
+  // ---------- Settings: refine trigger ----------
+  'settings.refine.trigger.label': 'Cómo se activa',
+  'settings.refine.trigger.hint':
+    'O mantienes una tecla modificadora mientras usas la tecla de dictado que ya tienes, o le das a Refinar una tecla propia.',
+  'settings.refine.trigger.modifier': 'Mantener un modificador',
+  'settings.refine.trigger.ownKey': 'Su propia tecla',
+  'settings.refine.modifier.label': 'Modificador',
+  'settings.refine.trigger.gestureHint':
+    'Mantén {mod} y luego {gesture} {key} igual que ahora. Mantén primero el modificador: se lee en el momento en que empieza la grabación. Sirve la de la izquierda o la de la derecha.',
+  'settings.refine.trigger.verb.hold': 'mantén',
+  'settings.refine.trigger.verb.tap': 'pulsa',
+  'settings.refine.trigger.verb.doubleTap': 'pulsa dos veces',
+  'settings.refine.trigger.verb.hybrid': 'mantén o pulsa',
+  'settings.refine.trigger.clashModifier':
+    'Tu tecla de dictado es {key}, el mismo modificador que {mod}, así que mantenerla no puede significar nada más. Elige otro modificador o dale a Refinar una tecla propia.',
+  'settings.refine.trigger.chordKey':
+    'Tu tecla de dictado es la combinación {key}. Un activador por modificador solo funciona con una tecla única, como la tecla Globo, la tecla Copilot o un modificador suelto. Dale a Refinar una tecla propia.',
+  'settings.refine.trigger.copilotModifier':
+    'La tecla Copilot envía su propio Mayús y su tecla Windows, así que Parle no puede distinguir el {mod} que mantienes tú del que envió el teclado. Usa Ctrl o Alt con la tecla Copilot.',
 
   // ---------- Settings: appearance ----------
   'settings.theme.label': 'Tema',

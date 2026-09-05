@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Check, Cpu, Download, FolderOpen, Gauge, Globe2, Target, Trash2, X } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
-import { api, onDownloadComplete, onDownloadError, onDownloadProgress } from '../api';
+import { api, onDownloadCancelled, onDownloadComplete, onDownloadError, onDownloadProgress } from '../api';
 import type { DownloadProgress, ModelRow } from '../types';
 import { useT } from '../i18n/useT';
 
@@ -69,15 +69,30 @@ export default function ModelsView() {
       });
       refresh();
     });
+    const dropRow = (id: string) =>
+      setProgress((m) => {
+        const n = { ...m };
+        delete n[id];
+        return n;
+      });
     const un3 = onDownloadError((msg) => {
       setError(msg);
-      setProgress({});
+      // Only the failed download's row. The payload is "<model_id>: <error>";
+      // wiping every row punished the downloads that were still running.
+      const id = msg.split(':')[0]?.trim();
+      if (id) dropRow(id);
+      refresh();
+    });
+    // A cancel is not an error: no callout, just the row going away.
+    const un4 = onDownloadCancelled((id) => {
+      dropRow(id);
       refresh();
     });
     return () => {
       un1.then((f) => f());
       un2.then((f) => f());
       un3.then((f) => f());
+      un4.then((f) => f());
     };
   }, [refresh]);
 

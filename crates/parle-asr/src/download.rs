@@ -74,6 +74,11 @@ pub fn download(
     let url = url_for(model);
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(20))
+        // A read timeout too. Without one a half-open connection parked the
+        // download thread for ever with the bar frozen, and since the cancel
+        // token is only checked between reads, Cancel did nothing either. The
+        // `.part` survives a timeout, so the next attempt resumes.
+        .timeout_read(std::time::Duration::from_secs(30))
         .redirects(8)
         .build();
     let mut req = agent.get(&url);
@@ -85,6 +90,20 @@ pub fn download(
     let (mut downloaded, append) = match resp.status() {
         206 => (existing, true),
         200 => (0u64, false),
+        // Range Not Satisfiable: the `.part` already holds the whole file (the
+        // process died between the last write and the rename). Finalise it if
+        // it is the right size, otherwise it is garbage and would fail this
+        // same way on every retry with nothing in the UI able to clear it.
+        416 => {
+            if plausible_size(existing, model.size_bytes) {
+                std::fs::rename(&part_path, &final_path)?;
+                return Ok(final_path);
+            }
+            let _ = std::fs::remove_file(&part_path);
+            return Err(DownloadError::Network(
+                "the partial file was unusable and has been removed; try again".into(),
+            ));
+        }
         s => return Err(DownloadError::Network(format!("unexpected status {s}"))),
     };
     let total = if append {

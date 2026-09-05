@@ -45,7 +45,7 @@ fn main() {
 mod win {
     use parle_hook::*;
     use std::io::Write;
-    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
     use std::sync::OnceLock;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
@@ -61,9 +61,10 @@ mod win {
         PROCESS_POWER_THROTTLING_STATE, PROCESS_SYNCHRONIZE, THREAD_PRIORITY_HIGHEST,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-        KEYEVENTF_KEYUP, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VIRTUAL_KEY, VK_F23, VK_LCONTROL,
-        VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
+        GetAsyncKeyState, RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_0,
+        INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
+        VIRTUAL_KEY, VK_CONTROL, VK_F23, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
+        VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
@@ -95,6 +96,18 @@ mod win {
     static BOUND_MOD_HELD: AtomicBool = AtomicBool::new(false);
     /// While true, we are mid-chord and swallowing the Copilot F23 events.
     static COPILOT_ACTIVE: AtomicBool = AtomicBool::new(false);
+    /// One bit per wire key code (1..=11): which bound modifiers are
+    /// physically down. Windows AUTO-REPEATS key-down for a held modifier,
+    /// and the comment below used to promise "forward only transitions" while
+    /// the code forwarded every repeat: in Toggle and DoubleTap modes a held
+    /// Right Ctrl flapped Start/Stop on every repeat, and in Hybrid a hold
+    /// meant to stop a latched recording stopped it and the next repeat
+    /// started a fresh one. macOS never sees repeats (FlagsChanged fires once
+    /// per edge), so the shared contract could not catch it.
+    static MOD_DOWN_BITS: AtomicU32 = AtomicU32::new(0);
+    /// The cancel key's DOWN was swallowed, so its UP is swallowed too, even
+    /// though the app clears RECORDING between the two edges.
+    static CANCEL_DOWN_SWALLOWED: AtomicBool = AtomicBool::new(false);
     /// The connected pipe, as a raw handle (HANDLE is not Sync).
     static PIPE: AtomicIsize = AtomicIsize::new(0);
 
@@ -245,7 +258,19 @@ mod win {
             if let Some((id, swallow)) = bindings.binding_for(KEY_COPILOT) {
                 if is_down && !COPILOT_ACTIVE.load(Ordering::SeqCst) {
                     COPILOT_ACTIVE.store(true, Ordering::SeqCst);
-                    send_event(id, PHASE_DOWN);
+                    // SHIFT AND WIN ARE STRIPPED on the F23 form of this key,
+                    // because the key itself sends LShift+LWin+F23: those two
+                    // bits describe the keyboard's own chord, not the user's
+                    // fingers, and there is no way to tell a user-held Shift
+                    // apart from the one the firmware just sent. So a Refine
+                    // trigger on Shift or Win cannot be combined with the
+                    // Copilot key; Ctrl and Alt can, and Settings says so.
+                    let mods = if is_copilot_f23 {
+                        mods_now() & !(MOD_BIT_SHIFT | MOD_BIT_WIN)
+                    } else {
+                        mods_now()
+                    };
+                    send_event_mods(id, PHASE_DOWN, mods);
                     if is_copilot_f23 && swallow {
                         // Mark Win as "used as modifier" so releasing it doesn't
                         // open the Start menu after we swallow F23.
@@ -282,9 +307,23 @@ mod win {
         if key != KEY_NONE {
             if let Some((id, swallow)) = bindings.binding_for(key) {
                 BOUND_MOD_HELD.store(is_down, Ordering::SeqCst);
-                // Auto-repeat suppression for held modifiers: Windows repeats
-                // key-down; forward only transitions.
-                send_event(id, phase);
+                // Forward TRANSITIONS only. A repeated key-down for a modifier
+                // that is already down is dropped (but still swallowed when the
+                // binding swallows, so no repeat leaks to the OS either).
+                let bit = 1u32 << key;
+                let was_down = MOD_DOWN_BITS.load(Ordering::SeqCst) & bit != 0;
+                if is_down {
+                    MOD_DOWN_BITS.fetch_or(bit, Ordering::SeqCst);
+                } else {
+                    MOD_DOWN_BITS.fetch_and(!bit, Ordering::SeqCst);
+                }
+                let is_transition = is_down != was_down;
+                if is_transition {
+                    // The bound key's own family removed: "Right Shift
+                    // dictates" plus "hold Shift to refine" must not make
+                    // every dictation a Refine take.
+                    send_event_mods(id, phase, mods_now() & !mod_bit_of_key(key));
+                }
                 if swallow {
                     // Swallow the bare-modifier binding completely so it stops
                     // acting as a modifier while bound (both down and up).
@@ -292,23 +331,30 @@ mod win {
                 }
                 return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
             }
-            if bindings.cancel_key == key && RECORDING.load(Ordering::SeqCst) {
-                if is_down {
-                    send_event(HK_CANCEL, PHASE_DOWN);
+            if bindings.cancel_key == key {
+                // The UP of a swallowed DOWN is always swallowed: RECORDING has
+                // been cleared by the cancel itself by the time it arrives.
+                if is_up && CANCEL_DOWN_SWALLOWED.swap(false, Ordering::SeqCst) {
+                    return LRESULT(1);
                 }
-                return LRESULT(1);
+                if is_down && RECORDING.load(Ordering::SeqCst) {
+                    CANCEL_DOWN_SWALLOWED.store(true, Ordering::SeqCst);
+                    send_event(HK_CANCEL, PHASE_DOWN);
+                    return LRESULT(1);
+                }
             }
         }
 
-        // Escape cancel (only while recording).
-        if vk == VK_ESCAPE
-            && RECORDING.load(Ordering::SeqCst)
-            && bindings.cancel_key == KEY_ESCAPE
-        {
-            if is_down {
-                send_event(HK_CANCEL, PHASE_DOWN);
+        // Escape cancel (only while recording), both edges of one press.
+        if vk == VK_ESCAPE && bindings.cancel_key == KEY_ESCAPE {
+            if is_up && CANCEL_DOWN_SWALLOWED.swap(false, Ordering::SeqCst) {
+                return LRESULT(1);
             }
-            return LRESULT(1);
+            if is_down && RECORDING.load(Ordering::SeqCst) {
+                CANCEL_DOWN_SWALLOWED.store(true, Ordering::SeqCst);
+                send_event(HK_CANCEL, PHASE_DOWN);
+                return LRESULT(1);
+            }
         }
 
         CallNextHookEx(HHOOK::default(), code, wparam, lparam)
@@ -318,8 +364,52 @@ mod win {
     /// bounded channel: never allocates, never waits, drops rather than stall
     /// the hook if the app somehow stopped draining.
     fn send_event(id: u8, phase: u8) {
+        send_event_mods(id, phase, 0);
+    }
+
+    /// The same, carrying the modifiers held at the press.
+    fn send_event_mods(id: u8, phase: u8, mods: u8) {
         if let Some(tx) = EVENT_TX.get() {
-            let _ = tx.try_send(encode_hotkey(id, phase));
+            let _ = tx.try_send(encode_hotkey(id, phase, mods));
+        }
+    }
+
+    /// Which modifiers are physically held right now.
+    ///
+    /// `GetAsyncKeyState` reads a state table: no allocation, no lock, no
+    /// blocking, which is the whole bar for anything called from this proc. It
+    /// is preferred over tracking the keys ourselves because it is also right
+    /// about a modifier that was already held when the hook armed.
+    ///
+    /// Side-agnostic VKs (`VK_SHIFT` rather than `VK_LSHIFT`), matching
+    /// `RefineModifier`: either Shift means Shift.
+    fn mods_now() -> u8 {
+        let down = |vk: VIRTUAL_KEY| unsafe { GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0 };
+        let mut bits = 0u8;
+        if down(VK_SHIFT) {
+            bits |= MOD_BIT_SHIFT;
+        }
+        if down(VK_CONTROL) {
+            bits |= MOD_BIT_CTRL;
+        }
+        if down(VK_MENU) {
+            bits |= MOD_BIT_ALT;
+        }
+        if down(VK_LWIN) || down(VK_RWIN) {
+            bits |= MOD_BIT_WIN;
+        }
+        bits
+    }
+
+    /// The modifier family a wire key belongs to, as a bit, so a modifier
+    /// bound as the dictation key does not count as a held modifier.
+    fn mod_bit_of_key(key: u8) -> u8 {
+        match key {
+            KEY_LEFT_SHIFT | KEY_RIGHT_SHIFT => MOD_BIT_SHIFT,
+            KEY_LEFT_CTRL | KEY_RIGHT_CTRL => MOD_BIT_CTRL,
+            KEY_LEFT_ALT | KEY_RIGHT_ALT => MOD_BIT_ALT,
+            KEY_LEFT_CMD | KEY_RIGHT_CMD => MOD_BIT_WIN,
+            _ => 0,
         }
     }
 

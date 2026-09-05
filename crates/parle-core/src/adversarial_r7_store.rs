@@ -45,6 +45,7 @@ fn tr(text: &str) -> TranscriptionResult {
         trimmed: vec![],
         low_confidence: vec![],
         cleanup_tier: 1,
+        refine: None,
     }
 }
 

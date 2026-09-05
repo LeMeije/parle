@@ -62,6 +62,11 @@ pub struct Settings {
     pub launch_at_login: bool,
     pub auto_update_check: bool,
     pub sync: SyncSettings,
+    /// The second dictation mode: the transcript goes to an AI CLI on this
+    /// machine and the AI's rewrite is what gets pasted. Off by default and
+    /// only ever reached through its own hotkey.
+    #[serde(default)]
+    pub refine: RefineSettings,
 }
 
 impl Default for Settings {
@@ -86,6 +91,7 @@ impl Default for Settings {
             launch_at_login: false,
             auto_update_check: true,
             sync: SyncSettings::default(),
+            refine: RefineSettings::default(),
         }
     }
 }
@@ -282,6 +288,17 @@ pub struct HotkeySettings {
     pub dictation: HotkeyBinding,
     /// Optional second binding (e.g. Copilot key on Windows alongside a chord).
     pub dictation_alt: HotkeyBinding,
+    /// Starts a REFINE dictation: same recording, but the transcript is sent
+    /// to the configured AI and the rewrite is what gets pasted.
+    ///
+    /// Only used when `refine.trigger` is `OwnKey`. The default trigger holds
+    /// a modifier while using the ordinary dictation key instead, so this
+    /// binding is never armed unless the user asks for a separate key.
+    ///
+    /// The key carries a platform suggestion so choosing that option gives a
+    /// working binding at once.
+    #[serde(default = "default_refine_binding")]
+    pub refine: HotkeyBinding,
     /// Opens the history palette.
     pub history_palette: HotkeyBinding,
     /// Cancel current recording without injecting.
@@ -304,6 +321,7 @@ impl Default for HotkeySettings {
                 enabled: true,
             },
             dictation_alt: HotkeyBinding::default(),
+            refine: default_refine_binding(),
             history_palette: HotkeyBinding {
                 key: default_palette_key().into(),
                 mode: HotkeyMode::Toggle,
@@ -324,6 +342,198 @@ fn default_dictation_key() -> &'static str {
     { "Fn" }
     #[cfg(not(target_os = "macos"))]
     { "RightCtrl" }
+}
+
+/// The suggested Refine key.
+///
+/// macOS: the right Option key. It is a bare modifier the native listener
+/// owns, so it works with Hold/Hybrid exactly like Fn does, and a chord such as
+/// Option+E still reaches the OS: the tap swallows only the modifier's own
+/// FlagsChanged event, the keydown that follows carries the hardware flag and
+/// triggers the gesture abort. Right Command was the other candidate and is
+/// used far more (Cmd+Space, Cmd+Tab by right-handed users).
+///
+/// Windows: a CHORD, deliberately, not a bare modifier. A low-level hook that
+/// swallows a modifier's key-down stops the OS from registering the modifier at
+/// all, so Right Shift bound bare would break every capital typed with it, and
+/// Right Alt is AltGr on French and many other layouts. Ctrl+Shift+Space is
+/// free of system meaning and goes through the global-shortcut plugin, which
+/// delivers press and release so Hold still works.
+fn default_refine_key() -> &'static str {
+    #[cfg(target_os = "macos")]
+    { "RightAlt" }
+    #[cfg(not(target_os = "macos"))]
+    { "Ctrl+Shift+Space" }
+}
+
+fn default_refine_binding() -> HotkeyBinding {
+    HotkeyBinding { key: default_refine_key().into(), mode: HotkeyMode::Hybrid, enabled: false }
+}
+
+/// Which AI runs the rewrite. Every provider is a COMMAND-LINE tool already
+/// installed and logged in on this machine; Parle never holds an API key and
+/// never talks to a network itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RefineProvider {
+    /// Claude Code (`claude -p`). The reference provider: the invocation is
+    /// verified, the JSON result is parsed, and tools, hooks, MCP servers and
+    /// CLAUDE.md discovery are all switched off for the call.
+    #[default]
+    Claude,
+    /// OpenAI Codex CLI (`codex exec`). Best effort: prompt on stdin, answer on
+    /// stdout.
+    Codex,
+    /// Google Gemini CLI (`gemini -p`). Best effort, same contract.
+    Gemini,
+    /// Any command the user names. Receives the whole prompt on stdin and must
+    /// print the rewrite on stdout. This is how a DeepSeek, Grok or local
+    /// model wrapper plugs in.
+    Custom,
+}
+
+impl RefineProvider {
+    /// The executable this provider is looked up as.
+    pub fn default_program(self) -> &'static str {
+        match self {
+            RefineProvider::Claude => "claude",
+            RefineProvider::Codex => "codex",
+            RefineProvider::Gemini => "gemini",
+            RefineProvider::Custom => "",
+        }
+    }
+}
+
+/// How a Refine take is STARTED.
+///
+/// `Modifier` is the default because it is one shortcut rather than two: the
+/// user keeps the dictation key they already have (a Copilot key, a double
+/// tapped Globe) and holds one extra finger down to send that take to the AI.
+/// A second key has to be found, remembered, and kept clear of everything
+/// else on the machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RefineTrigger {
+    /// Hold `RefineSettings::modifier` while using the ORDINARY dictation key,
+    /// in whatever gesture that key already uses.
+    #[default]
+    Modifier,
+    /// A separate binding of its own (`hotkeys.refine`).
+    OwnKey,
+}
+
+/// The modifier held to turn a dictation into a Refine take.
+///
+/// SIDE-AGNOSTIC on purpose: either Shift means Shift. Discriminating left
+/// from right would let someone bind a modifier whose twin does nothing, and
+/// the failure is silent (you hold the wrong one and get an ordinary
+/// dictation, with no way to tell why). "Hold Shift" is also how people
+/// describe the gesture out loud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RefineModifier {
+    #[default]
+    Shift,
+    Ctrl,
+    /// Option on macOS, Alt on Windows.
+    Alt,
+    /// Command on macOS, Windows key on Windows.
+    Cmd,
+}
+
+impl RefineModifier {
+    /// The modifier family a NATIVE key belongs to, so a modifier bound as the
+    /// dictation key can be told apart from the same modifier held as the
+    /// Refine trigger. Anything that is not a modifier answers `None`.
+    pub fn of_native_key(key: &str) -> Option<Self> {
+        Some(match key {
+            "LeftShift" | "RightShift" => RefineModifier::Shift,
+            "LeftCtrl" | "LeftControl" | "RightCtrl" | "RightControl" => RefineModifier::Ctrl,
+            "LeftAlt" | "LeftOption" | "RightAlt" | "RightOption" => RefineModifier::Alt,
+            "LeftCmd" | "LeftCommand" | "LeftWin" | "RightCmd" | "RightCommand" | "RightWin" => {
+                RefineModifier::Cmd
+            }
+            _ => return None,
+        })
+    }
+}
+
+/// What happens to the dictation when the AI cannot answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefineFallback {
+    /// Copy the plain transcript to the clipboard and keep it in History, but
+    /// do not insert it. The user pressed Refine BECAUSE the raw dictation was
+    /// not fit to send, so landing it in their email unasked is the wrong
+    /// default.
+    ClipboardOnly,
+    /// Behave exactly like an ordinary dictation: insert the plain transcript.
+    InsertTranscript,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RefineSettings {
+    /// Master switch. Off, the Refine hotkey is never registered and nothing
+    /// is ever sent anywhere, which keeps the app's "nothing leaves this
+    /// machine" promise intact until the user opts out of it deliberately.
+    pub enabled: bool,
+    /// Modifier-plus-dictation-key, or its own key.
+    #[serde(default)]
+    pub trigger: RefineTrigger,
+    /// Which modifier, when `trigger` is `Modifier`.
+    #[serde(default)]
+    pub modifier: RefineModifier,
+    pub provider: RefineProvider,
+    /// Explicit path to the CLI. Empty means "find it": a GUI app launched
+    /// from the Finder or the Start menu has a PATH with none of the places a
+    /// developer tool installs to, so the app searches the usual ones and asks
+    /// the login shell as a last resort.
+    pub program_path: String,
+    /// Custom provider only: the full command line (program plus arguments,
+    /// shell-style quoting, no shell). Ignored for the built-in providers.
+    pub custom_command: String,
+    /// Model override handed to the CLI (`--model`). Empty means the CLI's
+    /// own default.
+    pub model: String,
+    /// The user's standing instructions, baked into every prompt: spelling,
+    /// tone, banned characters, sign-off. Plain text.
+    pub rules: String,
+    /// Optional Markdown file describing the user's voice, read at run time
+    /// and appended to the prompt. Kept as a path rather than copied, so the
+    /// user can keep editing the file they already maintain.
+    pub voice_file: String,
+    /// Hard deadline for the CLI, in milliseconds. On expiry the process is
+    /// killed and `fallback` decides what happens to the transcript.
+    pub timeout_ms: u64,
+    pub fallback: RefineFallback,
+    /// Accent colour for the overlay and the dictation bar while a Refine
+    /// take is running, so the two modes are never mistaken for each other.
+    /// Coral by default; the user picks freely, as with the main accent.
+    pub accent: String,
+}
+
+pub fn default_refine_accent() -> &'static str {
+    "#ff7a59"
+}
+
+impl Default for RefineSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trigger: RefineTrigger::default(),
+            modifier: RefineModifier::default(),
+            provider: RefineProvider::Claude,
+            program_path: String::new(),
+            custom_command: String::new(),
+            model: String::new(),
+            rules: String::new(),
+            voice_file: String::new(),
+            timeout_ms: 90_000,
+            fallback: RefineFallback::ClipboardOnly,
+            accent: default_refine_accent().into(),
+        }
+    }
 }
 
 /// The history-palette chord.
@@ -647,10 +857,16 @@ impl Settings {
         // is not gated on having been offered once, the way the excluded-apps
         // union is: that guards a real choice, and there is no choice to guard
         // in a value that cannot work.
-        for b in [&mut self.hotkeys.history_palette, &mut self.hotkeys.dictation_alt] {
+        for (b, fallback) in [
+            (&mut self.hotkeys.history_palette, default_palette_key()),
+            (&mut self.hotkeys.dictation_alt, default_palette_key()),
+            // Its OWN default, not the palette chord: resetting a dead Refine
+            // key to the palette chord would make one keystroke do two things.
+            (&mut self.hotkeys.refine, default_refine_key()),
+        ] {
             if is_unregisterable_chord(&b.key) {
                 changed = true;
-                let was = std::mem::replace(&mut b.key, default_palette_key().into());
+                let was = std::mem::replace(&mut b.key, fallback.into());
                 tracing::warn!(
                     "'{was}' cannot be registered as a global shortcut (Fn is not a chord \
                      modifier); reset to '{}'",
@@ -889,6 +1105,112 @@ mod tests {
     use super::*;
 
     // ---- the history-palette chord ----
+
+    // ---- Refine ----
+
+    #[test]
+    fn refine_is_off_by_default_and_sends_nothing_anywhere() {
+        let s = Settings::default();
+        assert!(!s.refine.enabled, "the AI mode must be an opt-in");
+        assert!(!s.hotkeys.refine.enabled, "no Refine key is armed until the user turns it on");
+        assert_eq!(s.refine.provider, RefineProvider::Claude);
+        assert_eq!(s.refine.fallback, RefineFallback::ClipboardOnly);
+        assert_eq!(s.refine.accent, default_refine_accent());
+    }
+
+    #[test]
+    fn the_default_trigger_is_a_modifier_on_the_dictation_key() {
+        let s = Settings::default();
+        assert_eq!(s.refine.trigger, RefineTrigger::Modifier);
+        assert_eq!(s.refine.modifier, RefineModifier::Shift);
+        // And the separate key is NOT armed, so the default costs no second
+        // system-wide binding at all.
+        assert!(!s.hotkeys.refine.enabled);
+    }
+
+    #[test]
+    fn a_modifier_bound_as_the_dictation_key_is_recognised_as_that_family() {
+        // The gesture cannot work if the dictation key IS the trigger
+        // modifier, and this is how the UI and the mode decision tell.
+        assert_eq!(RefineModifier::of_native_key("LeftShift"), Some(RefineModifier::Shift));
+        assert_eq!(RefineModifier::of_native_key("RightShift"), Some(RefineModifier::Shift));
+        assert_eq!(RefineModifier::of_native_key("RightOption"), Some(RefineModifier::Alt));
+        assert_eq!(RefineModifier::of_native_key("RightWin"), Some(RefineModifier::Cmd));
+        assert_eq!(RefineModifier::of_native_key("RightCtrl"), Some(RefineModifier::Ctrl));
+        // Not modifiers: the two keys people actually dictate with.
+        assert_eq!(RefineModifier::of_native_key("Fn"), None);
+        assert_eq!(RefineModifier::of_native_key("CopilotKey"), None);
+    }
+
+    #[test]
+    fn a_settings_file_from_before_the_trigger_existed_takes_the_modifier_default() {
+        // The first Refine build shipped with a separate key and no trigger
+        // field. An absent field must land on the new default rather than on
+        // whatever `OwnKey` would imply, because the separate key it would
+        // point at is disabled in those files.
+        let json = r#"{"version":2,"refine":{"enabled":true,"provider":"claude","timeout_ms":90000}}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!(s.refine.enabled);
+        assert_eq!(s.refine.trigger, RefineTrigger::Modifier);
+        assert_eq!(s.refine.modifier, RefineModifier::Shift);
+    }
+
+    #[test]
+    fn refine_key_suggestion_is_usable_and_distinct_from_the_dictation_key() {
+        let s = Settings::default();
+        let k = &s.hotkeys.refine.key;
+        assert!(!k.is_empty(), "switching Refine on must give a working key at once");
+        assert!(!is_unregisterable_chord(k));
+        assert_ne!(k, &s.hotkeys.dictation.key, "the two modes must be distinguishable at the keypress");
+        assert_ne!(k, &s.hotkeys.history_palette.key);
+    }
+
+    #[test]
+    fn a_settings_file_from_before_refine_loads_with_refine_defaults() {
+        // An older build's file has neither key. Both must fill from their own
+        // defaults rather than from `Settings::default()` blanks.
+        let json = r#"{"version":2,"onboarding_complete":true,"hotkeys":{"dictation":{"key":"Fn","mode":"hybrid","enabled":true}}}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!(!s.refine.enabled);
+        assert_eq!(s.refine.timeout_ms, 90_000);
+        assert_eq!(s.hotkeys.refine.key, default_refine_key());
+        assert!(!s.hotkeys.refine.enabled);
+    }
+
+    #[test]
+    fn a_dead_fn_chord_on_the_refine_key_resets_to_the_refine_default_not_the_palette() {
+        let mut s = Settings::default();
+        s.hotkeys.refine.key = "Fn+R".into();
+        assert!(s.migrate());
+        assert_eq!(s.hotkeys.refine.key, default_refine_key());
+        assert_ne!(s.hotkeys.refine.key, s.hotkeys.history_palette.key);
+    }
+
+    #[test]
+    fn refine_settings_round_trip_every_field() {
+        let mut s = Settings::default();
+        s.refine.enabled = true;
+        s.refine.provider = RefineProvider::Custom;
+        s.refine.custom_command = "/usr/local/bin/mywrapper --fast".into();
+        s.refine.rules = "No em dashes. Australian spelling.".into();
+        s.refine.voice_file = "/Users/me/voice.md".into();
+        s.refine.model = "sonnet".into();
+        s.refine.accent = "#123456".into();
+        s.refine.trigger = RefineTrigger::OwnKey;
+        s.refine.modifier = RefineModifier::Ctrl;
+        s.refine.fallback = RefineFallback::InsertTranscript;
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(back.refine.enabled);
+        assert_eq!(back.refine.provider, RefineProvider::Custom);
+        assert_eq!(back.refine.custom_command, s.refine.custom_command);
+        assert_eq!(back.refine.rules, s.refine.rules);
+        assert_eq!(back.refine.voice_file, s.refine.voice_file);
+        assert_eq!(back.refine.model, "sonnet");
+        assert_eq!(back.refine.accent, "#123456");
+        assert_eq!(back.refine.trigger, RefineTrigger::OwnKey);
+        assert_eq!(back.refine.modifier, RefineModifier::Ctrl);
+        assert_eq!(back.refine.fallback, RefineFallback::InsertTranscript);
+    }
 
     #[test]
     fn the_palette_default_is_registerable_and_not_paste_and_match_style() {

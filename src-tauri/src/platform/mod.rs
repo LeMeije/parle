@@ -3,6 +3,7 @@
 //! frontmost-app lookup, and permission checks.
 
 use crate::hotkey_logic::KeyPhase;
+use parle_core::settings::RefineModifier;
 use serde::Serialize;
 
 #[cfg(target_os = "macos")]
@@ -22,13 +23,75 @@ pub use windows as imp;
 pub enum HotkeyId {
     Dictation,
     DictationAlt,
+    /// Starts a Refine take: the transcript goes to the AI, the rewrite is
+    /// what gets pasted.
+    Refine,
     Cancel,
     Palette,
 }
 
+/// Which modifiers were held at the instant a hotkey event was generated.
+///
+/// SAMPLED FROM THE EVENT ITSELF, once, and carried with it. The alternative
+/// is asking the OS "is Shift down?" later, on another thread, after the
+/// dispatcher and the gesture machine have had their turn, and this repo has a
+/// rule about that written in blood: a decision that reads its input twice is
+/// a decision that can disagree with itself. Here the two answers would be
+/// "this take goes to the AI" and "this take does not".
+///
+/// Side-agnostic, matching `RefineModifier`: either Shift is Shift.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Mods {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub cmd: bool,
+}
+
+impl Mods {
+    pub fn has(self, m: RefineModifier) -> bool {
+        match m {
+            RefineModifier::Shift => self.shift,
+            RefineModifier::Ctrl => self.ctrl,
+            RefineModifier::Alt => self.alt,
+            RefineModifier::Cmd => self.cmd,
+        }
+    }
+
+    /// Drop one family's bit.
+    ///
+    /// A modifier bound AS the dictation key contributes its own bit to the
+    /// event that presses it, so "Right Option dictates" plus "hold Option to
+    /// refine" would make every ordinary dictation a Refine take. The key's
+    /// own contribution is removed before anything reads these.
+    pub fn without(mut self, m: RefineModifier) -> Self {
+        match m {
+            RefineModifier::Shift => self.shift = false,
+            RefineModifier::Ctrl => self.ctrl = false,
+            RefineModifier::Alt => self.alt = false,
+            RefineModifier::Cmd => self.cmd = false,
+        }
+        self
+    }
+
+    /// Pack into one byte for the Windows helper's event frame.
+    pub fn to_bits(self) -> u8 {
+        (self.shift as u8) | (self.ctrl as u8) << 1 | (self.alt as u8) << 2 | (self.cmd as u8) << 3
+    }
+
+    pub fn from_bits(b: u8) -> Self {
+        Self {
+            shift: b & 1 != 0,
+            ctrl: b & 2 != 0,
+            alt: b & 4 != 0,
+            cmd: b & 8 != 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PlatformEvent {
-    Hotkey { id: HotkeyId, phase: KeyPhase },
+    Hotkey { id: HotkeyId, phase: KeyPhase, mods: Mods },
     /// A non-bound key went down while a bound modifier was held: the user is
     /// using the modifier normally (Fn+C, Fn+arrow). Abort any hold gesture.
     AbortGesture,
@@ -57,6 +120,18 @@ pub enum NativeKey {
 }
 
 impl NativeKey {
+    /// The modifier family this key belongs to, if it is a modifier. Used to
+    /// strip a bound key's own contribution from `Mods`.
+    pub fn mod_family(&self) -> Option<RefineModifier> {
+        Some(match self {
+            NativeKey::LeftShift | NativeKey::RightShift => RefineModifier::Shift,
+            NativeKey::LeftCtrl | NativeKey::RightCtrl => RefineModifier::Ctrl,
+            NativeKey::LeftAlt | NativeKey::RightAlt => RefineModifier::Alt,
+            NativeKey::LeftCmd | NativeKey::RightCmd => RefineModifier::Cmd,
+            NativeKey::Fn | NativeKey::CopilotKey | NativeKey::Escape => return None,
+        })
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "Fn" | "Globe" => Some(Self::Fn),
@@ -88,6 +163,7 @@ pub struct WatchedKey {
 pub struct NativeBindings {
     pub dictation: Option<WatchedKey>,
     pub dictation_alt: Option<WatchedKey>,
+    pub refine: Option<WatchedKey>,
     /// Cancel key (consumed only while recording).
     pub cancel: Option<NativeKey>,
 }
