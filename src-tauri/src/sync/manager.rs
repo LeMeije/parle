@@ -1708,7 +1708,15 @@ impl SyncManager {
                 Err(e) => tracing::warn!("sync: could not start a manual dial thread: {e}"),
             }
         }
-        tracing::info!("sync: manual sync started {started} exchange(s)");
+        // Not "manual": the 20 s tick comes through here too, and with no peer
+        // on the network it logged this line at INFO three times a minute for
+        // as long as the app ran, burying the lines worth reading. An exchange
+        // that started is news; nobody to talk to is not.
+        if started > 0 {
+            tracing::info!("sync: started {started} exchange(s)");
+        } else {
+            tracing::debug!("sync: no paired device reachable; nothing to exchange");
+        }
         started
     }
 

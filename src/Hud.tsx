@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, onLevel, onPartial, onPipelineEvent } from './api';
 import { PASTE_KEYS } from './types';
 import { applyLang } from './i18n/apply';
-import type { Settings } from './types';
+import type { DictationMode, PipelineState, Settings } from './types';
 import { useT } from './i18n/useT';
 import './hud.css';
 
@@ -25,7 +25,14 @@ const REEL_CUTS = [
 
 export default function Hud() {
   const t = useT();
-  const [state, setState] = useState<'recording' | 'transcribing' | 'idle'>('idle');
+  const [state, setState] = useState<PipelineState>('idle');
+  // Which key started the take. Drives the accent: a Refine take is coloured
+  // with its own accent so the two modes are never mistaken for each other at
+  // the moment it matters, which is while you are still speaking.
+  const [mode, setMode] = useState<DictationMode>('standard');
+  // Seconds spent waiting on the AI, ticked locally: no level events arrive
+  // once the microphone has closed, so the recording clock would sit still.
+  const [refineSecs, setRefineSecs] = useState(0);
   const [partial, setPartial] = useState('');
   const [outcome, setOutcome] = useState<{ text: string; kind: 'ok' | 'error' } | null>(null);
   const [elapsed, setElapsed] = useState(0);
@@ -42,8 +49,11 @@ export default function Hud() {
   useEffect(() => {
     api.getSettings().then((s) => { applyTheme(s); applyLang(s); return s; }).then(setSettings).catch(() => {});
     const un1 = onPipelineEvent((e) => {
+      if (e.kind === 'mode_changed') setMode(e.mode);
       if (e.kind === 'state_changed') {
-        setState(e.state === 'idle' ? 'idle' : e.state);
+        setState(e.state);
+        setMode(e.mode);
+        if (e.state === 'refining') setRefineSecs(0);
         if (e.state === 'recording') {
           setPartial('');
           setOutcome(null);
@@ -111,8 +121,28 @@ export default function Hud() {
     };
   }, []);
 
+  // The accent follows the MODE, not just the theme: while a Refine take runs
+  // every accent-driven surface (stop disc, waveform, spinner) takes the
+  // Refine colour, and the ordinary accent comes back the moment it ends.
+  useEffect(() => {
+    if (!settings) return;
+    const accent = mode === 'refine' && state !== 'idle' ? settings.refine.accent : settings.appearance.accent;
+    document.documentElement.style.setProperty('--accent', accent);
+    document.documentElement.dataset.dictationMode = state === 'idle' ? '' : mode;
+  }, [mode, state, settings]);
+
+  useEffect(() => {
+    if (state !== 'refining') return;
+    const id = window.setInterval(() => setRefineSecs((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [state]);
+
   const style = settings?.overlay.style ?? 'pill';
   const isDeck = style === 'cassette' || style === 'metal';
+  const refining = state === 'refining';
+  const busyLabel = refining
+    ? t('hud.refining', { provider: providerName(settings?.refine.provider), secs: refineSecs })
+    : t('hud.transcribing');
   const showPartial = settings?.overlay.show_partial_text ?? true;
   const mm = Math.floor(elapsed / 60000);
   const ss = Math.floor((elapsed % 60000) / 1000);
@@ -134,11 +164,11 @@ export default function Hud() {
       {style === 'minimal' ? (
         <div
           className="hud-min-inner"
-          title={state === 'recording' ? t('hud.recordingClickToStop') : t('hud.transcribing')}
+          title={state === 'recording' ? t('hud.recordingClickToStop') : busyLabel}
           onClick={() => (state === 'recording' ? api.stopRecording() : undefined)}
         >
-          {state === 'transcribing' ? <Spinner /> : <span className="hud-dot" />}
-          <span className="hud-time">{time}</span>
+          {state === 'recording' ? <span className="hud-dot" /> : <Spinner />}
+          <span className="hud-time">{refining ? fmtSecs(refineSecs) : time}</span>
           <button className="hud-cancel" title={t('hud.cancel')} onClick={(e) => { e.stopPropagation(); api.cancelRecording(); }}>
             ✕
           </button>
@@ -147,28 +177,39 @@ export default function Hud() {
         <Deck
           variant={style === 'metal' ? 'metal' : 'cassette'}
           recording={state === 'recording'}
+          refining={refining}
+          refineMode={mode === 'refine'}
           envelope={envelopeRef.current}
-          time={time}
+          time={refining ? fmtSecs(refineSecs) : time}
         />
       ) : (
         <>
           <button
             className="hud-stop"
-            title={state === 'recording' ? t('hud.stopAndPaste') : t('hud.working')}
+            title={
+              state === 'recording'
+                ? mode === 'refine'
+                  ? t('hud.stopAndRefine')
+                  : t('hud.stopAndPaste')
+                : t('hud.working')
+            }
             onClick={() => (state === 'recording' ? api.stopRecording() : undefined)}
           >
-            {state === 'transcribing' ? <Spinner /> : <span className="hud-dot" />}
+            {state === 'recording' ? <span className="hud-dot" /> : <Spinner />}
           </button>
           <div className="hud-center">
-            {state === 'transcribing' ? (
-              <span className="hud-status">{t('hud.transcribing')}</span>
-            ) : (
+            {state === 'recording' ? (
               <Waveform bars={barsRef.current} />
+            ) : (
+              <span className="hud-status">{busyLabel}</span>
             )}
-            {showPartial && partial && <div className="hud-partial">{partial}</div>}
+            {mode === 'refine' && state === 'recording' && (
+              <div className="hud-partial hud-mode-tag">{t('hud.refineTag')}</div>
+            )}
+            {showPartial && partial && state !== 'refining' && <div className="hud-partial">{partial}</div>}
           </div>
           <div className="hud-right">
-            <span className="hud-time">{time}</span>
+            <span className="hud-time">{refining ? fmtSecs(refineSecs) : time}</span>
             <button className="hud-cancel" title={t('hud.cancel')} onClick={() => api.cancelRecording()}>
               ✕
             </button>
@@ -199,11 +240,17 @@ function Spinner() {
 function Deck({
   variant,
   recording,
+  refining,
+  refineMode,
   envelope,
   time,
 }: {
   variant: 'cassette' | 'metal';
   recording: boolean;
+  refining: boolean;
+  /// The take will go to the AI. The decks are fixed-colour objects, so the
+  /// mode shows in the label rather than in a tint.
+  refineMode: boolean;
   envelope: number;
   time: string;
 }) {
@@ -238,7 +285,9 @@ function Deck({
           })}
         </div>
         <div className={`deck-label${recording ? '' : ' working'}`}>
-          {recording ? t('hud.deck.rec') : t('hud.deck.proc')} <span className="deck-time">{time}</span>
+          {refining ? t('hud.deck.ai') : recording ? t('hud.deck.rec') : t('hud.deck.proc')}
+          {refineMode && !refining && <span className="deck-ai"> {t('hud.deck.aiTag')}</span>}{' '}
+          <span className="deck-time">{time}</span>
         </div>
       </div>
       <Reel variant={variant} spinning={recording} rewinding={!recording} slow />
@@ -289,6 +338,27 @@ function Reel({
       {!paper && <circle cx="20" cy="20" r="2.5" fill="#ff6a1f" />}
     </svg>
   );
+}
+
+function fmtSecs(secs: number): string {
+  const mm = Math.floor(secs / 60);
+  const ss = secs % 60;
+  return `${mm}:${ss.toString().padStart(2, '0')}`;
+}
+
+/// The name shown while waiting on the AI. Falls back to a neutral word for a
+/// custom command, whose program name would mean nothing on screen.
+function providerName(p: string | undefined): string {
+  switch (p) {
+    case 'claude':
+      return 'Claude';
+    case 'codex':
+      return 'Codex';
+    case 'gemini':
+      return 'Gemini';
+    default:
+      return 'AI';
+  }
 }
 
 function applyTheme(s: Settings): Settings {

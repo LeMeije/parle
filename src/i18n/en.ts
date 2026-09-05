@@ -30,6 +30,8 @@ export const en: Record<string, string> = {
   'app.toast.pasteInstruction': 'Copied. Press {keys} to paste',
   'app.toast.inserted': 'Inserted "{text}"',
   'app.toast.copied': 'Copied "{text}"',
+  'app.toast.refinedInserted': 'Refined and inserted "{text}"',
+  'app.toast.refinedCopied': 'Refined and copied "{text}"',
 
   // ---------- Recording overlay (HUD) ----------
   'hud.pasteInstruction': 'Copied. Press {keys} to paste',
@@ -38,8 +40,13 @@ export const en: Record<string, string> = {
   'hud.stopAndPaste': 'Stop and paste',
   'hud.working': 'Working…',
   'hud.cancel': 'Cancel (Esc)',
+  'hud.stopAndRefine': 'Stop and refine',
+  'hud.refining': 'Refining with {provider}… {secs}s',
+  'hud.refineTag': 'Refine',
   'hud.deck.rec': 'REC',
   'hud.deck.proc': 'PROC',
+  'hud.deck.ai': 'AI',
+  'hud.deck.aiTag': '· AI',
 
   // ---------- History ----------
   'history.searchPlaceholder': 'Search transcriptions and clipboard…  (↑↓ · Enter pastes · {copyKeys} copies)',
@@ -58,6 +65,8 @@ export const en: Record<string, string> = {
   'history.localOnly.title':
     'Parle could not rule out that this was a password field, so it is kept on this device and never sent to your other devices',
   'history.fromDevice.title': 'Written on another one of your devices and synced here',
+  'history.refined.badge': 'refined',
+  'history.refined.title': 'Rewritten by {by} in {secs}s. Restore raw brings back your own words.',
   'history.action.paste': 'Paste',
   'history.action.pasteTitle': 'Paste into the previous app (Enter)',
   'history.action.copy': 'Copy',
@@ -78,7 +87,13 @@ export const en: Record<string, string> = {
   'compose.stop': 'Stop',
   'compose.transcribing': 'Transcribing…',
   'compose.recording': 'recording',
+  'compose.recordingRefine': 'recording · refine',
   'compose.processing': 'processing',
+  'compose.refining': 'Refining…',
+  'compose.refiningPill': 'refining',
+  'compose.startRefine': 'Refine',
+  'compose.startRefine.title': 'Dictate, then have the AI rewrite it before it is pasted',
+  'compose.refinedNote': 'Rewritten by the AI, inserted at your cursor and saved to History. Your own words are the raw text of that row.',
   'compose.markPlaceholder.recording': 'Paste a link or type, Enter pins it to this moment…',
   'compose.markPlaceholder.idle': 'Start dictating to insert links and text',
   'compose.insert': 'Insert',
@@ -172,6 +187,7 @@ export const en: Record<string, string> = {
   'settings.section.cleanup': 'Cleanup',
   'settings.section.dictionary': 'Dictionary',
   'settings.section.output': 'Output',
+  'settings.section.refine': 'Refine with AI',
   'settings.section.appearance': 'Appearance',
   'settings.section.historyPrivacy': 'History & privacy',
   'settings.section.audio': 'Audio',
@@ -301,6 +317,88 @@ export const en: Record<string, string> = {
   'settings.pressEnter.label': 'Press Enter after inserting',
   'settings.pressEnter.hint':
     'Sends the message right after pasting, handy for chat apps. Never fires on secure fields.',
+
+  // ---------- Settings: refine ----------
+  'settings.refine.enable.label': 'Refine mode',
+  'settings.refine.enable.hint':
+    'A second way to dictate. Speak a brain dump, and instead of pasting the transcript Parle hands it to an AI on this machine and pastes the rewrite: organised, punctuated, ready to send. The transcript is still copied and kept in History. This is the one thing in Parle that sends your words off this device, and it only happens on the gesture you choose below.',
+  'settings.refine.provider.label': 'AI',
+  'settings.refine.provider.hint':
+    'A command-line tool you have already installed and signed in to. Parle never holds an API key.',
+  'settings.refine.provider.claude': 'Claude Code (claude)',
+  'settings.refine.provider.codex': 'OpenAI Codex CLI (codex)',
+  'settings.refine.provider.gemini': 'Google Gemini CLI (gemini)',
+  'settings.refine.provider.custom': 'Custom command',
+  'settings.refine.programPath.label': 'Path to the tool',
+  'settings.refine.programPath.hint': 'Leave empty to find it automatically. Set it if the check below cannot.',
+  'settings.refine.programPath.placeholder': 'auto',
+  'settings.refine.customCommand.label': 'Command',
+  'settings.refine.customCommand.hint':
+    'The whole command line. It receives the prompt on standard input and must print the rewrite on standard output. No shell: pipes and variables are passed as plain text.',
+  'settings.refine.model.label': 'Model',
+  'settings.refine.model.hint': "Passed to the tool as its model option. Empty uses the tool's default.",
+  'settings.refine.model.placeholder': 'default',
+  'settings.refine.status.checking': 'Checking…',
+  'settings.refine.status.notChecked': 'Not checked yet. Turn Refine on, or press Check again.',
+  'settings.refine.status.found': 'Found {program}',
+  'settings.refine.status.version': 'version {version}',
+  'settings.refine.status.signedIn': 'signed in',
+  'settings.refine.status.notSignedIn': 'not signed in',
+  'settings.refine.status.recheck': 'Check again',
+  'settings.refine.status.voiceMissing': 'The voice file cannot be read; dictations will be refined without it.',
+  'settings.refine.key.label': 'Refine key',
+  'settings.refine.key.hintMac': 'Right Option is suggested. Option chords like ⌥E still work: they cancel the take and pass through.',
+  'settings.refine.key.hintWin':
+    'A chord is suggested. Binding a bare modifier here would stop it working as a modifier while bound.',
+  'settings.refine.key.clash': 'This is also the dictation key. The dictation key wins, so Refine would never start. Pick a different key.',
+  'settings.refine.gesture.label': 'Refine gesture',
+  'settings.refine.accent.label': 'Refine colour',
+  'settings.refine.accent.hint': 'The overlay and the dictation bar take this colour while a Refine take runs, so you always know which mode you are in.',
+  'settings.refine.rules.label': 'Your rules',
+  'settings.refine.rules.hint':
+    'Standing instructions baked into every rewrite: spelling, tone, characters to avoid, how to sign off.',
+  'settings.refine.rules.placeholder':
+    'American English spelling. Never use em dashes. Keep my first person. Short paragraphs. If it reads like an email, end with just my first name, [your name].',
+  'settings.refine.voice.label': 'Voice file',
+  'settings.refine.voice.hint':
+    'Optional Markdown file about how you write. Read fresh each time, so keep editing the one you already have. Capped at 64 KB.',
+  'settings.refine.voice.choose': 'Choose…',
+  'settings.refine.voice.clear': 'Clear',
+  'settings.refine.voice.picker': 'Choose a voice file',
+  'settings.refine.voice.filter': 'Markdown or text',
+  'settings.refine.timeout.label': 'Give up after',
+  'settings.refine.timeout.hint': 'The tool is stopped at this point and the fallback below applies.',
+  'settings.refine.fallback.label': 'If the AI fails',
+  'settings.refine.fallback.clipboard': 'Copy the plain transcript, do not insert it',
+  'settings.refine.fallback.insert': 'Insert the plain transcript as usual',
+  'settings.refine.fallback.hint':
+    'You asked for Refine because the raw dictation was not ready to send, so by default it stays off your document and goes to the clipboard and History instead.',
+  'settings.refine.test.button': 'Test it',
+  'settings.refine.test.running': 'Refining a sample…',
+  'settings.refine.test.result': 'Rewritten in {secs}s{model}:',
+  'settings.refine.test.hint': 'Runs a fixed sample dictation through the whole path, exactly as a real take would.',
+  'settings.refine.privacy':
+    'What is sent: the transcript, your rules and your voice file. What is not: audio, History, the clipboard, or anything about the app you are typing into. The tool runs with its own tools, plugins and project files switched off, so a dictation can never become an action.',
+
+  // ---------- Settings: refine trigger ----------
+  'settings.refine.trigger.label': 'How you start it',
+  'settings.refine.trigger.hint':
+    'Either hold a modifier while using the dictation key you already have, or give Refine a key of its own.',
+  'settings.refine.trigger.modifier': 'Hold a modifier',
+  'settings.refine.trigger.ownKey': 'Its own key',
+  'settings.refine.modifier.label': 'Modifier',
+  'settings.refine.trigger.gestureHint':
+    'Hold {mod}, then {gesture} {key} exactly as you do now. Hold the modifier first: it is read at the moment the recording starts. Either the left or the right one works.',
+  'settings.refine.trigger.verb.hold': 'hold',
+  'settings.refine.trigger.verb.tap': 'tap',
+  'settings.refine.trigger.verb.doubleTap': 'double tap',
+  'settings.refine.trigger.verb.hybrid': 'hold or tap',
+  'settings.refine.trigger.clashModifier':
+    'Your dictation key is {key}, which is the same modifier as {mod}, so holding it cannot mean anything extra. Pick another modifier, or give Refine its own key.',
+  'settings.refine.trigger.chordKey':
+    'Your dictation key is the combination {key}. A modifier trigger only works with a single key, such as the Globe key, the Copilot key, or a bare modifier. Give Refine its own key instead.',
+  'settings.refine.trigger.copilotModifier':
+    'The Copilot key sends its own Shift and Windows key, so Parle cannot tell {mod} held by you from the one the keyboard sent. Use Ctrl or Alt with the Copilot key.',
 
   // ---------- Settings: appearance ----------
   'settings.theme.label': 'Theme',

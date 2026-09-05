@@ -6,6 +6,7 @@ mod hud;
 mod icons;
 mod pipeline;
 mod platform;
+mod refine;
 mod sync;
 mod state;
 
@@ -68,6 +69,46 @@ fn log_path() -> Option<std::path::PathBuf> {
     Some(dir.join("parle.log"))
 }
 
+/// Take an exclusive, process-lifetime lock on `path`. True if this process
+/// now holds it; false if another live process does (or the file cannot be
+/// opened). The handle is deliberately leaked so the lock lasts exactly as
+/// long as the process.
+///
+/// Unix: `flock(LOCK_EX | LOCK_NB)`. Windows: opening with a zero share mode,
+/// which fails with a sharing violation while any other process has the file
+/// open. Both are released by the kernel on exit, crash included.
+fn acquire_instance_lock(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).create(true).open(path) else {
+            return false;
+        };
+        let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            return false;
+        }
+        std::mem::forget(f);
+        true
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new().read(true).write(true).create(true).share_mode(0).open(path) {
+            Ok(f) => {
+                std::mem::forget(f);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        true
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn dirs_next_local() -> Option<std::path::PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
@@ -89,7 +130,20 @@ pub fn run() {
     // failure. That is exactly how the 2026-08-28 overlay incident lost its
     // evidence. Two files, not a rotating set: the log is small and the question
     // is always "what happened last time", never "what happened last week".
-    match log_path().and_then(|p| {
+    //
+    // ROTATED ONLY BY THE INSTANCE THAT WILL RUN. The single-instance guard
+    // lives inside the Tauri builder, so a second launch (a double-click while
+    // the app is in the menu bar, a Spotlight slip) reached this code first,
+    // renamed the LIVE log out from under the running instance and created an
+    // empty one, then exited. The running app carried on writing into what was
+    // now `parle.log.1`, and the run before it, the one worth reading, had been
+    // deleted by that rename. Observed on the author's own machine on
+    // 04/09/2026: a 0-byte `parle.log` beside a `parle.log.1` still growing.
+    //
+    // A process-held lock file decides who rotates. The lock is released by the
+    // OS when the process ends, however it ends, so a crash never wedges it.
+    let owns_log = log_path().map(|p| acquire_instance_lock(&p.with_extension("lock"))).unwrap_or(false);
+    match log_path().filter(|_| owns_log).and_then(|p| {
         let _ = std::fs::rename(&p, p.with_extension("log.1"));
         std::fs::File::create(p).ok()
     }) {
@@ -98,6 +152,9 @@ pub fn run() {
             .with_ansi(false)
             .with_writer(std::sync::Mutex::new(f))
             .init(),
+        // No lock (another instance is running and owns the log) or no data
+        // dir: log to stderr, which for a GUI launch goes nowhere, and touch
+        // nothing on disk.
         None => tracing_subscriber::fmt().with_env_filter(filter).init(),
     }
 
@@ -194,6 +251,8 @@ pub fn run() {
             commands::dict_set_enabled,
             commands::dict_delete,
             commands::start_recording,
+            commands::refine_status,
+            commands::refine_test,
             commands::stop_recording,
             commands::cancel_recording,
             commands::permission_status,
@@ -290,7 +349,9 @@ pub fn run() {
             // this launch is the login one. Windows was already gated on it and
             // macOS was not, so the two platforms disagreed about the same
             // question. They no longer do.
-            let launched_by_system = std::env::args().any(|a| a == "--hidden");
+            // `args_os`: `args()` panics on a non-Unicode argument, which
+            // Windows can hand us.
+            let launched_by_system = std::env::args_os().any(|a| a == "--hidden");
             if state.settings.lock().onboarding_complete && launched_by_system {
                 if let Some(main) = handle.get_webview_window(hud::MAIN_LABEL) {
                     let _ = main.hide();
@@ -466,7 +527,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                     if state.pipeline.is_recording() {
                         state.external_stop();
                     } else {
-                        state.pipeline_start();
+                        state.pipeline_start(pipeline::DictationMode::Standard);
                     }
                 });
             }
@@ -545,9 +606,21 @@ fn spawn_platform(
 /// two and it swallows the key properly; this is the belt to its braces. Both
 /// firing is harmless: the second cancel arrives when there is no longer a
 /// recording to cancel and is a no-op.
+///
+/// EVERY call into the global-shortcut plugin in this file goes through
+/// `on_main_thread`, and NO handler registered with it ever calls back into
+/// the plugin or into the pipeline directly. Both rules exist because of the
+/// same fact about the plugin: it invokes a shortcut's handler while HOLDING its
+/// own (non-reentrant) `shortcuts` mutex, on the main thread. So a handler that
+/// reached `pipeline_start` -> `set_recording_flag` -> `on_shortcut` re-took
+/// that mutex on the same thread and the whole app froze: UI, overlay, tray.
+/// Reachable with a chord dictation key and "Esc cancels" on, or with Esc
+/// pressed during a recording while Accessibility is not granted. And a
+/// plugin call from any OTHER thread holds that mutex across a round trip to
+/// the main thread, so a shortcut firing in that window deadlocks the other
+/// way round. Handlers therefore only forward an event to the dispatcher
+/// channel, and plugin calls run where the lock lives.
 pub(crate) fn set_cancel_shortcut_armed(app: &AppHandle, state: &AppState, armed: bool) {
-    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-
     let binding = state.settings.lock().hotkeys.cancel.clone();
     if !binding.enabled || binding.key.is_empty() {
         return;
@@ -561,62 +634,159 @@ pub(crate) fn set_cancel_shortcut_armed(app: &AppHandle, state: &AppState, armed
         tracing::warn!("cancel key '{}' is not a registrable shortcut", binding.key);
         return;
     };
-    if !armed {
-        let _ = app.global_shortcut().unregister(shortcut);
-        return;
-    }
-    let handle = app.clone();
-    let result = app.global_shortcut().on_shortcut(shortcut, move |a, _sc, event| {
-        if matches!(event.state(), ShortcutState::Pressed) {
-            if let Some(st) = a.try_state::<Arc<AppState>>() {
-                st.external_cancel();
+    let key_name = binding.key.clone();
+    let tx = state.platform_tx.lock().clone();
+    on_main_thread(app, move |app| {
+        use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+        if !armed {
+            let _ = app.global_shortcut().unregister(shortcut);
+            return;
+        }
+        let result = app.global_shortcut().on_shortcut(shortcut, move |_a, _sc, event| {
+            if matches!(event.state(), ShortcutState::Pressed) {
+                // Forwarded, never handled here: see the note above.
+                if let Some(tx) = tx.as_ref() {
+                    let _ = tx.send(platform::PlatformEvent::Hotkey {
+                        id: platform::HotkeyId::Cancel,
+                        phase: hotkey_logic::KeyPhase::Down,
+                        mods: platform::Mods::default(),
+                    });
+                }
             }
+        });
+        if let Err(e) = result {
+            tracing::warn!("could not arm the cancel shortcut '{key_name}': {e}");
         }
     });
-    let _ = handle;
-    if let Err(e) = result {
-        tracing::warn!("could not arm the cancel shortcut '{}': {e}", binding.key);
+}
+
+/// Run `f` on the main thread, where the global-shortcut plugin's lock lives.
+/// From the main thread itself Tauri still queues it, which is harmless: we
+/// hold no lock while queuing.
+fn on_main_thread(app: &AppHandle, f: impl FnOnce(&AppHandle) + Send + 'static) {
+    let handle = app.clone();
+    if let Err(e) = app.run_on_main_thread(move || f(&handle)) {
+        tracing::warn!("could not reach the main thread for a shortcut change: {e}");
     }
 }
 
 pub(crate) fn register_chord_shortcuts(app: &AppHandle, state: &Arc<AppState>) {
-    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-
-    let _ = app.global_shortcut().unregister_all();
-
     let bindings = {
         let s = state.settings.lock();
-        vec![
+        let mut v = vec![
             (platform::HotkeyId::Dictation, s.hotkeys.dictation.clone()),
             (platform::HotkeyId::DictationAlt, s.hotkeys.dictation_alt.clone()),
             (platform::HotkeyId::Palette, s.hotkeys.history_palette.clone()),
-        ]
+        ];
+        // Only when the user asked for a separate key: same rule as the
+        // native bindings, through the same predicate.
+        if state::refine_uses_own_key(&s) {
+            v.push((platform::HotkeyId::Refine, s.hotkeys.refine.clone()));
+        }
+        v
     };
+    let tx = state.platform_tx.lock().clone();
+    let recording = state.is_recording_flag_set();
+    let state = state.clone();
 
-    for (id, binding) in bindings {
-        if !binding.enabled || binding.key.is_empty() {
-            continue;
-        }
-        // Skip keys owned by the native listener.
-        if platform::NativeKey::parse(&binding.key).is_some() {
-            continue;
-        }
-        let Ok(shortcut) = binding.key.parse::<tauri_plugin_global_shortcut::Shortcut>() else {
-            tracing::warn!("unparseable shortcut '{}'", binding.key);
-            continue;
-        };
-        let state = state.clone();
-        let result = app.global_shortcut().on_shortcut(shortcut, move |app, _sc, event| {
-            let phase = match event.state() {
-                ShortcutState::Pressed => hotkey_logic::KeyPhase::Down,
-                ShortcutState::Released => hotkey_logic::KeyPhase::Up,
+    // Plugin calls on the main thread only, and handlers that only forward.
+    // See `set_cancel_shortcut_armed` for why both halves are load-bearing.
+    on_main_thread(app, move |app| {
+        use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+        let _ = app.global_shortcut().unregister_all();
+
+        for (id, binding) in bindings {
+            if !binding.enabled || binding.key.is_empty() {
+                continue;
+            }
+            // Skip keys owned by the native listener.
+            if platform::NativeKey::parse(&binding.key).is_some() {
+                continue;
+            }
+            let Ok(shortcut) = binding.key.parse::<tauri_plugin_global_shortcut::Shortcut>() else {
+                tracing::warn!("unparseable shortcut '{}'", binding.key);
+                continue;
             };
-            state.on_platform_event(app, platform::PlatformEvent::Hotkey { id, phase });
-        });
-        if let Err(e) = result {
-            tracing::warn!("failed to register shortcut '{}': {e}", binding.key);
-            let _ = app.emit("shortcut-error", format!("{}: {e}", binding.key));
+            let tx = tx.clone();
+            let result = app.global_shortcut().on_shortcut(shortcut, move |_app, _sc, event| {
+                let phase = match event.state() {
+                    ShortcutState::Pressed => hotkey_logic::KeyPhase::Down,
+                    ShortcutState::Released => hotkey_logic::KeyPhase::Up,
+                };
+                // Through the dispatcher, like every native key. Handling it
+                // inline here re-entered the plugin from inside its own lock.
+                if let Some(tx) = tx.as_ref() {
+                    // No modifiers reported: a chord binding already HAS its
+                    // modifiers in the chord, and the plugin does not tell us
+                    // what else was held. A modifier Refine trigger therefore
+                    // works with the native keys people dictate with (Fn, a
+                    // bare modifier, the Copilot key) and not with a chord
+                    // dictation key, which Settings says.
+                    let _ = tx.send(platform::PlatformEvent::Hotkey {
+                        id,
+                        phase,
+                        mods: platform::Mods::default(),
+                    });
+                }
+            });
+            if let Err(e) = result {
+                tracing::warn!("failed to register shortcut '{}': {e}", binding.key);
+                let _ = app.emit("shortcut-error", format!("{}: {e}", binding.key));
+            }
         }
+        // `unregister_all` also dropped the cancel key armed for a recording in
+        // progress. Put it back, or Esc does nothing until the next take.
+        if recording {
+            set_cancel_shortcut_armed(app, &state, true);
+        }
+    });
+}
+
+#[cfg(test)]
+mod instance_lock_tests {
+    //! The lock has to hold ACROSS processes, which a unit test cannot spawn
+    //! cheaply without the whole app; so this pins the two properties that can
+    //! be checked in one: the first acquisition succeeds, and the lock file is
+    //! created where the log lives rather than somewhere else.
+    #[test]
+    fn the_first_acquisition_succeeds_and_creates_the_file() {
+        let dir = std::env::temp_dir().join(format!("parle-lock-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("parle.lock");
+        assert!(super::acquire_instance_lock(&lock));
+        assert!(lock.is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_process_holding_the_lock_is_detected() {
+        // A child `sh` takes the lock with flock(1)-style semantics via
+        // python, holds it for a moment, and we must see it as taken.
+        let dir = std::env::temp_dir().join(format!("parle-lock-test2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("parle.lock");
+        let holder = std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import fcntl,sys,time; f=open(sys.argv[1],'w'); fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); time.sleep(3)")
+            .arg(&lock)
+            .stdout(std::process::Stdio::piped())
+            .spawn();
+        let Ok(mut holder) = holder else {
+            return; // no python3 here; the property is exercised on machines that have it
+        };
+        // Wait for the child to say it holds the lock.
+        {
+            use std::io::Read;
+            let mut out = holder.stdout.take().unwrap();
+            let mut b = [0u8; 4];
+            let _ = out.read_exact(&mut b);
+        }
+        assert!(!super::acquire_instance_lock(&lock), "the lock must read as taken while another process holds it");
+        let _ = holder.kill();
+        let _ = holder.wait();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -641,6 +811,7 @@ mod shortcut_defaults_tests {
             ("history_palette", &s.hotkeys.history_palette),
             ("dictation", &s.hotkeys.dictation),
             ("dictation_alt", &s.hotkeys.dictation_alt),
+            ("refine", &s.hotkeys.refine),
             ("cancel", &s.hotkeys.cancel),
         ] {
             if binding.key.is_empty() {
@@ -659,6 +830,19 @@ mod shortcut_defaults_tests {
                 binding.key
             );
         }
+    }
+
+    /// The Refine suggestion must land on exactly one of the two listeners:
+    /// either the native tap knows it, or the chord parser does. A key neither
+    /// recognises would be a setting the app displays and does not have, the
+    /// same class as the `Fn+Shift+V` palette chord.
+    #[test]
+    fn the_refine_default_is_owned_by_exactly_one_listener() {
+        let s = parle_core::settings::Settings::default();
+        let key = &s.hotkeys.refine.key;
+        let native = crate::platform::NativeKey::parse(key).is_some();
+        let chord = key.parse::<Shortcut>().is_ok();
+        assert!(native ^ chord, "'{key}': native={native} chord={chord}");
     }
 
     /// The specific string this test was written for.

@@ -6,16 +6,18 @@
 //! user cancels. On total ASR failure the WAV is written for recovery.
 
 use crate::platform;
+use crate::refine;
 use parle_asr::manager::EngineManager;
 use parle_asr::{is_silence, TranscribeOptions};
 use parle_audio::recorder::{LevelUpdate, Recorder};
 use parle_core::dictionary::Dictionary;
 use parle_core::formatter;
 use parle_core::history::Store;
-use parle_core::settings::{data_dir, Settings};
-use parle_core::types::{LowConfidenceSpan, Segment, TranscriptionResult};
+use parle_core::settings::{data_dir, RefineFallback, Settings};
+use parle_core::types::{LowConfidenceSpan, RefineMeta, Segment, TranscriptionResult, TrimmedSpan};
 use parking_lot::Mutex;
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -24,12 +26,50 @@ pub enum PipelineState {
     Idle,
     Recording,
     Transcribing,
+    /// The transcript is with the AI. Only ever reached in Refine mode, and
+    /// only after transcription: the overlay keeps showing, with a different
+    /// label, because from the user's side nothing has landed yet.
+    Refining,
+}
+
+/// What happens to the transcript once it exists.
+///
+/// Latched when the recording STARTS (from which key was pressed) and carried
+/// with the take, so a second dictation started in the other mode while the
+/// first is still transcribing cannot change what the first one does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DictationMode {
+    /// Transcribe, clean, paste. The product's core loop.
+    #[default]
+    Standard,
+    /// Transcribe, clean, then hand the text to the configured AI CLI and
+    /// paste its rewrite instead. The transcript is still copied and kept in
+    /// History; it is the PASTE that changes.
+    Refine,
+}
+
+impl DictationMode {
+    pub fn parse(s: &str) -> Self {
+        if s.eq_ignore_ascii_case("refine") {
+            DictationMode::Refine
+        } else {
+            DictationMode::Standard
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PipelineEvent {
-    StateChanged { state: PipelineState },
+    /// `mode` rides with every state so a HUD that opens mid-take (or a main
+    /// window that mounts later) colours itself right without a second query.
+    StateChanged { state: PipelineState, mode: DictationMode },
+    /// The LIVE take changed mode (the other mode's key was pressed mid-take).
+    /// Its own event, not a second `Recording`: every front end treats a
+    /// `Recording` as a fresh take and clears its marks, partials and clock,
+    /// while the pipeline keeps all of them.
+    ModeChanged { mode: DictationMode },
     Level(LevelUpdate),
     Partial { text: String },
     /// User pasted/typed content mid-recording; spliced in at this timestamp.
@@ -51,6 +91,10 @@ pub enum PipelineEvent {
         model_id: String,
         injection: Option<platform::InjectionOutcome>,
         low_confidence_count: usize,
+        mode: DictationMode,
+        /// `text` is the AI's rewrite. False on a Standard take, and on a
+        /// Refine take whose AI call failed and fell back to the transcript.
+        refined: bool,
     },
     Empty { reason: String },
     Error { message: String },
@@ -69,6 +113,42 @@ pub struct Pipeline {
     sink: EventSink,
     /// Latched app id/name captured at recording START (focus may move later).
     start_app: Mutex<(Option<String>, Option<String>)>,
+    /// Dictations taken off the recorder but not yet finished processing.
+    ///
+    /// Idle is emitted only when this is zero AND nothing is recording. Without
+    /// it, stopping twice in a row put the HUD back to Idle the moment the
+    /// FIRST take finished, while the second was still queued behind it.
+    pending: AtomicUsize,
+    /// Bumped on every `start`. Each partial loop carries the value it was
+    /// spawned with, so a loop belonging to a finished recording cannot wake up
+    /// and start emitting partials for the NEXT one through the shared slot.
+    generation: AtomicU64,
+    /// The mode of the LIVE recording. Meaningless when nothing is recording.
+    mode: Mutex<DictationMode>,
+    /// The AI call in flight, if any, so `cancel` can kill it. The worker owns
+    /// the slot for exactly the duration of the call.
+    refine_cancel: Mutex<Option<refine::CancelToken>>,
+}
+
+/// A stopped recording plus everything that was latched to it, handed to the
+/// worker as one value.
+///
+/// `marks` and `start_app` used to be read off the Pipeline's own slots when
+/// the worker eventually ran, and `start` overwrites both. Starting a second
+/// dictation while the first was still transcribing therefore wiped the first
+/// one's spliced marks and stamped its history row with the second one's app.
+/// Anything that belongs to ONE take travels with it from here on.
+pub struct PendingDictation {
+    recorder: Recorder,
+    marks: Vec<(u64, String)>,
+    start_app: (Option<String>, Option<String>),
+    mode: DictationMode,
+}
+
+impl PendingDictation {
+    pub fn mode(&self) -> DictationMode {
+        self.mode
+    }
 }
 
 /// What the accessibility tree says about the field the user is typing into.
@@ -244,30 +324,66 @@ impl Pipeline {
             marks: Mutex::new(Vec::new()),
             sink,
             start_app: Mutex::new((None, None)),
+            pending: AtomicUsize::new(0),
+            generation: AtomicU64::new(0),
+            mode: Mutex::new(DictationMode::Standard),
+            refine_cancel: Mutex::new(None),
         }
+    }
+
+    /// The mode of the live recording, for UI that mounts mid-take.
+    pub fn current_mode(&self) -> DictationMode {
+        *self.mode.lock()
     }
 
     pub fn is_recording(&self) -> bool {
         self.recorder.lock().is_some()
     }
 
-    /// Returns true when recording actually started.
-    pub fn start(self: &Arc<Self>) -> bool {
+    /// Recording, or a take still queued or with the AI. The overlay must not
+    /// hide while this is true.
+    pub fn is_busy(&self) -> bool {
+        self.recorder.lock().is_some() || self.pending.load(Ordering::SeqCst) > 0
+    }
+
+    /// Returns true when recording is running afterwards (started now, or
+    /// already was).
+    ///
+    /// Pressing the OTHER mode's key while a recording runs switches the live
+    /// take to that mode rather than being ignored: someone who starts an
+    /// ordinary dictation and realises halfway that it needs tidying can tap
+    /// Refine and carry on. The switch is announced so the overlay recolours.
+    pub fn start(self: &Arc<Self>, mode: DictationMode) -> bool {
+        // A full slot now means a LIVE recording and nothing else: `take_pending`
+        // empties it on the stop keypress rather than when the worker gets round
+        // to the job. While the worker owned that step, a stop followed by a
+        // start found the slot still full, returned "already recording" without
+        // starting anything, and captured the second dictation into the first
+        // one's buffer.
         if self.recorder.lock().is_some() {
+            let mut cur = self.mode.lock();
+            if *cur != mode {
+                *cur = mode;
+                drop(cur);
+                tracing::info!("live recording switched to {mode:?}");
+                (self.sink)(PipelineEvent::ModeChanged { mode });
+            }
             return true; // already recording
         }
         let device = self.settings.lock().audio.input_device.clone();
         *self.start_app.lock() = platform::imp::frontmost_app();
+        *self.mode.lock() = mode;
 
         let sink = self.sink.clone();
         let on_level = move |u: LevelUpdate| sink(PipelineEvent::Level(u));
         self.marks.lock().clear();
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         match Recorder::start(&device, on_level) {
             Ok(rec) => {
                 *self.recorder.lock() = Some(rec);
-                (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Recording });
+                (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Recording, mode });
                 if self.settings.lock().overlay.show_partial_text {
-                    self.spawn_partial_loop();
+                    self.spawn_partial_loop(generation);
                 }
                 true
             }
@@ -284,7 +400,7 @@ impl Pipeline {
     /// transcribe a snapshot of the audio so far. Best-effort by design —
     /// engine `try_lock` means partials NEVER queue behind (or delay) the final
     /// pass, and the loop exits the moment the recorder is taken for stop.
-    fn spawn_partial_loop(self: &Arc<Self>) {
+    fn spawn_partial_loop(self: &Arc<Self>, generation: u64) {
         let this = self.clone();
         std::thread::Builder::new()
             .name("parle-partials".into())
@@ -292,6 +408,14 @@ impl Pipeline {
                 const MAX_PARTIAL_SECS: usize = 30 * 16_000;
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(2000));
+                    // Ours only while the slot still holds OUR recording. The
+                    // slot alone is not enough: by the time this wakes, the
+                    // recording it was spawned for can have been taken and a
+                    // new one started, and it would then transcribe and emit
+                    // partials for a recording that already has its own loop.
+                    if this.generation.load(Ordering::SeqCst) != generation {
+                        break;
+                    }
                     let snapshot = {
                         let guard = this.recorder.lock();
                         match guard.as_ref() {
@@ -314,8 +438,11 @@ impl Pipeline {
                     };
                     if let Ok((out, _)) = engine.transcribe(&snapshot, &opts, None) {
                         drop(engine);
-                        // Recorder may have been taken while we transcribed.
-                        if this.recorder.lock().is_none() {
+                        // Recorder may have been taken, or replaced by a newer
+                        // recording, while we transcribed.
+                        if this.recorder.lock().is_none()
+                            || this.generation.load(Ordering::SeqCst) != generation
+                        {
                             break;
                         }
                         let text: String = out
@@ -388,37 +515,124 @@ impl Pipeline {
     }
 
     pub fn cancel(&self) {
-        if let Some(rec) = self.recorder.lock().take() {
+        let had_live_recording = if let Some(rec) = self.recorder.lock().take() {
             rec.cancel();
-        }
-        (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Idle });
-    }
-
-    /// Emit Idle unless a new recording started while we were processing —
-    /// its Recording state must not be clobbered by our late Idle.
-    fn emit_idle_if_quiescent(&self) {
-        if self.recorder.lock().is_none() {
-            (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Idle });
-        }
-    }
-
-    /// Stop recording and run the full pipeline (blocking; call on a worker).
-    pub fn stop_and_process(&self) {
-        let Some(rec) = self.recorder.lock().take() else {
-            return;
+            // The marks belong to the audio being thrown away. Left behind they
+            // would be spliced into whatever is recorded next, since only
+            // `start` clears them.
+            self.marks.lock().clear();
+            true
+        } else {
+            false
         };
-        (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Transcribing });
-        let recording = rec.stop();
+        // With nothing recording, the thing in progress that a cancel can mean
+        // is the AI call, so that is what gets stopped. With a live recording,
+        // the cancel is about THAT: an earlier take still with the AI is left
+        // alone. Cancelling both meant that abandoning take B killed take A's
+        // rewrite, and A came back "cancelled" for a key the user pressed at B.
+        // The transcript of a cancelled call is kept (see `deliver`), so this
+        // loses nothing the user said; it only stops waiting.
+        if !had_live_recording {
+            if let Some(token) = self.refine_cancel.lock().as_ref() {
+                token.cancel();
+            }
+        }
+        // Through the same gate as everything else. Emitted unconditionally,
+        // cancelling the recording you just STARTED would clear the overlay
+        // while an earlier take was still transcribing behind it, and the text
+        // that take is about to paste would arrive with nothing on screen having
+        // said it was still coming.
+        self.emit_idle_if_quiescent();
+    }
+
+    /// Emit Idle unless a new recording started while we were processing (its
+    /// Recording state must not be clobbered by our late Idle) or another take
+    /// is still queued or running behind us.
+    fn emit_idle_if_quiescent(&self) {
+        if self.recorder.lock().is_none() && self.pending.load(Ordering::SeqCst) == 0 {
+            (self.sink)(PipelineEvent::StateChanged {
+                state: PipelineState::Idle,
+                mode: DictationMode::Standard,
+            });
+        }
+    }
+
+    /// Detach the current recording so it can be transcribed off this thread,
+    /// freeing the recorder slot immediately so the next dictation gets its own.
+    ///
+    /// Capture is ended HERE rather than on the worker. The worker can be busy
+    /// with a queued transcription or a model prewarm, and until the flag is set
+    /// the microphone keeps appending to this recording: a user who stopped and
+    /// started again had the second dictation captured into the first one's
+    /// buffer and transcribed as one blob, while the second stop found an empty
+    /// slot and silently did nothing. The joins are left for the worker, so this
+    /// stays cheap enough for the hotkey thread.
+    ///
+    /// Returns None when there was nothing recording, so a stray stop cannot
+    /// queue a job that does nothing but still counts as pending.
+    pub fn take_pending(&self) -> Option<PendingDictation> {
+        let recorder = self.recorder.lock().take()?;
+        recorder.request_stop();
+        let marks = std::mem::take(&mut *self.marks.lock());
+        let start_app = self.start_app.lock().clone();
+        let mode = *self.mode.lock();
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Transcribing, mode });
+        Some(PendingDictation { recorder, marks, start_app, mode })
+    }
+
+    /// Give up on a take that never reached the worker.
+    ///
+    /// The count is raised the moment a take is detached, so whatever refuses it
+    /// afterwards has to hand it back, or the HUD sits on "Transcribing" for the
+    /// rest of the session waiting for a job that will never run. The user is
+    /// told, because a dictation they finished speaking has just been lost and
+    /// the spinner alone would say the opposite.
+    pub fn abandon_pending(&self, pending: PendingDictation) {
+        drop(pending);
+        self.pending.fetch_sub(1, Ordering::SeqCst);
+        (self.sink)(PipelineEvent::Error {
+            message: "That dictation could not be transcribed and has been lost. \
+                      Please restart Parle."
+                .into(),
+        });
+        self.emit_idle_if_quiescent();
+    }
+
+    /// Run one detached dictation to completion. Called on the serial worker,
+    /// so takes queue behind each other rather than racing.
+    pub fn process(&self, pending: PendingDictation) {
+        self.process_inner(pending);
+        // The count drops BEFORE the single idle check, and the check happens
+        // only here. Every early return inside `process_inner` used to emit its
+        // own Idle, which is why a still-queued second take could not be
+        // consulted at the point the first one finished.
+        self.pending.fetch_sub(1, Ordering::SeqCst);
+        self.emit_idle_if_quiescent();
+    }
+
+    /// Run the full pipeline for one detached dictation (blocking; worker only).
+    ///
+    /// Never emits Idle: `process` owns that, once, after the pending count has
+    /// been dropped.
+    fn process_inner(&self, pending: PendingDictation) {
+        let PendingDictation { recorder, marks, start_app, mode } = pending;
+        // Capture already ended in `take_pending`; this just collects the
+        // threads and takes the buffer.
+        let recording = recorder.stop();
+        // Borrowed for the whole function. Read off `self.start_app` down here
+        // instead, and a dictation started while this one was transcribing had
+        // already overwritten the slot, so this row was filed under the wrong
+        // application.
+        let (app_id, app_name) = (&start_app.0, &start_app.1);
 
         let settings = self.settings.lock().clone();
         if recording.duration_ms < settings.audio.min_duration_ms {
             (self.sink)(PipelineEvent::Empty { reason: "Too short".into() });
-            self.emit_idle_if_quiescent();
             return;
         }
         if is_silence(&recording.samples) {
             (self.sink)(PipelineEvent::Empty { reason: "No speech detected".into() });
-            self.emit_idle_if_quiescent();
             return;
         }
         if recording.dropped_chunks > 0 {
@@ -447,10 +661,11 @@ impl Pipeline {
             sink(PipelineEvent::Partial { text: t.to_string() });
         });
 
-        // Insert marks (pasted links/text mid-recording): split the audio at
-        // each mark's timestamp so speech on either side is transcribed and
-        // cleaned separately, and the mark text is spliced in verbatim.
-        let marks = std::mem::take(&mut *self.marks.lock());
+        // Marks (pasted links/text mid-recording) split the audio at their
+        // timestamps so speech on either side is transcribed and cleaned
+        // separately, and the mark text is spliced in verbatim. They arrive
+        // WITH the take: read off `self.marks` here instead, and starting the
+        // next dictation before the worker reached this line cleared them.
 
         // Code-switching: whisper detects ONE language per pass, so with
         // language=auto we split at natural pauses and let every stretch
@@ -465,7 +680,7 @@ impl Pipeline {
         };
 
         if !marks.is_empty() {
-            self.process_with_marks(recording, marks, &opts, &settings, &dict);
+            self.process_with_marks(recording, marks, &opts, &settings, &dict, &start_app, mode);
             return;
         }
 
@@ -496,7 +711,6 @@ impl Pipeline {
                         path.display()
                     ),
                 });
-                self.emit_idle_if_quiescent();
                 return;
             }
         };
@@ -567,7 +781,6 @@ impl Pipeline {
             // ("scratch that", pure filler) — keep the raw transcript in
             // history without injecting anything.
             if !raw_text.is_empty() {
-                let (app_id, app_name) = self.start_app.lock().clone();
                 let tr = TranscriptionResult {
                     raw_text: raw_text.clone(),
                     text: raw_text.clone(),
@@ -579,12 +792,12 @@ impl Pipeline {
                     trimmed: vec![],
                     low_confidence: vec![],
                     cleanup_tier: 0,
+                    refine: None,
                 };
                 let (_, notice) =
-                    store_transcription(&self.store, &tr, &app_id, &app_name, secrecy, false);
+                    store_transcription(&self.store, &tr, app_id, app_name, secrecy, false);
                 if let Some(reason) = notice {
                     (self.sink)(PipelineEvent::Empty { reason });
-                    self.emit_idle_if_quiescent();
                     return;
                 }
             }
@@ -594,135 +807,31 @@ impl Pipeline {
                     // Only claim to have kept something when we did.
                     "Nothing left after cleanup (kept raw in history)".to_string()
                 } });
-            self.emit_idle_if_quiescent();
             return;
         }
 
         // Low-confidence surfacing (word-level, threshold 0.55).
         let low_confidence = collect_low_confidence(&asr, &text);
 
-        // Output: inject + clipboard + history, simultaneously in intent.
-        // `secrecy` was sampled above, before the empty-after-cleanup branch and
-        // before any injection.
-        // Tracks the CLIPBOARD, which is what the message is about.
-        //
-        // `copied` was derived from `injection.is_some()`, which is false on
-        // the one branch that copies without injecting: with "insert at cursor"
-        // off, a password-field dictation reported "not saved to History" while
-        // the clipboard had silently been replaced, with no snapshot and no
-        // restore on that path.
-        let mut copied_to_clipboard = false;
-        let injection = if settings.paste.inject && !frontmost_is_self() {
-            Some(platform::imp::inject_text(
-                &text,
-                settings.paste.prefer_ax_insert,
-                settings.paste.restore_delay_ms,
-                settings.paste.copy_to_clipboard,
-                settings.paste.restore_clipboard,
-                settings.paste.press_enter,
-                secrecy.view(),
-            ))
-        } else if settings.paste.copy_to_clipboard {
-            // CONCEALED when this is a password field. The unmarked call here
-            // meant that with "insert at cursor" switched off, a dictation into
-            // a secure field was put on the clipboard with no marking at all,
-            // so every other clipboard manager on the machine kept it. The
-            // injection path had always marked it; this branch never did.
-            platform::imp::write_clipboard_marked(&text, secrecy.conceal_clipboard());
-            copied_to_clipboard = true;
-            None
-        } else {
-            None
-        };
-
-        let (app_id, app_name) = self.start_app.lock().clone();
-        let tr = TranscriptionResult {
-            raw_text: raw_text.clone(),
-            text: text.clone(),
-            language: asr.detected_language.clone(),
-            model_id: model_id.clone(),
-            duration_ms: recording.duration_ms,
-            transcribe_ms: asr.transcribe_ms,
-            segments,
-            trimmed: formatted.trimmed,
-            low_confidence: low_confidence.clone(),
-            cleanup_tier: if settings.cleanup.enabled { 1 } else { 0 },
-        };
-        // A dictation into a SECURE FIELD is not kept.
-        //
-        // `inject_text` reports `manual_paste_required` when macOS secure event
-        // input is on, which is what a password field turns on. On that path the
-        // platform layer deliberately marks the clipboard write CONCEALED so no
-        // other clipboard manager keeps it, and then this line stored it anyway
-        // and replication carried it to every paired device. Parle was telling
-        // every other app on the machine not to hold the user's banking
-        // password while holding it itself and posting it to their work PC.
-        //
-        // The row is dropped rather than flagged: there is no view in which a
-        // password typed into a password field belongs in a history that syncs.
-        // The text is still on the clipboard for the user to paste, which is
-        // the whole point of that branch.
-        // The injecting path writes the clipboard too: a ClipboardOnly outcome
-        // IS the clipboard write, and `copy_to_clipboard` asks for one
-        // alongside the insert.
-        if matches!(
-            injection.as_ref().map(|o| &o.method),
-            Some(platform::InjectionMethod::ClipboardPaste)
-                | Some(platform::InjectionMethod::ClipboardOnly)
-        ) || (injection.is_some() && settings.paste.copy_to_clipboard)
-        {
-            copied_to_clipboard = true;
-        }
-        let (item_id, notice) =
-            store_transcription(&self.store, &tr, &app_id, &app_name, secrecy, copied_to_clipboard);
-        if let Some(reason) = notice {
-            (self.sink)(PipelineEvent::Empty { reason });
-        }
-
-        // A FAILED WRITE is an error, not a withholding.
-        //
-        // `withheld` was `item_id < 0 || ...`, which folded the two together.
-        // Both handlers return early on `withheld`, so a store that failed
-        // (locked, disk full, key gone) produced no toast, no HUD line and no
-        // notice: the text had been injected and nothing anywhere said the
-        // history write had not happened.
-        if item_id < 0 && !secrecy.drop_entirely() {
-            (self.sink)(PipelineEvent::Error {
-                // The sentence is chosen from what actually happened. It said
-                // "The text was still inserted" unconditionally, and with
-                // injection off, copy off, or Parle's own window frontmost,
-                // nothing was: the dictation was lost outright and the one
-                // message told the user it was in their document.
-                message: if injection.is_some() {
-                    "Could not save that to History. The text was still inserted.".into()
-                } else {
-                    "Could not save that to History, and it was not inserted anywhere. \
-                     That dictation is lost."
-                        .to_string()
-                },
-            });
-        }
-        (self.sink)(PipelineEvent::Completed {
-            item_id,
-            withheld: secrecy.drop_entirely() || secrecy.keep_local_only(),
-            // BLANKED at the source. `withheld` protected the render and not
-            // the transmission, so the password still reached every webview
-            // heap and the only thing between it and a screen was five React
-            // files each remembering a convention. That mechanism has failed in
-            // both rounds it has existed. Nothing on the frontend needs the
-            // text of a row it must not show.
-            text: if secrecy.drop_entirely() || secrecy.keep_local_only() {
-                String::new()
-            } else {
-                text
+        self.deliver(
+            Delivery {
+                text,
+                raw_text,
+                language: asr.detected_language.clone(),
+                model_id,
+                duration_ms: recording.duration_ms,
+                transcribe_ms: asr.transcribe_ms,
+                segments,
+                trimmed: formatted.trimmed,
+                low_confidence,
+                cleanup_tier: if settings.cleanup.enabled { 1 } else { 0 },
+                spoken_language: Some(spoken_lang),
             },
-            duration_ms: recording.duration_ms,
-            transcribe_ms: asr.transcribe_ms,
-            model_id,
-            injection,
-            low_confidence_count: low_confidence.len(),
-        });
-        self.emit_idle_if_quiescent();
+            &settings,
+            &start_app,
+            mode,
+            secrecy,
+        );
     }
 }
 
@@ -730,6 +839,9 @@ impl Pipeline {
     /// Mark-splice flow: audio split at mark timestamps; each speech piece is
     /// transcribed (with per-piece language auto-detection) and cleaned
     /// independently; mark text goes in verbatim — URLs never touch cleanup.
+    ///
+    /// Never emits Idle, for the same reason as `process_inner`: `process` owns
+    /// that.
     fn process_with_marks(
         &self,
         recording: parle_audio::recorder::Recording,
@@ -737,8 +849,11 @@ impl Pipeline {
         opts: &TranscribeOptions,
         settings: &Settings,
         dict: &Dictionary,
+        // Latched at recording START and carried with the take, not read back
+        // off the Pipeline, which the next `start` overwrites.
+        start_app: &(Option<String>, Option<String>),
+        mode: DictationMode,
     ) {
-        use crate::pipeline::PipelineState;
         marks.sort_by_key(|(ms, _)| *ms);
         let sr = parle_audio::ASR_SAMPLE_RATE as u64;
         let total = recording.samples.len();
@@ -877,12 +992,177 @@ impl Pipeline {
         let raw_text = raw_parts.join(" ").trim().to_string();
         if text.is_empty() {
             (self.sink)(PipelineEvent::Empty { reason: "No speech detected".into() });
-            self.emit_idle_if_quiescent();
             return;
         }
 
         // Sampled BEFORE `inject_text`, which pastes and may post Return.
         let secrecy = sample_field_secrecy();
+        let detected_language = if langs.is_empty() { None } else { Some(langs.join("+")) };
+        self.deliver(
+            Delivery {
+                text,
+                raw_text,
+                language: detected_language.clone(),
+                model_id,
+                duration_ms: recording.duration_ms,
+                transcribe_ms,
+                segments: all_segments,
+                trimmed: vec![], // per-piece offsets don't map onto the joined raw; deferred
+                low_confidence: vec![],
+                cleanup_tier: if settings.cleanup.enabled { 1 } else { 0 },
+                spoken_language: detected_language,
+            },
+            settings,
+            start_app,
+            mode,
+            secrecy,
+        );
+    }
+}
+
+/// Everything a finished take knows about itself, in one value, so the two
+/// transcription paths hand the same thing to the same door.
+///
+/// The plain path and the mark-splice path used to each carry their own copy
+/// of inject + clipboard + store + events, and every round found a fix that
+/// had landed on one and not the other: the secure-field gate, the concealed
+/// clipboard write, the `copied` flag, the failed-write error. One path now.
+struct Delivery {
+    /// The cleaned transcript.
+    text: String,
+    /// The recogniser's raw output.
+    raw_text: String,
+    language: Option<String>,
+    model_id: String,
+    duration_ms: u64,
+    transcribe_ms: u64,
+    segments: Vec<Segment>,
+    trimmed: Vec<TrimmedSpan>,
+    low_confidence: Vec<LowConfidenceSpan>,
+    cleanup_tier: u8,
+    /// What was spoken, for the AI's benefit. `None` when unknown.
+    spoken_language: Option<String>,
+}
+
+impl Pipeline {
+    /// Inject + clipboard + history + events, for a finished take of either
+    /// mode. Never emits Idle: `process` owns that.
+    ///
+    /// `secrecy` was sampled by the caller BEFORE anything moved focus, and is
+    /// the one observation every decision below is made from.
+    fn deliver(
+        &self,
+        d: Delivery,
+        settings: &Settings,
+        start_app: &(Option<String>, Option<String>),
+        mode: DictationMode,
+        secrecy: FieldSecrecy,
+    ) {
+        let (app_id, app_name) = (&start_app.0, &start_app.1);
+
+        // -- Refine: the transcript goes to the AI first. --------------------
+        let mut refined: Option<refine::Outcome> = None;
+        let mut refine_failure: Option<String> = None;
+        let mut inject_allowed = settings.paste.inject;
+        // The pre-send sample decides whether to SEND. Anything decided after
+        // the wait re-samples: see below.
+        let mut secrecy = secrecy;
+        if mode == DictationMode::Refine {
+            if secrecy.drop_entirely() {
+                // A KNOWN password field is never sent to an AI, whatever key
+                // was pressed. The take carries on as an ordinary dictation
+                // into that field, which the secure-field rules below handle.
+                //
+                // `keep_local_only` (probe could not tell AND secure input is
+                // up somewhere) is deliberately NOT a refusal. That state is
+                // the everyday one in Chromium and Electron apps on a Mac with
+                // a password manager running, which is exactly where emails
+                // get written, so refusing it would make Refine fail in its
+                // main use. Withholding a row from LAN replication is a
+                // default the user never chose; the Refine key is a choice
+                // they made for this take, with a coral overlay saying so.
+                tracing::info!("refine requested into a password field; not sending it");
+                (self.sink)(PipelineEvent::Empty {
+                    reason: "Password field: not sent to the AI".into(),
+                });
+            } else {
+                // Announced only while nothing ELSE is recording. The recorder
+                // slot is freed at stop, so a second take can be live by the
+                // time this one reaches the AI, and a "refining" state on top
+                // of it hid the waveform, disabled the stop controls and told
+                // the user the microphone was off while it was on.
+                if !self.is_recording() {
+                    (self.sink)(PipelineEvent::StateChanged { state: PipelineState::Refining, mode });
+                }
+                let token = refine::CancelToken::default();
+                *self.refine_cancel.lock() = Some(token.clone());
+                let ctx = refine::Context {
+                    spoken_language: d.spoken_language.clone(),
+                    locale: settings.language.locale.clone(),
+                };
+                let result = refine::run(&settings.refine, &d.text, &ctx, &token);
+                *self.refine_cancel.lock() = None;
+                // Sampled AGAIN, after a wait that can run to the timeout and
+                // during which the user may well have moved to another
+                // window. Every decision below (conceal, store, inject) is made
+                // from this observation, not from one taken before the wait;
+                // the pre-send sample has done its one job.
+                secrecy = sample_field_secrecy();
+                match result {
+                    Ok(out) => {
+                        for w in &out.warnings {
+                            tracing::warn!("refine: {w}");
+                        }
+                        tracing::info!(
+                            "refined with {:?} ({}) in {} ms",
+                            out.provider,
+                            out.model.as_deref().unwrap_or("default model"),
+                            out.elapsed_ms
+                        );
+                        refined = Some(out);
+                    }
+                    Err(e) if e.is_cancel() => {
+                        // The user stopped waiting. Their words are not thrown
+                        // away: the transcript goes into History exactly as a
+                        // Standard take would have stored it, and nothing is
+                        // pasted, because they cancelled the thing that would
+                        // have decided what to paste.
+                        let tr = transcription_result(&d, None);
+                        let (item_id, _) =
+                            store_transcription(&self.store, &tr, app_id, app_name, secrecy, false);
+                        (self.sink)(PipelineEvent::Empty {
+                            reason: if item_id >= 0 {
+                                "Refining cancelled. The transcript is in History".into()
+                            } else {
+                                "Refining cancelled".to_string()
+                            },
+                        });
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!("refine failed: {e}");
+                        refine_failure = Some(e.to_string());
+                        if settings.refine.fallback == RefineFallback::ClipboardOnly {
+                            // The user pressed Refine BECAUSE the raw dictation
+                            // was not fit to send. It goes on the clipboard and
+                            // into History, not into their email.
+                            inject_allowed = false;
+                        }
+                    }
+                }
+            }
+        }
+        let refined_ok = refined.is_some();
+        let text: String = match refined.as_ref() {
+            Some(out) => out.text.clone(),
+            None => d.text.clone(),
+        };
+        // A failed refine always leaves the transcript on the clipboard, even
+        // when the user normally has "copy" off: it is the only place the text
+        // can reliably be reached from after the paste has been withheld.
+        let want_copy = settings.paste.copy_to_clipboard || refine_failure.is_some();
+
+        // -- Output: inject + clipboard + history, simultaneously in intent. --
         // Tracks the CLIPBOARD, which is what the message is about.
         //
         // `copied` was derived from `injection.is_some()`, which is false on
@@ -891,17 +1171,17 @@ impl Pipeline {
         // the clipboard had silently been replaced, with no snapshot and no
         // restore on that path.
         let mut copied_to_clipboard = false;
-        let injection = if settings.paste.inject && !frontmost_is_self() {
+        let injection = if inject_allowed && !frontmost_is_self() {
             Some(platform::imp::inject_text(
                 &text,
                 settings.paste.prefer_ax_insert,
                 settings.paste.restore_delay_ms,
-                settings.paste.copy_to_clipboard,
+                want_copy,
                 settings.paste.restore_clipboard,
                 settings.paste.press_enter,
                 secrecy.view(),
             ))
-        } else if settings.paste.copy_to_clipboard {
+        } else if want_copy {
             // CONCEALED when this is a password field. The unmarked call here
             // meant that with "insert at cursor" switched off, a dictation into
             // a secure field was put on the clipboard with no marking at all,
@@ -914,23 +1194,21 @@ impl Pipeline {
             None
         };
 
-        let (app_id, app_name) = self.start_app.lock().clone();
-        let detected_language = if langs.is_empty() { None } else { Some(langs.join("+")) };
-        let tr = TranscriptionResult {
-            raw_text,
-            text: text.clone(),
-            language: detected_language,
-            model_id: model_id.clone(),
-            duration_ms: recording.duration_ms,
-            transcribe_ms,
-            segments: all_segments,
-            trimmed: vec![], // per-piece offsets don't map onto the joined raw; deferred
-            low_confidence: vec![],
-            cleanup_tier: if settings.cleanup.enabled { 1 } else { 0 },
-        };
-        // The SAME secure-field gate as the plain path. This one was missed,
-        // so a dictation into a password field that happened to contain a mark
-        // was stored and replicated while the other path correctly dropped it.
+        let tr = transcription_result(&d, refined.as_ref());
+        // A dictation into a SECURE FIELD is not kept.
+        //
+        // `inject_text` reports `manual_paste_required` when macOS secure event
+        // input is on, which is what a password field turns on. On that path the
+        // platform layer deliberately marks the clipboard write CONCEALED so no
+        // other clipboard manager keeps it, and then this line stored it anyway
+        // and replication carried it to every paired device. Parle was telling
+        // every other app on the machine not to hold the user's banking
+        // password while holding it itself and posting it to their work PC.
+        //
+        // The row is dropped rather than flagged: there is no view in which a
+        // password typed into a password field belongs in a history that syncs.
+        // The text is still on the clipboard for the user to paste, which is
+        // the whole point of that branch.
         // The injecting path writes the clipboard too: a ClipboardOnly outcome
         // IS the clipboard write, and `copy_to_clipboard` asks for one
         // alongside the insert.
@@ -938,16 +1216,23 @@ impl Pipeline {
             injection.as_ref().map(|o| &o.method),
             Some(platform::InjectionMethod::ClipboardPaste)
                 | Some(platform::InjectionMethod::ClipboardOnly)
-        ) || (injection.is_some() && settings.paste.copy_to_clipboard)
+        ) || (injection.is_some() && want_copy)
         {
             copied_to_clipboard = true;
         }
         let (item_id, notice) =
-            store_transcription(&self.store, &tr, &app_id, &app_name, secrecy, copied_to_clipboard);
+            store_transcription(&self.store, &tr, app_id, app_name, secrecy, copied_to_clipboard);
         if let Some(reason) = notice {
             (self.sink)(PipelineEvent::Empty { reason });
         }
 
+        // A FAILED WRITE is an error, not a withholding.
+        //
+        // `withheld` was `item_id < 0 || ...`, which folded the two together.
+        // Both handlers return early on `withheld`, so a store that failed
+        // (locked, disk full, key gone) produced no toast, no HUD line and no
+        // notice: the text had been injected and nothing anywhere said the
+        // history write had not happened.
         if item_id < 0 && !secrecy.drop_entirely() {
             (self.sink)(PipelineEvent::Error {
                 // The sentence is chosen from what actually happened. It said
@@ -957,12 +1242,27 @@ impl Pipeline {
                 // message told the user it was in their document.
                 message: if injection.is_some() {
                     "Could not save that to History. The text was still inserted.".into()
+                } else if copied_to_clipboard {
+                    "Could not save that to History. The text is on the clipboard.".into()
                 } else {
                     "Could not save that to History, and it was not inserted anywhere. \
                      That dictation is lost."
                         .to_string()
                 },
             });
+        }
+        if let Some(why) = refine_failure.as_deref() {
+            // Said AFTER the store, so the sentence about where the transcript
+            // ended up is true when it is read.
+            let where_it_is = match (injection.is_some(), copied_to_clipboard, item_id >= 0) {
+                (true, _, true) => "The plain transcript was inserted instead, and is in History.",
+                (true, _, false) => "The plain transcript was inserted instead.",
+                (false, true, true) => "The plain transcript is on the clipboard and in History.",
+                (false, true, false) => "The plain transcript is on the clipboard.",
+                (false, false, true) => "The plain transcript is in History.",
+                (false, false, false) => "The plain transcript could not be kept anywhere.",
+            };
+            (self.sink)(PipelineEvent::Error { message: format!("Refining failed: {why}. {where_it_is}") });
         }
         (self.sink)(PipelineEvent::Completed {
             item_id,
@@ -978,13 +1278,58 @@ impl Pipeline {
             } else {
                 text
             },
-            duration_ms: recording.duration_ms,
-            transcribe_ms,
-            model_id,
+            duration_ms: d.duration_ms,
+            transcribe_ms: d.transcribe_ms,
+            model_id: d.model_id,
             injection,
-            low_confidence_count: 0,
+            low_confidence_count: tr.low_confidence.len(),
+            mode,
+            refined: refined_ok,
         });
-        self.emit_idle_if_quiescent();
+    }
+}
+
+/// The row to store for a finished take.
+///
+/// Refined: `text` is the AI's rewrite and `raw_text` is the cleaned transcript
+/// it was given, so "restore raw" hands back the speaker's own words. Trimmed
+/// and low-confidence spans index into text that is no longer there, so they
+/// are dropped rather than left pointing at the wrong characters.
+fn transcription_result(d: &Delivery, refined: Option<&refine::Outcome>) -> TranscriptionResult {
+    match refined {
+        Some(out) => TranscriptionResult {
+            raw_text: d.text.clone(),
+            text: out.text.clone(),
+            language: d.language.clone(),
+            model_id: d.model_id.clone(),
+            duration_ms: d.duration_ms,
+            transcribe_ms: d.transcribe_ms,
+            segments: d.segments.clone(),
+            trimmed: vec![],
+            low_confidence: vec![],
+            cleanup_tier: 3,
+            refine: Some(RefineMeta {
+                provider: serde_json::to_value(out.provider)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unknown".into()),
+                model: out.model.clone(),
+                elapsed_ms: out.elapsed_ms,
+            }),
+        },
+        None => TranscriptionResult {
+            raw_text: d.raw_text.clone(),
+            text: d.text.clone(),
+            language: d.language.clone(),
+            model_id: d.model_id.clone(),
+            duration_ms: d.duration_ms,
+            transcribe_ms: d.transcribe_ms,
+            segments: d.segments.clone(),
+            trimmed: d.trimmed.clone(),
+            low_confidence: d.low_confidence.clone(),
+            cleanup_tier: d.cleanup_tier,
+            refine: None,
+        },
     }
 }
 

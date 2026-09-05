@@ -48,6 +48,15 @@ Target latencies (measured, not aspirational: benchmarks in `bench/`):
 - Multi-language: auto-detect + manual; locale variants (en-AU/en-GB/en-US) affect spelling.
 - Streaming partial transcripts shown in the HUD while speaking.
 
+### Refine (second dictation mode, opt-in)
+- Triggered by holding a modifier (Shift by default) with the EXISTING dictation key, or by a
+  separate key of its own. Its own accent colour, user-picked. The recording is identical; on stop the cleaned
+  transcript goes to an AI CLI on the machine (Claude Code verified; Codex, Gemini, custom command
+  best effort) and the REWRITE is pasted, copied and stored, with the transcript as the row's raw text.
+- User rules and an optional voice .md are baked into every prompt. The transcript is data, never
+  instructions: fixed contract as the system prompt, user text on stdin, tools/MCP/hooks/CLAUDE.md off.
+- Never sends a password-field dictation. Failure and cancel never lose the transcript (docs/REFINE.md).
+
 ### Cleanup (each rule individually toggleable)
 - Tier 1 (always available, deterministic, Rust): filler-word removal, restart/abandoned-sentence
   trimming (trimmed spans highlighted in history for one-click restore), punctuation,
@@ -125,6 +134,13 @@ fuzzy history palette (Enter pastes into previous app), clipboard capture with e
 
 SHIPPED 22/08: Parakeet TDT v3 engine (CPU int8, ~14x RT measured, 25 European languages),
 12-model whisper registry incl. Distil-Whisper v3.5.
+
+SHIPPED 04/09: Refine mode (modifier-plus-dictation-key or its own key, AI rewrite via a local CLI,
+user-picked accent, rules + voice file, fallback policy, Test button), the single `deliver()` path,
+and the fix that let a user-added model file be SELECTED (it could be added but "Use" answered
+"unknown model"). Held modifiers now travel with every hotkey event (`platform::Mods`), sampled from
+the event itself. Windows: parle-hook wire protocol extended in place (byte 3 of the event frame);
+not yet compiled there.
 
 DEFERRED (tracked in HUMAN_TASKS.md / WINDOWS_HANDOFF.md): local-LLM cleanup tier (settings
 scaffolded), per-file model checksums, overlay position presets, per-app paste

@@ -341,6 +341,24 @@ body[data-window='hud'] #root {
 .hud.hud-minimal { width: 170px; margin-left: 79px; }
 
 
+/* ---------- Refine mode ---------- */
+
+/* The mode tag under the waveform: small, in the (Refine) accent, so the
+   overlay says what will happen to the words before you stop. */
+.hud-mode-tag {
+  color: var(--accent);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+
+/* Decks keep their fixed colours; the label carries the mode instead. */
+.deck-ai {
+  color: var(--accent);
+  letter-spacing: 0.1em;
+}
+
 /* ---------- Outcome message (post-dictation hold) ---------- */
 
 .hud-outcome {

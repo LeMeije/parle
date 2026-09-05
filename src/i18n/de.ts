@@ -30,6 +30,8 @@ export const de: Record<string, string> = {
   'app.toast.pasteInstruction': 'Kopiert. Zum Einfügen {keys} drücken',
   'app.toast.inserted': 'Eingefügt: „{text}“',
   'app.toast.copied': 'Kopiert: „{text}“',
+  'app.toast.refinedInserted': 'Überarbeitet und eingefügt: „{text}“',
+  'app.toast.refinedCopied': 'Überarbeitet und kopiert: „{text}“',
 
   // ---------- Recording overlay (HUD) ----------
   'hud.pasteInstruction': 'Kopiert. Zum Einfügen {keys} drücken',
@@ -40,6 +42,11 @@ export const de: Record<string, string> = {
   'hud.cancel': 'Abbrechen (Esc)',
   'hud.deck.rec': 'REC',
   'hud.deck.proc': 'PROC',
+  'hud.deck.ai': 'KI',
+  'hud.deck.aiTag': '· KI',
+  'hud.stopAndRefine': 'Stoppen und überarbeiten',
+  'hud.refining': 'Überarbeitung mit {provider}… {secs}s',
+  'hud.refineTag': 'Überarbeiten',
 
   // ---------- History ----------
   'history.searchPlaceholder': 'Transkripte und Zwischenablage durchsuchen…  (↑↓ · Enter fügt ein · {copyKeys} kopiert)',
@@ -58,6 +65,8 @@ export const de: Record<string, string> = {
   'history.localOnly.title':
     'Parle konnte nicht ausschließen, dass dies ein Passwortfeld war. Der Eintrag bleibt deshalb auf diesem Gerät und wird nie an Ihre anderen Geräte gesendet',
   'history.fromDevice.title': 'Auf einem anderen Ihrer Geräte geschrieben und hierher synchronisiert',
+  'history.refined.badge': 'überarbeitet',
+  'history.refined.title': 'Von {by} in {secs}s umgeschrieben. „Rohtext wiederherstellen“ bringt Ihre eigenen Worte zurück.',
   'history.action.paste': 'Einfügen',
   'history.action.pasteTitle': 'In die vorherige App einfügen (Enter)',
   'history.action.copy': 'Kopieren',
@@ -79,6 +88,12 @@ export const de: Record<string, string> = {
   'compose.transcribing': 'Transkribieren…',
   'compose.recording': 'Aufnahme',
   'compose.processing': 'Verarbeitung',
+  'compose.recordingRefine': 'Aufnahme · Überarbeiten',
+  'compose.refining': 'Überarbeitung…',
+  'compose.refiningPill': 'Überarbeitung',
+  'compose.startRefine': 'Überarbeiten',
+  'compose.startRefine.title': 'Diktieren, dann schreibt die KI den Text um, bevor er eingefügt wird',
+  'compose.refinedNote': 'Von der KI umgeschrieben, am Cursor eingefügt und im Verlauf gespeichert. Ihre eigenen Worte sind der Rohtext dieser Zeile.',
   'compose.markPlaceholder.recording': 'Link einfügen oder tippen, Enter heftet ihn an diesen Moment…',
   'compose.markPlaceholder.idle': 'Diktat starten, um Links und Text einzufügen',
   'compose.insert': 'Einfügen',
@@ -172,6 +187,7 @@ export const de: Record<string, string> = {
   'settings.section.cleanup': 'Bereinigung',
   'settings.section.dictionary': 'Wörterbuch',
   'settings.section.output': 'Ausgabe',
+  'settings.section.refine': 'Mit KI überarbeiten',
   'settings.section.appearance': 'Darstellung',
   'settings.section.historyPrivacy': 'Verlauf & Datenschutz',
   'settings.section.audio': 'Audio',
@@ -301,6 +317,83 @@ export const de: Record<string, string> = {
   'settings.pressEnter.label': 'Nach dem Einfügen Enter drücken',
   'settings.pressEnter.hint':
     'Sendet die Nachricht direkt nach dem Einfügen, praktisch für Chat-Apps. Bei sicheren Feldern wird es nie ausgelöst.',
+
+  // ---------- Settings: refine ----------
+  'settings.refine.enable.label': 'Überarbeiten-Modus',
+  'settings.refine.enable.hint':
+    'Eine zweite Art zu diktieren. Sprechen Sie frei heraus; statt das Transkript einzufügen, übergibt Parle es einer KI auf diesem Rechner und fügt deren Fassung ein: geordnet, mit Satzzeichen, versandfertig. Das Transkript wird weiterhin kopiert und im Verlauf behalten. Dies ist das Einzige in Parle, das Ihre Worte von diesem Gerät sendet, und es geschieht nur, wenn Sie diese Taste drücken.',
+  'settings.refine.provider.label': 'KI',
+  'settings.refine.provider.hint': 'Ein bereits installiertes und angemeldetes Kommandozeilenwerkzeug. Parle besitzt nie einen API-Schlüssel.',
+  'settings.refine.provider.claude': 'Claude Code (claude)',
+  'settings.refine.provider.codex': 'OpenAI Codex CLI (codex)',
+  'settings.refine.provider.gemini': 'Google Gemini CLI (gemini)',
+  'settings.refine.provider.custom': 'Eigener Befehl',
+  'settings.refine.programPath.label': 'Pfad zum Werkzeug',
+  'settings.refine.programPath.hint': 'Leer lassen, um es automatisch zu finden. Setzen, falls die Prüfung unten es nicht findet.',
+  'settings.refine.programPath.placeholder': 'auto',
+  'settings.refine.customCommand.label': 'Befehl',
+  'settings.refine.customCommand.hint':
+    'Die vollständige Befehlszeile. Sie erhält die Anweisung über die Standardeingabe und muss die Fassung auf der Standardausgabe ausgeben. Keine Shell: Pipes und Variablen werden als Text durchgereicht.',
+  'settings.refine.model.label': 'Modell',
+  'settings.refine.model.hint': 'Wird dem Werkzeug als Modelloption übergeben. Leer verwendet dessen Standard.',
+  'settings.refine.model.placeholder': 'Standard',
+  'settings.refine.status.checking': 'Prüfung…',
+  'settings.refine.status.notChecked': 'Noch nicht geprüft. Schalten Sie Überarbeiten ein oder klicken Sie auf Erneut prüfen.',
+  'settings.refine.status.found': '{program} gefunden',
+  'settings.refine.status.version': 'Version {version}',
+  'settings.refine.status.signedIn': 'angemeldet',
+  'settings.refine.status.notSignedIn': 'nicht angemeldet',
+  'settings.refine.status.recheck': 'Erneut prüfen',
+  'settings.refine.status.voiceMissing': 'Die Stimmdatei ist nicht lesbar; Diktate werden ohne sie überarbeitet.',
+  'settings.refine.key.label': 'Überarbeiten-Taste',
+  'settings.refine.key.hintMac': 'Rechte Wahltaste wird vorgeschlagen. Kombinationen wie ⌥E funktionieren weiter: sie brechen die Aufnahme ab und werden durchgereicht.',
+  'settings.refine.key.hintWin': 'Eine Kombination wird vorgeschlagen. Eine einzelne Modifikatortaste würde, sobald belegt, nicht mehr als Modifikator wirken.',
+  'settings.refine.key.clash': 'Das ist auch die Diktiertaste. Diktieren gewinnt, Überarbeiten würde nie starten. Wählen Sie eine andere Taste.',
+  'settings.refine.gesture.label': 'Überarbeiten-Geste',
+  'settings.refine.accent.label': 'Überarbeiten-Farbe',
+  'settings.refine.accent.hint': 'Overlay und Diktierleiste nehmen diese Farbe an, solange eine Überarbeiten-Aufnahme läuft, damit Sie immer wissen, in welchem Modus Sie sind.',
+  'settings.refine.rules.label': 'Ihre Regeln',
+  'settings.refine.rules.hint': 'Feste Anweisungen für jede Überarbeitung: Rechtschreibung, Ton, zu vermeidende Zeichen, Grußformel.',
+  'settings.refine.rules.placeholder':
+    'Deutsche Rechtschreibung. Keine Gedankenstriche. Meine erste Person beibehalten. Kurze Absätze. Liest es sich wie eine E-Mail, mit meinem Vornamen enden, [Ihr Vorname].',
+  'settings.refine.voice.label': 'Stimmdatei',
+  'settings.refine.voice.hint': 'Optionale Markdown-Datei darüber, wie Sie schreiben. Wird jedes Mal neu gelesen, also weiter die vorhandene bearbeiten. Begrenzt auf 64 KB.',
+  'settings.refine.voice.choose': 'Wählen…',
+  'settings.refine.voice.clear': 'Entfernen',
+  'settings.refine.voice.picker': 'Stimmdatei wählen',
+  'settings.refine.voice.filter': 'Markdown oder Text',
+  'settings.refine.timeout.label': 'Aufgeben nach',
+  'settings.refine.timeout.hint': 'Das Werkzeug wird dann gestoppt und die Rückfallregel unten gilt.',
+  'settings.refine.fallback.label': 'Wenn die KI scheitert',
+  'settings.refine.fallback.clipboard': 'Rohes Transkript kopieren, nicht einfügen',
+  'settings.refine.fallback.insert': 'Rohes Transkript wie üblich einfügen',
+  'settings.refine.fallback.hint': 'Sie haben Überarbeiten angefordert, weil das rohe Diktat nicht versandfertig war; standardmäßig bleibt es daher aus Ihrem Dokument und geht in Zwischenablage und Verlauf.',
+  'settings.refine.test.button': 'Ausprobieren',
+  'settings.refine.test.running': 'Beispiel wird überarbeitet…',
+  'settings.refine.test.result': 'Umgeschrieben in {secs}s{model}:',
+  'settings.refine.test.hint': 'Schickt ein festes Beispieldiktat durch den ganzen Weg, genau wie eine echte Aufnahme.',
+  'settings.refine.privacy':
+    'Gesendet werden: das Transkript, Ihre Regeln und Ihre Stimmdatei. Nicht gesendet: Audio, Verlauf, Zwischenablage oder irgendetwas über die App, in die Sie tippen. Das Werkzeug läuft mit abgeschalteten eigenen Tools, Erweiterungen und Projektdateien, sodass ein Diktat nie zu einer Aktion werden kann.',
+
+  // ---------- Settings: refine trigger ----------
+  'settings.refine.trigger.label': 'Wie Sie es starten',
+  'settings.refine.trigger.hint':
+    'Entweder halten Sie eine Modifikatortaste, während Sie Ihre gewohnte Diktiertaste benutzen, oder Überarbeiten bekommt eine eigene Taste.',
+  'settings.refine.trigger.modifier': 'Modifikator halten',
+  'settings.refine.trigger.ownKey': 'Eigene Taste',
+  'settings.refine.modifier.label': 'Modifikator',
+  'settings.refine.trigger.gestureHint':
+    '{mod} halten, dann {key} {gesture}, genau wie bisher. Halten Sie den Modifikator zuerst: er wird in dem Moment gelesen, in dem die Aufnahme beginnt. Die linke wie die rechte Taste funktioniert.',
+  'settings.refine.trigger.verb.hold': 'halten',
+  'settings.refine.trigger.verb.tap': 'antippen',
+  'settings.refine.trigger.verb.doubleTap': 'zweimal antippen',
+  'settings.refine.trigger.verb.hybrid': 'halten oder antippen',
+  'settings.refine.trigger.clashModifier':
+    'Ihre Diktiertaste ist {key}, also derselbe Modifikator wie {mod}; sie zu halten kann nichts Zusätzliches bedeuten. Wählen Sie einen anderen Modifikator, oder geben Sie Überarbeiten eine eigene Taste.',
+  'settings.refine.trigger.chordKey':
+    'Ihre Diktiertaste ist die Kombination {key}. Ein Modifikator-Auslöser funktioniert nur mit einer einzelnen Taste, etwa der Globus-Taste, der Copilot-Taste oder einem einzelnen Modifikator. Geben Sie Überarbeiten stattdessen eine eigene Taste.',
+  'settings.refine.trigger.copilotModifier':
+    'Die Copilot-Taste sendet selbst Shift und die Windows-Taste, deshalb kann Parle Ihr {mod} nicht von dem der Tastatur unterscheiden. Verwenden Sie Strg oder Alt mit der Copilot-Taste.',
 
   // ---------- Settings: appearance ----------
   'settings.theme.label': 'Erscheinungsbild',

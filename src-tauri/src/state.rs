@@ -1,8 +1,8 @@
 //! Shared application state and the platform-event dispatcher.
 
 use crate::hotkey_logic::{GestureAction, GestureMachine, KeyPhase};
-use crate::pipeline::{Pipeline, PipelineEvent};
-use crate::platform::{self, HotkeyId, NativeBindings, NativeKey, PlatformEvent};
+use crate::pipeline::{DictationMode, PendingDictation, Pipeline, PipelineEvent};
+use crate::platform::{self, HotkeyId, Mods, NativeBindings, NativeKey, PlatformEvent};
 use parle_asr::download::CancelToken;
 use parle_asr::manager::EngineManager;
 use parle_core::history::Store;
@@ -22,6 +22,9 @@ pub struct AppState {
     pub downloads: Mutex<HashMap<String, CancelToken>>,
     pub gesture: Mutex<GestureMachine>,
     pub gesture_alt: Mutex<GestureMachine>,
+    /// The Refine key's own gesture machine. Same modes as the other two; what
+    /// differs is the `DictationMode` it starts the pipeline in.
+    pub gesture_refine: Mutex<GestureMachine>,
     recording_flag: Arc<AtomicBool>,
     /// Kept so the cancel shortcut can be armed while recording. See
     /// `set_recording_flag`.
@@ -45,7 +48,11 @@ pub struct AppState {
 }
 
 enum Work {
-    StopAndProcess,
+    /// The recording is detached from the pipeline BEFORE it is queued, so the
+    /// job carries its own audio, marks and latched app. Queuing a bare "go and
+    /// stop whatever is recording" meant the job read shared slots that the
+    /// next dictation had already overwritten.
+    StopAndProcess(PendingDictation),
     Prewarm(AppHandle),
     /// Arbitrary job on the serial worker (engine reconfiguration etc.) so it
     /// queues after any in-flight transcription instead of blocking the caller.
@@ -89,7 +96,7 @@ impl AppState {
         let excluded_apps = loaded.history.excluded_apps.clone();
         let settings = Arc::new(Mutex::new(loaded));
         let store = Arc::new(Mutex::new({
-            let mut s = Store::open(&history_db_path()).expect("history store");
+            let mut s = open_store_or_recover(&history_db_path());
             s.set_device_id(&device_id);
             s.set_excluded_apps(excluded_apps);
             s
@@ -162,7 +169,7 @@ impl AppState {
                 _ => {}
             }
             // Keep the HUD visible/hidden in lockstep with state.
-            if let PipelineEvent::StateChanged { state } = &event {
+            if let PipelineEvent::StateChanged { state, .. } = &event {
                 crate::hud::sync_hud(&app_for_sink, *state);
             }
         });
@@ -178,7 +185,7 @@ impl AppState {
                     // ONE worker: transcription jobs are strictly ordered.
                     for job in work_rx {
                         match job {
-                            Work::StopAndProcess => pipeline.stop_and_process(),
+                            Work::StopAndProcess(pending) => pipeline.process(pending),
                             Work::Run(job) => job(),
                             Work::Prewarm(app) => {
                                 let state = app.state::<Arc<AppState>>();
@@ -208,6 +215,7 @@ impl AppState {
         let latch = settings.lock().hotkeys.latch_ms;
         let mode = settings.lock().hotkeys.dictation.mode;
         let mode_alt = settings.lock().hotkeys.dictation_alt.mode;
+        let mode_refine = settings.lock().hotkeys.refine.mode;
 
         Arc::new(Self {
             settings,
@@ -217,6 +225,7 @@ impl AppState {
             downloads: Mutex::new(HashMap::new()),
             gesture: Mutex::new(GestureMachine::new(mode, latch)),
             gesture_alt: Mutex::new(GestureMachine::new(mode_alt, latch)),
+            gesture_refine: Mutex::new(GestureMachine::new(mode_refine, latch)),
             sync,
             recording_flag: Arc::new(AtomicBool::new(false)),
             app: parking_lot::Mutex::new(None),
@@ -253,38 +262,84 @@ impl AppState {
         }
     }
 
-    pub fn pipeline_start(&self) {
+    pub fn pipeline_start(&self, mode: DictationMode) {
         // Flag only reflects reality: set AFTER the recorder actually starts,
         // and reset the gesture machines when it fails so Toggle/Hybrid can't
         // strand in an active state (that combination once swallowed Escape
         // system-wide).
-        let ok = self.pipeline.start();
+        let ok = self.pipeline.start(mode);
         self.set_recording_flag(ok);
         if !ok {
+            self.reset_gestures();
+        }
+    }
+
+    /// Every gesture machine back to Idle.
+    fn reset_gestures(&self) {
+        self.gesture.lock().reset();
+        self.gesture_alt.lock().reset();
+        self.gesture_refine.lock().reset();
+    }
+
+    /// Every gesture machine EXCEPT the one that just acted back to Idle.
+    ///
+    /// Three keys can each start or stop the same single recording. When one of
+    /// them stops it, a machine that another key had latched would otherwise
+    /// stay in its recording state, so that key's next press read as "stop"
+    /// against an idle pipeline and did nothing: a dead keypress the user has
+    /// to repeat. The machine that most recently acted is the one that owns
+    /// the take; the others follow it.
+    fn reset_other_gestures(&self, keep: HotkeyId) {
+        if keep != HotkeyId::Dictation {
             self.gesture.lock().reset();
+        }
+        if keep != HotkeyId::DictationAlt {
             self.gesture_alt.lock().reset();
+        }
+        if keep != HotkeyId::Refine {
+            self.gesture_refine.lock().reset();
         }
     }
 
     pub fn pipeline_stop(&self) {
         self.set_recording_flag(false);
-        let _ = self.work_tx.send(Work::StopAndProcess);
+        // Detached HERE, on the caller's thread, not when the worker reaches the
+        // job: the microphone has to stop when the user says stop, and the
+        // recorder slot has to be free before the next `pipeline_start`. See
+        // `Pipeline::take_pending`. Cheap by design (three mutex takes and an
+        // event), the thread joins stay on the worker.
+        //
+        // Nothing queued when nothing was recording, so a stray stop cannot
+        // leave a phantom job holding the HUD out of Idle.
+        let Some(pending) = self.pipeline.take_pending() else {
+            return;
+        };
+        if let Err(crossbeam_channel::SendError(job)) =
+            self.work_tx.send(Work::StopAndProcess(pending))
+        {
+            // The worker is gone, so nothing will ever transcribe this. Hand the
+            // take back instead of swallowing the error: the count it raised
+            // would otherwise hold the HUD on "Transcribing" for the rest of the
+            // session, telling the user their dictation is on its way.
+            tracing::error!("dictation worker is gone; this take cannot be transcribed");
+            if let Work::StopAndProcess(pending) = job {
+                self.pipeline.abandon_pending(pending);
+            }
+        }
     }
 
     /// Stop initiated outside the hotkey path (HUD click, tray, UI button).
     /// Must also sync the gesture machines or they desynchronise from the
     /// pipeline (latched machine + idle pipeline = dead hotkey press).
     pub fn external_stop(&self) {
-        self.gesture.lock().reset();
-        self.gesture_alt.lock().reset();
+        self.reset_gestures();
         self.pipeline_stop();
     }
 
     /// Cancel from any source: always clears flag and gestures, even when the
     /// pipeline is already idle (stale-flag recovery).
     pub fn external_cancel(&self) {
-        self.gesture.lock().reset();
-        self.gesture_alt.lock().reset();
+        self.reset_gestures();
         self.pipeline.cancel();
         self.set_recording_flag(false);
     }
@@ -315,6 +370,11 @@ impl AppState {
     /// Remember the handle so `set_recording_flag` can reach the shortcut API.
     pub fn set_app_handle(&self, app: AppHandle) {
         *self.app.lock() = Some(app);
+    }
+
+    /// Is a recording in progress, as far as the hotkey layer is concerned?
+    pub fn is_recording_flag_set(&self) -> bool {
+        self.recording_flag.load(Ordering::SeqCst)
     }
 
     /// Build native bindings from settings (only keys the native layer owns).
@@ -401,6 +461,15 @@ impl AppState {
                 g.set_mode(s.hotkeys.dictation_alt.mode, s.hotkeys.latch_ms);
             }
         }
+        {
+            let mut g = self.gesture_refine.lock();
+            if !g.is_active() {
+                g.set_mode(s.hotkeys.refine.mode, s.hotkeys.latch_ms);
+            }
+        }
+        // The program lookup is cached; a changed path or provider must not
+        // keep pointing at the old executable.
+        crate::refine::forget_resolved();
         if let Some(h) = self.hotkeys.lock().as_ref() {
             h.update_bindings(self.native_bindings());
             #[cfg(target_os = "windows")]
@@ -426,7 +495,7 @@ impl AppState {
     /// Handle a platform event (called from the dispatcher thread).
     pub fn on_platform_event(self: &Arc<Self>, app: &AppHandle, event: PlatformEvent) {
         match event {
-            PlatformEvent::Hotkey { id, phase } => self.on_hotkey(app, id, phase),
+            PlatformEvent::Hotkey { id, phase, mods } => self.on_hotkey(app, id, phase, mods),
             PlatformEvent::AbortGesture => self.on_abort_gesture(),
             PlatformEvent::ClipboardChanged { text, app_id, app_name } => {
                 let s = self.settings.lock();
@@ -454,25 +523,63 @@ impl AppState {
     /// emoji, Fn+arrow for paging): the user is using the key as a modifier,
     /// not dictating. Abort the just-started hold gesture and its recording.
     pub fn on_abort_gesture(self: &Arc<Self>) {
-        let holding = self.gesture.lock().in_hold_phase() || self.gesture_alt.lock().in_hold_phase();
+        let holding = self.gesture.lock().in_hold_phase()
+            || self.gesture_alt.lock().in_hold_phase()
+            || self.gesture_refine.lock().in_hold_phase();
         if holding {
             self.external_cancel();
         }
     }
 
-    fn on_hotkey(self: &Arc<Self>, app: &AppHandle, id: HotkeyId, phase: KeyPhase) {
+    fn on_hotkey(self: &Arc<Self>, app: &AppHandle, id: HotkeyId, phase: KeyPhase, mods: Mods) {
         let now = now_ms();
         match id {
-            HotkeyId::Dictation | HotkeyId::DictationAlt => {
-                let action = if id == HotkeyId::Dictation {
-                    self.gesture.lock().on_key(phase, now)
-                } else {
-                    self.gesture_alt.lock().on_key(phase, now)
+            HotkeyId::Dictation | HotkeyId::DictationAlt | HotkeyId::Refine => {
+                let action = match id {
+                    HotkeyId::Dictation => self.gesture.lock().on_key(phase, now),
+                    HotkeyId::DictationAlt => self.gesture_alt.lock().on_key(phase, now),
+                    _ => self.gesture_refine.lock().on_key(phase, now),
                 };
                 tracing::info!("hotkey {id:?} {phase:?} -> {action:?}");
+                // The mode is decided from the modifiers that came WITH this
+                // event, so it describes the press the user actually made
+                // rather than the state of the keyboard by the time this
+                // thread got round to asking.
+                let mode = if id == HotkeyId::Refine {
+                    DictationMode::Refine
+                } else {
+                    mode_for_dictation(&self.settings.lock(), mods)
+                };
                 match action {
-                    GestureAction::StartRecording => self.pipeline_start(),
-                    GestureAction::StopRecording => self.pipeline_stop(),
+                    GestureAction::StartRecording if self.pipeline.is_recording() => {
+                        // A "start" while something is already recording, from
+                        // a key whose machine was Idle.
+                        //
+                        // Only the REFINE key may switch the live take, and it
+                        // switches without disturbing the machine that holds
+                        // the recording, so releasing or re-tapping that key
+                        // still stops it. Any other key here means "stop": it
+                        // is the key the user started with and habit brings
+                        // it back, and turning it into a switch back to
+                        // Standard (what an earlier version did, after
+                        // resetting the holder) silently un-refined the take
+                        // and needed a second press to stop at all.
+                        if id == HotkeyId::Refine {
+                            self.pipeline_start(mode);
+                        } else {
+                            self.reset_gestures();
+                            self.pipeline_stop();
+                        }
+                    }
+                    GestureAction::StartRecording => self.pipeline_start(mode),
+                    GestureAction::StopRecording => {
+                        // Whichever key stopped the take owns the outcome; the
+                        // other machines are released so their next press
+                        // starts afresh instead of "stopping" a recording they
+                        // no longer hold.
+                        self.reset_other_gestures(id);
+                        self.pipeline_stop();
+                    }
                     GestureAction::Nothing => {}
                 }
             }
@@ -487,6 +594,76 @@ impl AppState {
                 }
             }
         }
+    }
+}
+
+/// Open the history store, and if the file is unreadable, move it aside and
+/// start a fresh one rather than dying on the spot.
+///
+/// This was `.expect("history store")`: a locked, corrupt or half-migrated
+/// database crashed the app at launch with no window, no message and nothing
+/// in the log, which the user experiences as "Parle stopped opening". The old
+/// file is KEPT under a dated name, never deleted, so nothing is lost and it
+/// can be inspected or restored by hand.
+fn open_store_or_recover(path: &std::path::Path) -> Store {
+    match Store::open(path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("history database could not be opened ({e}); moving it aside and starting fresh");
+            let stamp = now_ms() / 1000;
+            for suffix in ["", "-wal", "-shm"] {
+                let from = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+                if from.exists() {
+                    let to = std::path::PathBuf::from(format!("{}.unreadable-{stamp}{suffix}", path.display()));
+                    if let Err(e) = std::fs::rename(&from, &to) {
+                        tracing::error!("could not move {} aside: {e}", from.display());
+                    }
+                }
+            }
+            match Store::open(path) {
+                Ok(s) => s,
+                Err(e2) => {
+                    // Last resort: in memory. The app runs; nothing persists
+                    // this session, and the log says so.
+                    tracing::error!("a fresh history database could not be created either ({e2}); running with an in-memory history");
+                    Store::open_in_memory().expect("in-memory history store")
+                }
+            }
+        }
+    }
+}
+
+/// Does the Refine feature want its own separate binding?
+///
+/// One place, because three of them ask: the native listener, the chord
+/// registration and the Settings panel. Two of the three disagreeing would
+/// leave a key armed for a trigger that never fires, or a trigger with no key.
+pub fn refine_uses_own_key(s: &parle_core::settings::Settings) -> bool {
+    s.refine.enabled && s.refine.trigger == parle_core::settings::RefineTrigger::OwnKey
+}
+
+/// Which mode a press of the ORDINARY dictation key starts.
+///
+/// Pure, and takes the modifiers as a value, so the whole rule can be tested
+/// without a keyboard, an app or a running pipeline.
+pub fn mode_for_dictation(s: &parle_core::settings::Settings, mods: Mods) -> DictationMode {
+    use parle_core::settings::{RefineModifier, RefineTrigger};
+    if !s.refine.enabled || s.refine.trigger != RefineTrigger::Modifier {
+        return DictationMode::Standard;
+    }
+    // A dictation key that IS the trigger's modifier can never satisfy the
+    // trigger: the platform layer strips the pressed key's own bit, so holding
+    // the OTHER Shift would be needed, which is a distinction this feature
+    // deliberately does not make. Rather than let that read as an ordinary
+    // dictation that silently never refines, it is refused here as well, and
+    // Settings shows the clash.
+    if RefineModifier::of_native_key(&s.hotkeys.dictation.key) == Some(s.refine.modifier) {
+        return DictationMode::Standard;
+    }
+    if mods.has(s.refine.modifier) {
+        DictationMode::Refine
+    } else {
+        DictationMode::Standard
     }
 }
 
@@ -514,10 +691,154 @@ pub fn bindings_from(s: &parle_core::settings::Settings) -> NativeBindings {
     NativeBindings {
         dictation: parse(&s.hotkeys.dictation),
         dictation_alt: parse(&s.hotkeys.dictation_alt),
+        // Armed only while the feature is on AND the user asked for a separate
+        // key. A key that swallows system-wide must not exist for a feature
+        // that is off, nor for a trigger that does not use it: the default
+        // trigger is a modifier on the dictation key and claims nothing.
+        refine: if refine_uses_own_key(s) { parse(&s.hotkeys.refine) } else { None },
         cancel: if s.hotkeys.cancel.enabled {
             NativeKey::parse(&s.hotkeys.cancel.key)
         } else {
             None
         },
+    }
+}
+
+#[cfg(test)]
+mod refine_trigger_tests {
+    //! The modifier trigger, pinned from both sides.
+    //!
+    //! Every rule here has two opposite ways to be wrong: a Refine take that
+    //! does not go to the AI, and an ordinary dictation that does. The second
+    //! is the one that costs, because the user did not ask for it and the text
+    //! leaves the machine, so each test asserts the negative case as well.
+
+    use super::{mode_for_dictation, refine_uses_own_key};
+    use crate::pipeline::DictationMode;
+    use crate::platform::{Mods, NativeKey};
+    use parle_core::settings::{RefineModifier, RefineTrigger, Settings};
+
+    fn shift() -> Mods {
+        Mods { shift: true, ..Default::default() }
+    }
+
+    /// Refine on, modifier trigger, dictation on the platform default key.
+    fn armed() -> Settings {
+        let mut s = Settings::default();
+        s.refine.enabled = true;
+        s.refine.trigger = RefineTrigger::Modifier;
+        s.refine.modifier = RefineModifier::Shift;
+        s
+    }
+
+    #[test]
+    fn the_modifier_makes_it_a_refine_take_and_its_absence_does_not() {
+        let s = armed();
+        assert_eq!(mode_for_dictation(&s, shift()), DictationMode::Refine);
+        assert_eq!(mode_for_dictation(&s, Mods::default()), DictationMode::Standard);
+    }
+
+    #[test]
+    fn a_different_modifier_held_is_not_the_trigger() {
+        let s = armed();
+        let ctrl = Mods { ctrl: true, ..Default::default() };
+        assert_eq!(mode_for_dictation(&s, ctrl), DictationMode::Standard);
+        // And the trigger follows the setting rather than being hard-wired.
+        let mut s2 = s.clone();
+        s2.refine.modifier = RefineModifier::Ctrl;
+        assert_eq!(mode_for_dictation(&s2, ctrl), DictationMode::Refine);
+        assert_eq!(mode_for_dictation(&s2, shift()), DictationMode::Standard);
+    }
+
+    #[test]
+    fn extra_modifiers_alongside_the_trigger_still_count() {
+        // People hold Shift with a hand that is also on Cmd. The trigger asks
+        // whether ITS modifier is down, not whether it is the only one.
+        let s = armed();
+        let both = Mods { shift: true, cmd: true, ..Default::default() };
+        assert_eq!(mode_for_dictation(&s, both), DictationMode::Refine);
+    }
+
+    #[test]
+    fn nothing_is_refined_while_the_feature_is_off() {
+        let mut s = armed();
+        s.refine.enabled = false;
+        assert_eq!(mode_for_dictation(&s, shift()), DictationMode::Standard);
+    }
+
+    #[test]
+    fn the_separate_key_trigger_leaves_the_dictation_key_alone() {
+        let mut s = armed();
+        s.refine.trigger = RefineTrigger::OwnKey;
+        // Holding Shift with the dictation key must do nothing in this mode,
+        // or a user who chose a separate key would find Shift secretly
+        // sending their dictations to the AI as well.
+        assert_eq!(mode_for_dictation(&s, shift()), DictationMode::Standard);
+    }
+
+    #[test]
+    fn a_dictation_key_that_is_the_trigger_modifier_never_refines() {
+        // Right Shift dictates AND Shift is the trigger: the key's own bit is
+        // stripped by the platform layer, so this could only ever be
+        // satisfied by the other Shift, a left/right distinction this feature
+        // does not make. Refused outright rather than left as a trigger that
+        // appears to be set and never fires.
+        let mut s = armed();
+        s.hotkeys.dictation.key = "RightShift".into();
+        assert_eq!(mode_for_dictation(&s, shift()), DictationMode::Standard);
+        // A different family on the same key is fine.
+        s.refine.modifier = RefineModifier::Ctrl;
+        let ctrl = Mods { ctrl: true, ..Default::default() };
+        assert_eq!(mode_for_dictation(&s, ctrl), DictationMode::Refine);
+    }
+
+    #[test]
+    fn the_pressed_keys_own_modifier_bit_is_stripped_before_the_rule_sees_it() {
+        // The platform half of the rule above. `dispatch_key` strips the bound
+        // key's family; this is the same operation, asserted directly.
+        let key = NativeKey::parse("RightOption").unwrap();
+        assert_eq!(key.mod_family(), Some(RefineModifier::Alt));
+        let held = Mods { alt: true, shift: true, ..Default::default() };
+        let stripped = held.without(key.mod_family().unwrap());
+        assert!(!stripped.alt, "the key's own Option must not count as a held Option");
+        assert!(stripped.shift, "an unrelated modifier is untouched");
+    }
+
+    #[test]
+    fn the_keys_people_dictate_with_carry_no_modifier_family() {
+        // Fn and the Copilot key are not modifiers, so nothing is stripped for
+        // them and every modifier the user holds is theirs. This is what makes
+        // Shift plus a double tapped Globe, and Ctrl plus the Copilot key, work.
+        for k in ["Fn", "CopilotKey"] {
+            assert_eq!(NativeKey::parse(k).unwrap().mod_family(), None, "{k}");
+        }
+    }
+
+    #[test]
+    fn only_the_own_key_trigger_arms_a_second_binding() {
+        let mut s = armed();
+        assert!(!refine_uses_own_key(&s), "the modifier trigger must claim no second key");
+        s.refine.trigger = RefineTrigger::OwnKey;
+        assert!(refine_uses_own_key(&s));
+        s.refine.enabled = false;
+        assert!(!refine_uses_own_key(&s), "a disabled feature arms nothing at all");
+    }
+
+    #[test]
+    fn modifier_bits_survive_the_windows_wire() {
+        // The helper packs these into one byte of the event frame; a bit that
+        // does not survive the round trip is a trigger that never fires.
+        for m in [
+            Mods { shift: true, ..Default::default() },
+            Mods { ctrl: true, ..Default::default() },
+            Mods { alt: true, ..Default::default() },
+            Mods { cmd: true, ..Default::default() },
+            Mods { shift: true, ctrl: true, alt: true, cmd: true },
+            Mods::default(),
+        ] {
+            assert_eq!(Mods::from_bits(m.to_bits()), m, "{m:?}");
+        }
+        // And the byte an older helper sends (zero padding) reads as nothing.
+        assert_eq!(Mods::from_bits(0), Mods::default());
     }
 }

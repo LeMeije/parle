@@ -40,7 +40,10 @@ parle/
 ## Data flow on stop
 audio buffer -> final ASR pass -> Tier-1 deterministic cleanup (Rust) -> dictionary post-correction ->
 [optional Tier-2 local LLM with hard deadline + circuit breaker, falls back to Tier-1 output] ->
-simultaneously: inject at cursor + set clipboard + insert history row. The RAW transcript and the audio
+[Refine mode only: the cleaned transcript goes to an AI CLI child process with a hard deadline and a
+cancel token; its rewrite replaces the text, the transcript becomes raw_text; see docs/REFINE.md] ->
+`Pipeline::deliver` (ONE path for both the plain and the mark-splice take): inject at cursor + set
+clipboard + insert history row. The RAW transcript and the audio
 duration/model/language/confidence metadata are stored alongside the cleaned text; trimmed spans stored
 as offsets so the UI can highlight/restore.
 

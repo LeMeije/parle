@@ -87,6 +87,7 @@ fn tr(text: &str) -> TranscriptionResult {
         trimmed: Vec::new(),
         low_confidence: Vec::new(),
         cleanup_tier: 1,
+        refine: None,
     }
 }
 

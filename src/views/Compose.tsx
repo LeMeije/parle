@@ -9,22 +9,35 @@
 // has done, plus the transcript when it lands.
 
 import { useEffect, useRef, useState } from 'react';
-import { Mic, Square } from 'lucide-react';
+import { Mic, Sparkles, Square } from 'lucide-react';
 import { api, onLevel, onPartial, onPipelineEvent } from '../api';
 import { fmtTime } from '../format';
 import { useT } from '../i18n/useT';
-import type { Mark } from '../types';
+import type { DictationMode, Mark, PipelineState } from '../types';
 
 const BAR_COUNT = 48;
 
 /// `marks` is owned by App: it has to outlive this view being unmounted every
 /// time you look at another tab.
-export default function ComposeView({ marks }: { marks: Mark[] }) {
+export default function ComposeView({
+  marks,
+  refineEnabled,
+  refineAccent,
+}: {
+  marks: Mark[];
+  /// Whether the Refine mode is switched on in Settings. Off, the second
+  /// button is not offered at all rather than offered and refused.
+  refineEnabled: boolean;
+  refineAccent: string;
+}) {
   const t = useT();
-  const [state, setState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
+  const [state, setState] = useState<PipelineState>('idle');
+  const [mode, setMode] = useState<DictationMode>('standard');
   const [elapsed, setElapsed] = useState(0);
   const [partial, setPartial] = useState('');
   const [result, setResult] = useState<string | null>(null);
+  // The result shown is the AI's rewrite, not the transcript.
+  const [refined, setRefined] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const barsRef = useRef<number[]>(new Array(BAR_COUNT).fill(0.04));
   const [, force] = useState(0);
@@ -32,13 +45,19 @@ export default function ComposeView({ marks }: { marks: Mark[] }) {
   useEffect(() => {
     // A hotkey may have started recording before this view mounted.
     api.pipelineState().then((st) => {
-      if (st === 'recording') setState('recording');
+      if (st.state === 'recording') {
+        setState('recording');
+        setMode(st.mode);
+      }
     });
     const un1 = onPipelineEvent((e) => {
+      if (e.kind === 'mode_changed') setMode(e.mode);
       if (e.kind === 'state_changed') {
         setState(e.state);
+        setMode(e.mode);
         if (e.state === 'recording') {
           setResult(null);
+          setRefined(false);
           setPartial('');
           setError(null);
           setElapsed(0);
@@ -52,7 +71,10 @@ export default function ComposeView({ marks }: { marks: Mark[] }) {
       // renders as "No speech detected", so a dictation Parle heard perfectly
       // and withheld on purpose was reported as a hardware failure.
       if (e.kind === 'completed' && e.withheld) setResult(null);
-      else if (e.kind === 'completed') setResult(e.text);
+      else if (e.kind === 'completed') {
+        setResult(e.text);
+        setRefined(e.refined);
+      }
       if (e.kind === 'empty') setResult('');
       if (e.kind === 'error') setError(e.message);
     });
@@ -75,9 +97,13 @@ export default function ComposeView({ marks }: { marks: Mark[] }) {
 
   const time = fmtTime(elapsed);
   const recording = state === 'recording';
+  const busy = state === 'transcribing' || state === 'refining';
+  // The Refine accent is scoped to this view's subtree while a Refine take
+  // runs, so the wave and pills recolour without touching the rest of the app.
+  const scopedAccent = mode === 'refine' && state !== 'idle' ? ({ '--accent': refineAccent } as React.CSSProperties) : undefined;
 
   return (
-    <div className="compose">
+    <div className="compose" style={scopedAccent} data-dictation-mode={state === 'idle' ? '' : mode}>
       <header className="view-head">
         <h1>{t('compose.title')}</h1>
         <p>{t('compose.intro')}</p>
@@ -93,19 +119,43 @@ export default function ComposeView({ marks }: { marks: Mark[] }) {
         <div className="compose-controls">
           <button
             className={`btn ${recording ? 'danger' : 'primary'}`}
-            onClick={() => (recording ? api.stopRecording() : api.startRecording())}
-            disabled={state === 'transcribing'}
+            onClick={() => (recording ? api.stopRecording() : api.startRecording('standard'))}
+            disabled={busy}
           >
             {recording ? <Square size={14} /> : <Mic size={14} />}
             {recording
               ? t('compose.stop')
-              : state === 'transcribing'
-                ? t('compose.transcribing')
-                : t('compose.start')}
+              : state === 'refining'
+                ? t('compose.refining')
+                : state === 'transcribing'
+                  ? t('compose.transcribing')
+                  : t('compose.start')}
           </button>
+          {refineEnabled && !recording && (
+            <button
+              className="btn refine-btn"
+              style={{ '--accent': refineAccent } as React.CSSProperties}
+              title={t('compose.startRefine.title')}
+              onClick={() => api.startRecording('refine').catch((e) => setError(String(e)))}
+              disabled={busy}
+            >
+              <Sparkles size={14} />
+              {t('compose.startRefine')}
+            </button>
+          )}
+          {state === 'refining' && (
+            <button className="btn" onClick={() => api.cancelRecording()}>
+              {t('common.cancel')}
+            </button>
+          )}
           <span className="compose-time">{time}</span>
-          {recording && <span className="pill accent">{t('compose.recording')}</span>}
+          {recording && (
+            <span className="pill accent">
+              {mode === 'refine' ? t('compose.recordingRefine') : t('compose.recording')}
+            </span>
+          )}
           {state === 'transcribing' && <span className="pill">{t('compose.processing')}</span>}
+          {state === 'refining' && <span className="pill accent">{t('compose.refiningPill')}</span>}
         </div>
 
         {recording && partial && <div className="compose-partial">{partial}</div>}
@@ -137,7 +187,7 @@ export default function ComposeView({ marks }: { marks: Mark[] }) {
               {t('compose.copyResult')}
             </button>
             <span className="faint" style={{ fontSize: 12 }}>
-              {t('compose.alsoInserted')}
+              {refined ? t('compose.refinedNote') : t('compose.alsoInserted')}
             </span>
           </div>
         )}

@@ -130,11 +130,14 @@ fn insert_pause_paragraphs(tokens: &mut Vec<Token>, raw: &str, segments: &[Segme
     let mut cursor = 0usize;
     for pair in segments.windows(2) {
         let (a, b) = (&pair[0], &pair[1]);
-        // Find this segment's text going forward from the cursor.
-        if let Some(pos) = raw[cursor..].find(a.text.trim()) {
-            cursor += pos + a.text.trim().len();
-        }
-        if b.start_ms.saturating_sub(a.end_ms) >= pause_ms {
+        // Find this segment's text going forward from the cursor. A segment
+        // that cannot be located (an empty one, or a normalisation mismatch)
+        // leaves the cursor where it was, and a break pushed there would land
+        // BEFORE the previous segment's text, so only a found segment may
+        // place one.
+        let needle = a.text.trim();
+        let found = !needle.is_empty() && raw[cursor..].find(needle).map(|pos| cursor += pos + needle.len()).is_some();
+        if found && b.start_ms.saturating_sub(a.end_ms) >= pause_ms {
             breaks.push(cursor);
         }
     }

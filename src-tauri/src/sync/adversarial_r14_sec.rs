@@ -119,6 +119,7 @@ fn tr(text: &str) -> TranscriptionResult {
         trimmed: Vec::new(),
         low_confidence: Vec::new(),
         cleanup_tier: 1,
+        refine: None,
     }
 }
 
@@ -135,6 +136,8 @@ fn completed(text: &str, withheld: bool, manual_paste: Option<bool>) -> Pipeline
             manual_paste_required: m,
         }),
         low_confidence_count: 0,
+        mode: crate::pipeline::DictationMode::Standard,
+        refined: false,
     }
 }
 
@@ -353,17 +356,26 @@ fn r14_sec_b1_the_copy_only_branch_replaces_the_clipboard_and_reports_copied_fal
     let p = squashed("src-tauri/src/pipeline.rs");
 
     // ANCHOR 1: the branch exists, writes the clipboard, and yields `None`.
-    let branch = "}elseifsettings.paste.copy_to_clipboard{platform::imp::write_clipboard_marked\
+    // ONE site: the two dictation tails were merged into `deliver` by the
+    // Refine work. `want_copy` is the user's copy setting, or true after a
+    // failed Refine, which is why it is a local rather than the setting.
+    let branch = "}elseifwant_copy{platform::imp::write_clipboard_marked\
                   (&text,secrecy.conceal_clipboard());copied_to_clipboard=true;None}else{None};";
     assert_eq!(
         p.matches(branch).count(),
-        2,
+        1,
         "ANCHOR MISSING: the copy-only branch is not the shape this test reasons about. It \
-         must write the clipboard and evaluate to None, on both dictation paths."
+         must write the clipboard and evaluate to None, in deliver()."
     );
     // ANCHOR 2: `copied` is the second half of the store call.
+    //
+    // `app_id`/`app_name` lost their `&` when the latched app stopped being read
+    // back off `Pipeline::start_app` (which the NEXT dictation overwrites) and
+    // started travelling with the take as borrows. Only the spelling of those
+    // two arguments moved; the claim below, that `copied` is the argument after
+    // `secrecy` and is about the clipboard, is untouched.
     assert!(
-        p.matches("store_transcription(&self.store,&tr,&app_id,&app_name,secrecy,").count() >= 2,
+        p.matches("store_transcription(&self.store,&tr,app_id,app_name,secrecy,").count() >= 2,
         "ANCHOR MISSING: the store call no longer takes a `copied` argument in this position"
     );
     // ANCHOR 3: `copied` is what selects the clipboard sentence.
@@ -420,10 +432,11 @@ fn r14_sec_c1_the_failed_write_error_promises_an_insertion_that_may_not_exist() 
     let p = squashed("src-tauri/src/pipeline.rs");
     let raw = code_of("src-tauri/src/pipeline.rs");
 
-    // ANCHOR 1: the guard is there, twice, in the shape round 13 gave it.
+    // ANCHOR 1: the guard is there, once (the two tails are now one
+    // `deliver`), in the shape round 13 gave it.
     assert_eq!(
         p.matches("ifitem_id<0&&!secrecy.drop_entirely()").count(),
-        2,
+        1,
         "ANCHOR MISSING: the failed-write guard is not the shape this test reasons about"
     );
     // ANCHOR 2: the literal that makes the promise.
@@ -431,11 +444,11 @@ fn r14_sec_c1_the_failed_write_error_promises_an_insertion_that_may_not_exist() 
         raw.contains("Could not save that to History. The text was still inserted."),
         "ANCHOR MISSING: the failed-write message has changed"
     );
-    // ANCHOR 3: a path on which NOTHING reaches the user exists. Both dictation
-    // paths end their injection chain with a bare `else { None }`.
+    // ANCHOR 3: a path on which NOTHING reaches the user exists. The one
+    // delivery path ends its injection chain with a bare `else { None }`.
     assert_eq!(
         p.matches("None}else{None};").count(),
-        2,
+        1,
         "ANCHOR MISSING: the injection chain no longer has an arm that neither injects nor \
          copies, so the premise of this finding would be gone"
     );
@@ -584,7 +597,7 @@ fn r14_sec_e1_the_platform_reprobes_the_field_the_pipeline_already_sampled() {
     // the branch where inject_text did not run. Both occurrences sit AFTER the
     // `inject_text(` call of their own path and inside the `else if` arm.
     assert!(
-        p.matches("secrecy.conceal_clipboard()").count() >= 2,
+        p.matches("secrecy.conceal_clipboard()").count() >= 1,
         "ANCHOR MISSING: conceal_clipboard is no longer used by the pipeline at all"
     );
     for (call, conceal) in p.match_indices("platform::imp::inject_text(").zip(
@@ -782,8 +795,8 @@ fn r14_sec_h1_a_local_only_dictation_is_never_told_to_paste() {
     // ANCHOR 1: withheld folds the local-only case in with the dropped one.
     assert_eq!(
         p.matches("withheld:secrecy.drop_entirely()||secrecy.keep_local_only(),").count(),
-        2,
-        "ANCHOR MISSING: `withheld` no longer includes keep_local_only"
+        1,
+        "ANCHOR MISSING: `withheld` no longer includes keep_local_only (one site: deliver)"
     );
     // ANCHOR 2: the local-only notice says nothing about pasting.
     let raw_p = code_of("src-tauri/src/pipeline.rs");
