@@ -744,7 +744,16 @@ mod refine_trigger_tests {
         let ctrl = Mods { ctrl: true, ..Default::default() };
         assert_eq!(mode_for_dictation(&s, ctrl), DictationMode::Standard);
         // And the trigger follows the setting rather than being hard-wired.
+        //
+        // The dictation key is pinned to one that carries no modifier family,
+        // instead of being left at the platform default. On Windows that
+        // default IS "RightCtrl", which genuinely clashes with a Ctrl trigger
+        // and is refused by the rule above — so this assertion passed on macOS
+        // (default "Fn", no family) and failed here. Ctrl plus the Copilot key
+        // is the combination `the_keys_people_dictate_with_carry_no_modifier_family`
+        // describes, and the clash itself is covered by its own test.
         let mut s2 = s.clone();
+        s2.hotkeys.dictation.key = "CopilotKey".into();
         s2.refine.modifier = RefineModifier::Ctrl;
         assert_eq!(mode_for_dictation(&s2, ctrl), DictationMode::Refine);
         assert_eq!(mode_for_dictation(&s2, shift()), DictationMode::Standard);
