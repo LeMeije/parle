@@ -180,6 +180,41 @@ The log line is the minimum version of §6.2 of the previous incident. It is wha
 
 `cargo check -p parle --lib`: clean, 11 warnings, all the pre-existing dead-code ones.
 
+## 5a. Does this affect macOS? No — and the asymmetry is the reason
+
+Checked deliberately, because the structural weakness *is* shared: the macOS panel level is set in
+`convert_to_panel`, which `create_hud` calls exactly once at startup, and nothing ever re-asserts
+it. Same "assert once, never again" shape as Windows.
+
+The mechanism does not transfer, and that is what decides it:
+
+| | Windows | macOS |
+|---|---|---|
+| What marks the overlay | `WS_EX_TOPMOST`, a style **bit** | `NSWindow.level` = `PanelLevel::Status` (25), a **property** |
+| What actually orders it | the topmost **band**, a separate thing | that same property — the window server reads it directly |
+| Can the two disagree? | **Yes.** This bug. | **No.** There is no second representation to fall out of sync with |
+| Restored by | `SetWindowPos` only | n/a — nothing to restore |
+
+The Windows bug is specifically a *desynchronisation* between two representations of "topmost".
+macOS has only one, so it cannot desynchronise. `set_level` is not something AppKit silently
+revokes; a Status-level panel that ends up covered is covered because something legitimately sits
+at an equal or higher level (a menu at `NSPopUpMenuWindowLevel`, the screen saver, Mission
+Control), which is a different situation with a different signature — transient, and not cured by
+a restart.
+
+The genuine macOS ordering hazards are already handled in this codebase and have different
+symptoms: `set_hides_on_deactivate(false)` (the documented NSPanel gotcha — an always-deactivated
+overlay app would otherwise hide the HUD constantly), `can_join_all_spaces` +
+`full_screen_auxiliary` (full-screen spaces), and the activation-policy note on
+`set_regular_on_main`, whose failure mode is *every* window becoming unshowable, not the HUD alone
+going invisible while dictation carries on.
+
+**So no macOS change was made.** Adding a speculative `set_level` re-assert would be code for a
+mechanism that does not exist on that platform, and it could not be exercised from the Windows
+machine this was diagnosed on — untested code shipped to the platform that cannot test it. If the
+Mac ever *does* show this symptom, that would be new information and the write-up above is the
+method to re-run there; it would not be this root cause.
+
 ## 6. Deliberately NOT done
 
 Listed so the next person does not assume they were considered and rejected silently:
