@@ -1156,6 +1156,42 @@ fn clipboard_owner_app() -> (Option<String>, Option<String>) {
 
 // -- Overlay hardening -------------------------------------------------------------
 
+/// Re-assert the overlay's topmost **band**, not merely its style bit.
+///
+/// `harden_overlay` sets `WS_EX_TOPMOST` with `SetWindowLongPtrW`, which per
+/// Win32 writes the bit but does NOT move a window between the topmost and
+/// non-topmost z-order bands — only `SetWindowPos` does that. So once Windows
+/// evicts the overlay from the band (a full-screen exclusive app, a GPU or
+/// display mode change, another process forcing foreground), the window keeps a
+/// `WS_EX_TOPMOST` that lies: correctly positioned, painting perfectly, and
+/// drawn *underneath* whatever the user is typing into. `show()` is
+/// `ShowWindow`, which does not restore the band either, so every later
+/// dictation repeats the failure until the process is restarted.
+///
+/// Called on every show. Idempotent, one syscall, cheap enough not to care.
+pub fn reassert_overlay(window: &tauri::WebviewWindow) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    // The ex-style bits go back on too: the HUD observed in the 2026-09-05
+    // incident had also lost WS_EX_NOACTIVATE and WS_EX_TOOLWINDOW, and
+    // NOACTIVATE is the load-bearing one for paste-at-cursor.
+    harden_overlay(window);
+    if let Ok(hwnd) = window.hwnd() {
+        unsafe {
+            let _ = SetWindowPos(
+                HWND(hwnd.0),
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
 /// Apply WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW to the HUD so it
 /// can never steal focus (tao's focus:false alone is not sufficient).
 pub fn harden_overlay(window: &tauri::WebviewWindow) {

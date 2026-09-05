@@ -1,0 +1,31 @@
+2026-08-28T04:33:33.396386Z  INFO echokey_lib: detected 64632 MB RAM
+2026-08-28T04:33:33.396572Z  INFO echokey_lib::platform::windows: power throttling disabled for this process
+2026-08-28T04:33:33.401262Z  INFO echokey_lib: arming native hotkeys at startup: NativeBindings { dictation: Some(WatchedKey { key: CopilotKey, swallow: true }), dictation_alt: None, cancel: Some(Escape) }
+2026-08-28T04:33:33.492539Z  INFO echokey_lib::platform::windows: launched hook helper C:\Users\Benjamin\AppData\Local\Parle\parle-hook.exe
+2026-08-28T04:33:33.516909Z  INFO echokey_lib::platform::windows: hook helper connected
+2026-08-28T04:33:36.775888Z  INFO echokey_lib::state: hotkey Dictation Down -> StartRecording
+2026-08-28T04:33:36.847581Z  INFO echokey_lib::state: hotkey Dictation Up -> Nothing
+2026-08-28T04:33:38.436848Z  INFO echokey_lib::state: hotkey Dictation Down -> StopRecording
+2026-08-28T04:33:38.509975Z  INFO echokey_lib::state: hotkey Dictation Up -> Nothing
+2026-08-28T04:35:54.253597Z  INFO echokey_lib::state: hotkey Dictation Down -> StartRecording
+2026-08-28T04:35:54.338310Z  INFO echokey_lib::state: hotkey Dictation Up -> Nothing
+2026-08-28T04:37:28.235824Z  INFO echokey_lib::state: hotkey Dictation Down -> StopRecording
+2026-08-28T04:37:28.313451Z  INFO echokey_lib::state: hotkey Dictation Up -> Nothing
+2026-08-28T04:39:04.661600Z  INFO echokey_lib::state: hotkey Dictation Down -> StartRecording
+2026-08-28T04:39:04.742104Z  INFO echokey_lib::state: hotkey Dictation Up -> Nothing
+2026-08-28T04:39:33.370954Z  INFO echokey_lib::state: hotkey Dictation Down -> StopRecording
+2026-08-28T04:39:33.404015Z  INFO echokey_lib::state: hotkey Dictation Up -> Nothing
+2026-08-28T04:46:52.026059Z  INFO echokey_lib::state: hotkey Dictation Down -> StartRecording
+2026-08-28T04:46:52.074250Z  INFO echokey_lib::state: hotkey Dictation Up -> Nothing
+2026-08-28T04:46:57.911307Z  INFO echokey_lib::state: hotkey Dictation Down -> StartRecording
+2026-08-28T04:46:57.996600Z  INFO echokey_lib::state: hotkey Dictation Up -> Nothing
+2026-08-28T04:48:19.272491Z  INFO echokey_lib::state: hotkey Dictation Down -> StopRecording
+2026-08-28T04:48:19.325643Z  INFO echokey_lib::state: hotkey Dictation Up -> Nothing
+2026-08-28T04:48:54.522595Z  INFO echokey_lib::state: hotkey Dictation Down -> StartRecording
+2026-08-28T04:48:54.600383Z  INFO echokey_lib::state: hotkey Dictation Up -> Nothing
+2026-08-28T04:49:42.128677Z  INFO echokey_lib::state: hotkey Dictation Down -> StopRecording
+2026-08-28T04:49:42.183164Z  INFO echokey_lib::state: hotkey Dictation Up -> Nothing
+2026-08-28T04:53:09.254738Z  INFO echokey_lib::state: hotkey Dictation Down -> StartRecording
+2026-08-28T04:53:09.332589Z  INFO echokey_lib::state: hotkey Dictation Up -> Nothing
+2026-08-28T04:53:32.802040Z  INFO echokey_lib::state: hotkey Dictation Down -> StopRecording
+2026-08-28T04:53:32.839494Z  INFO echokey_lib::state: hotkey Dictation Up -> Nothing

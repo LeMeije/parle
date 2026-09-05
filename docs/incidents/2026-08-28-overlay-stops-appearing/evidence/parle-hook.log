@@ -1,0 +1,6 @@
+parle-hook starting: pipe=\\.\pipe\parle-hook-37248-1 parent=37248
+WH_KEYBOARD_LL hook installed
+connected to app
+bindings updated: WireBindings { dictation_key: 10, dictation_swallow: true, dictation_alt_key: 0, dictation_alt_swallow: false, cancel_key: 11 }
+RegisterHotKey for Copilot chord failed: Hot key is already registered. (0x80070581)
+bindings updated: WireBindings { dictation_key: 10, dictation_swallow: true, dictation_alt_key: 0, dictation_alt_swallow: false, cancel_key: 11 }

@@ -1,0 +1,161 @@
+{
+  "version": 2,
+  "ui_language": "",
+  "excluded_defaults_seen": [
+    "com.1password.1password",
+    "com.agilebits.onepassword7",
+    "1Password.exe",
+    "com.bitwarden.desktop",
+    "Bitwarden.exe",
+    "com.lastpass.LastPass",
+    "LastPass.exe",
+    "org.keepassxc.keepassxc",
+    "KeePassXC.exe",
+    "com.dashlane.Dashlane",
+    "Dashlane.exe",
+    "in.sinew.Enpass-Desktop",
+    "Enpass.exe",
+    "com.apple.Passwords",
+    "com.apple.keychainaccess",
+    "KeePass.exe",
+    "com.mstc.macpass",
+    "com.markmcguill.strongbox.mac",
+    "com.authy.authy-mac",
+    "Authy Desktop.exe"
+  ],
+  "onboarding_complete": true,
+  "models": {
+    "active_model": "whisper-large-v3-turbo-q8_0",
+    "fallback_chain": [
+      "whisper-large-v3-turbo-q5_0",
+      "whisper-small-q5_1",
+      "whisper-base-q5_1",
+      "whisper-tiny-q5_1"
+    ],
+    "backend": "auto",
+    "prewarm": false,
+    "custom": []
+  },
+  "language": {
+    "language": "auto",
+    "locale": "",
+    "translate_to_english": false
+  },
+  "cleanup": {
+    "enabled": true,
+    "remove_fillers": true,
+    "remove_hedges": false,
+    "trim_self_corrections": true,
+    "capitalise_sentences": true,
+    "ensure_terminal_punctuation": true,
+    "dictated_punctuation": true,
+    "paragraph_on_long_pause": true,
+    "paragraph_pause_ms": 2200,
+    "locale_spelling": false,
+    "llm_enabled": false,
+    "llm_model": "",
+    "llm_timeout_ms": 4000
+  },
+  "hotkeys": {
+    "dictation": {
+      "key": "CopilotKey",
+      "mode": "toggle",
+      "enabled": true
+    },
+    "dictation_alt": {
+      "key": "",
+      "mode": "hybrid",
+      "enabled": false
+    },
+    "history_palette": {
+      "key": "Alt+Shift+V",
+      "mode": "toggle",
+      "enabled": true
+    },
+    "cancel": {
+      "key": "Escape",
+      "mode": "toggle",
+      "enabled": true
+    },
+    "latch_ms": 450,
+    "suppress_copilot": true
+  },
+  "dictionary": {
+    "enabled": true,
+    "bias_recognition": true,
+    "fuzzy_correct": true,
+    "auto_learn": false
+  },
+  "appearance": {
+    "theme_mode": "system",
+    "palette": "paper",
+    "accent": "#2b5cff",
+    "app_icon": "default",
+    "tray_style": "badge",
+    "reduce_motion": false
+  },
+  "history": {
+    "clipboard_capture": true,
+    "retention_days": 0,
+    "excluded_apps": [
+      "com.1password.1password",
+      "com.agilebits.onepassword7",
+      "com.bitwarden.desktop",
+      "com.lastpass.LastPass",
+      "org.keepassxc.keepassxc",
+      "com.dashlane.Dashlane",
+      "1Password.exe",
+      "Bitwarden.exe",
+      "KeePassXC.exe",
+      "Dashlane.exe",
+      "LastPass.exe",
+      "in.sinew.Enpass-Desktop",
+      "Enpass.exe",
+      "com.apple.Passwords",
+      "com.apple.keychainaccess",
+      "KeePass.exe",
+      "com.mstc.macpass",
+      "com.markmcguill.strongbox.mac",
+      "com.authy.authy-mac",
+      "Authy Desktop.exe"
+    ],
+    "encrypt_at_rest": false,
+    "max_items": 10000
+  },
+  "audio": {
+    "input_device": "",
+    "min_duration_ms": 300,
+    "sounds": true
+  },
+  "overlay": {
+    "position": "bottom-center",
+    "style": "pill",
+    "show_partial_text": true,
+    "waveform_sensitivity": 1.0
+  },
+  "paste": {
+    "inject": true,
+    "copy_to_clipboard": true,
+    "restore_clipboard": true,
+    "restore_delay_ms": 700,
+    "prefer_ax_insert": true,
+    "press_enter": false
+  },
+  "launch_at_login": true,
+  "auto_update_check": true,
+  "sync": {
+    "enabled": true,
+    "device_id": "ba7dd3cd-35a7-41ad-898e-7624fc0e9e87",
+    "device_name": "Zephyrus-G14-Benjamin",
+    "sync_dictations": true,
+    "sync_clipboard": true,
+    "paired": [
+      {
+        "id": "cb09501a-af28-467f-b13a-a952be855d05",
+        "name": "Benjamins-MacBook-Air.local",
+        "last_seen": 1787928159536
+      }
+    ],
+    "resend_owed": []
+  }
+}

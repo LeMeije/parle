@@ -136,7 +136,22 @@ pub fn sync_hud(app: &AppHandle, state: PipelineState) {
     };
     match state {
         PipelineState::Recording | PipelineState::Transcribing => {
-            let _ = hud.show();
+            // Windows can evict this window from the topmost BAND while leaving
+            // WS_EX_TOPMOST set, and `show()` does not put it back — the overlay
+            // then paints correctly but behind the window being dictated into,
+            // for the rest of the process's life. Re-assert before every show.
+            #[cfg(target_os = "windows")]
+            crate::platform::windows::reassert_overlay(&hud);
+            let shown = hud.show();
+            // The 2026-08-28 incident was undiagnosable because this path said
+            // nothing at all. One line per show is enough to tell "never asked
+            // to show" apart from "asked, and it still was not visible".
+            tracing::info!(
+                "hud: show for {:?} -> {:?}, pos {:?}",
+                state,
+                shown.is_ok(),
+                hud.outer_position().ok()
+            );
         }
         PipelineState::Idle => {
             let hold = HOLD_UNTIL.load(Ordering::SeqCst);
