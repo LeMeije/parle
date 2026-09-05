@@ -313,11 +313,20 @@ impl Default for HotkeySettings {
     fn default() -> Self {
         Self {
             dictation: HotkeyBinding {
-                // Platform defaults applied on first launch: Fn on macOS is set by
-                // the app after checking hardware; RightCtrl on Windows (never
-                // RightAlt: that's AltGr on many layouts).
+                // Platform defaults applied on first launch. Both platforms use
+                // the same gesture on the key in the same PLACE — bottom-left
+                // corner — so the product feels identical on either machine:
+                // Globe/Fn on macOS, Left Ctrl on Windows.
+                //
+                // DoubleTap is not a taste choice here, it is what makes the
+                // Windows default safe. It is the only mode that does not
+                // swallow its key (`swallow: b.mode != DoubleTap` in state.rs),
+                // and Left Ctrl bound in Hold/Hybrid/Toggle would eat Ctrl+C,
+                // Ctrl+V and every other Ctrl chord system-wide. Double-tap to
+                // start, single tap to stop, and the key otherwise behaves
+                // exactly as it always did.
                 key: default_dictation_key().into(),
-                mode: HotkeyMode::Hybrid,
+                mode: HotkeyMode::DoubleTap,
                 enabled: true,
             },
             dictation_alt: HotkeyBinding::default(),
@@ -337,11 +346,21 @@ impl Default for HotkeySettings {
     }
 }
 
+/// The key people dictate with, chosen by POSITION so the muscle memory
+/// transfers between a Mac and a PC: the bottom-left corner key on both.
+///
+/// macOS: Globe/Fn. Windows: Left Ctrl, which sits where Globe/Fn does on an
+/// Apple keyboard. It is safe to bind only because the default gesture is
+/// DoubleTap, which never swallows the key — see `HotkeySettings::default`.
+///
+/// Right Ctrl was the previous Windows default. Left is the better mirror of
+/// Fn's position, and it is also the Ctrl that people actually reach for.
+/// Still never RightAlt: that is AltGr on French and many other layouts.
 fn default_dictation_key() -> &'static str {
     #[cfg(target_os = "macos")]
     { "Fn" }
     #[cfg(not(target_os = "macos"))]
-    { "RightCtrl" }
+    { "LeftCtrl" }
 }
 
 /// The suggested Refine key.
@@ -1442,12 +1461,39 @@ mod tests {
     }
 
     #[test]
-    fn windows_default_is_not_altgr() {
-        // Right Alt is AltGr on many layouts; the Windows default must be RightCtrl.
+    fn the_dictation_default_is_the_bottom_left_key_on_both_platforms() {
+        // Chosen by POSITION so muscle memory carries between a Mac and a PC.
+        // Never RightAlt, which is AltGr on many layouts.
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(HotkeySettings::default().dictation.key, "RightCtrl");
+        assert_eq!(HotkeySettings::default().dictation.key, "LeftCtrl");
         #[cfg(target_os = "macos")]
         assert_eq!(HotkeySettings::default().dictation.key, "Fn");
+    }
+
+    #[test]
+    fn the_default_dictation_gesture_never_swallows_its_key() {
+        // Load-bearing, not cosmetic. DoubleTap is the only mode that leaves
+        // the key's normal system behaviour intact, and the Windows default is
+        // Left Ctrl — bound in any other mode it would eat Ctrl+C, Ctrl+V and
+        // every other Ctrl chord. If this assertion is ever relaxed, the
+        // Windows default key has to change in the same commit.
+        assert_eq!(HotkeySettings::default().dictation.mode, HotkeyMode::DoubleTap);
+    }
+
+    #[test]
+    fn holding_shift_is_the_refine_trigger_on_both_platforms() {
+        // The other half of the alignment: the same gesture on the same key,
+        // and the same modifier held to send it to the AI.
+        let s = Settings::default();
+        assert_eq!(s.refine.trigger, RefineTrigger::Modifier);
+        assert_eq!(s.refine.modifier, RefineModifier::Shift);
+        // And Shift must not collide with the dictation key's own family, or
+        // the clash guard in mode_for_dictation would refuse every Refine take.
+        assert_ne!(
+            RefineModifier::of_native_key(&s.hotkeys.dictation.key),
+            Some(s.refine.modifier),
+            "the default dictation key must not BE the default Refine modifier"
+        );
     }
 
     #[test]

@@ -170,7 +170,7 @@ export const es: Record<string, string> = {
   'onboarding.hotkey.doNothing': 'No hacer nada',
   'onboarding.hotkey.mac':
     'Por defecto: la {key}. Manténgala pulsada y hable, suéltela para pegar, o dele un toque rápido para dejar la grabación activada. Consejo: en Ajustes del Sistema → Teclado, ponga “Al pulsar la tecla 🌐” en {doNothing} para que el dictado de macOS no se la dispute.',
-  'onboarding.hotkey.winKey': 'Ctrl derecho',
+  'onboarding.hotkey.winKey': 'Ctrl izquierdo',
   'onboarding.hotkey.win':
     'Por defecto: {key}. Mantenga la tecla pulsada y hable, suéltela para pegar, o dele un toque rápido para dejar la grabación activada. ¿Tiene una tecla Copilot? Asígnela en Ajustes → Atajos de teclado y Parle la controlará por completo.',
   'onboarding.hotkey.cta': 'Entendido',
@@ -202,7 +202,7 @@ export const es: Record<string, string> = {
   'settings.dictationKey.label': 'Tecla de dictado',
   'settings.dictationKey.hintMac': 'Fn necesita el permiso de Accesibilidad',
   'settings.dictationKey.hintWin':
-    'Alt derecho es AltGr en muchas distribuciones, así que Ctrl derecho es más seguro',
+    'Ctrl izquierdo está donde el Globo en un Mac. El doble toque la deja funcionando con normalidad; Alt derecho es AltGr en muchas distribuciones',
   'settings.dictationKey.custom': 'Personalizada…',
   'settings.customBinding.label': 'Combinación personalizada',
   'settings.customBinding.hint':
@@ -236,7 +236,7 @@ export const es: Record<string, string> = {
   'settings.bindingWarning.leftShift':
     'Shift izquierdo se pulsa constantemente al escribir, así que habrá activaciones falsas.',
   'settings.bindingWarning.rightAlt':
-    'Alt derecho es AltGr en muchas distribuciones, así que escribe caracteres acentuados. Ctrl derecho es más seguro.',
+    'Alt derecho es AltGr en muchas distribuciones, así que escribe caracteres acentuados. Ctrl izquierdo con doble toque es más seguro.',
 
   // ---------- Settings: key names ----------
   'keys.fn': '🌐 Fn / Globo',

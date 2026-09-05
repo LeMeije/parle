@@ -167,7 +167,7 @@ export const de: Record<string, string> = {
   'onboarding.hotkey.doNothing': 'Nichts tun',
   'onboarding.hotkey.mac':
     'Standard: die {key}. Halten Sie sie gedrückt und sprechen Sie, loslassen zum Einfügen, oder tippen Sie kurz darauf, um die Aufnahme festzustellen. Tipp: Stellen Sie „Systemeinstellungen“ → „Tastatur“ → „🌐-Taste drücken für“ auf {doNothing}, damit die macOS-Diktierfunktion nicht darum kämpft.',
-  'onboarding.hotkey.winKey': 'Ctrl rechts',
+  'onboarding.hotkey.winKey': 'Ctrl links',
   'onboarding.hotkey.win':
     'Standard: {key}. Halten Sie sie gedrückt und sprechen Sie, loslassen zum Einfügen, oder tippen Sie kurz darauf, um die Aufnahme festzustellen. Sie haben eine Copilot-Taste? Belegen Sie sie unter „Einstellungen“ → „Tastenkürzel“, dann übernimmt Parle sie vollständig.',
   'onboarding.hotkey.cta': 'Verstanden',
@@ -198,7 +198,7 @@ export const de: Record<string, string> = {
   // ---------- Settings: hotkeys ----------
   'settings.dictationKey.label': 'Diktattaste',
   'settings.dictationKey.hintMac': 'Fn benötigt die Berechtigung „Bedienungshilfen“',
-  'settings.dictationKey.hintWin': 'Alt rechts ist auf vielen Layouts AltGr, Ctrl rechts ist sicherer',
+  'settings.dictationKey.hintWin': 'Ctrl links liegt dort, wo auf dem Mac die Globus-Taste sitzt. Doppeltippen lässt sie normal weiterarbeiten; Alt rechts ist auf vielen Layouts AltGr',
   'settings.dictationKey.custom': 'Eigene…',
   'settings.customBinding.label': 'Eigene Belegung',
   'settings.customBinding.hint': 'Klicken Sie, und drücken Sie dann die gewünschte Taste oder Kombination. Esc bricht ab.',
@@ -230,7 +230,7 @@ export const de: Record<string, string> = {
   'settings.bindingWarning.leftShift':
     'Shift links wird beim Tippen ständig gedrückt, rechnen Sie also mit Fehlauslösungen.',
   'settings.bindingWarning.rightAlt':
-    'Alt rechts ist auf vielen Layouts AltGr und erzeugt damit Sonderzeichen. Ctrl rechts ist sicherer.',
+    'Alt rechts ist auf vielen Layouts AltGr und erzeugt damit Sonderzeichen. Ctrl links mit Doppeltippen ist sicherer.',
 
   // ---------- Settings: key names ----------
   'keys.fn': '🌐 Fn / Globus',

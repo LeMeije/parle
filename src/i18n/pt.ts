@@ -169,7 +169,7 @@ export const pt: Record<string, string> = {
   'onboarding.hotkey.doNothing': 'Não Fazer Nada',
   'onboarding.hotkey.mac':
     'Padrão: a {key}. Segure e fale, solte para colar, ou dê um toque rápido para travar a gravação. Dica: em Ajustes do Sistema → Teclado, defina “Pressionar a tecla 🌐 para” como {doNothing}, assim o ditado do macOS não disputa a tecla.',
-  'onboarding.hotkey.winKey': 'Ctrl direito',
+  'onboarding.hotkey.winKey': 'Ctrl esquerdo',
   'onboarding.hotkey.win':
     'Padrão: {key}. Segure e fale, solte para colar, ou dê um toque rápido para travar a gravação. Tem uma tecla Copilot? Vincule-a em Ajustes → Atalhos e o Parle assume o controle dela por completo.',
   'onboarding.hotkey.cta': 'Entendi',
@@ -200,7 +200,7 @@ export const pt: Record<string, string> = {
   // ---------- Settings: hotkeys ----------
   'settings.dictationKey.label': 'Tecla de ditado',
   'settings.dictationKey.hintMac': 'A tecla Fn precisa da permissão de Acessibilidade',
-  'settings.dictationKey.hintWin': 'Alt direito é AltGr em muitos layouts, então Ctrl direito é mais seguro',
+  'settings.dictationKey.hintWin': 'Ctrl esquerdo fica onde está o Globo num Mac. O toque duplo deixa-a a funcionar normalmente; Alt direito é AltGr em muitos layouts',
   'settings.dictationKey.custom': 'Personalizada…',
   'settings.customBinding.label': 'Atalho personalizado',
   'settings.customBinding.hint': 'Clique e depois pressione a tecla ou combinação que quiser. Esc cancela.',
@@ -232,7 +232,7 @@ export const pt: Record<string, string> = {
   'settings.bindingWarning.leftShift':
     'O Shift esquerdo é pressionado o tempo todo enquanto você digita, então espere disparos acidentais.',
   'settings.bindingWarning.rightAlt':
-    'O Alt direito é AltGr em muitos layouts, então ele digita caracteres acentuados. O Ctrl direito é mais seguro.',
+    'O Alt direito é AltGr em muitos layouts, então ele digita caracteres acentuados. O Ctrl esquerdo com toque duplo é mais seguro.',
 
   // ---------- Settings: key names ----------
   'keys.fn': '🌐 Fn / Globo',

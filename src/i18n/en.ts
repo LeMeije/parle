@@ -167,7 +167,7 @@ export const en: Record<string, string> = {
   'onboarding.hotkey.doNothing': 'Do Nothing',
   'onboarding.hotkey.mac':
     "Default: the {key}. Hold it and talk, release to paste, or tap it quickly to latch recording on. Tip: set System Settings → Keyboard → “Press 🌐 key to” to {doNothing} so macOS dictation doesn't fight for it.",
-  'onboarding.hotkey.winKey': 'Right Ctrl',
+  'onboarding.hotkey.winKey': 'Left Ctrl',
   'onboarding.hotkey.win':
     'Default: {key}. Hold it and talk, release to paste, or tap it quickly to latch recording on. Have a Copilot key? Bind it in Settings → Hotkeys and Parle will take it over completely.',
   'onboarding.hotkey.cta': 'Got it',
@@ -198,7 +198,7 @@ export const en: Record<string, string> = {
   // ---------- Settings: hotkeys ----------
   'settings.dictationKey.label': 'Dictation key',
   'settings.dictationKey.hintMac': 'Fn needs Accessibility permission',
-  'settings.dictationKey.hintWin': 'Right Alt is AltGr on many layouts, so Right Ctrl is safer',
+  'settings.dictationKey.hintWin': 'Left Ctrl sits where Globe does on a Mac. Double tap leaves it working normally; Right Alt is AltGr on many layouts',
   'settings.dictationKey.custom': 'Custom…',
   'settings.customBinding.label': 'Custom binding',
   'settings.customBinding.hint': 'Click, then press the key or combination you want. Esc cancels.',
@@ -230,7 +230,7 @@ export const en: Record<string, string> = {
   'settings.bindingWarning.leftShift':
     'Left Shift is pressed constantly while typing, so expect false triggers.',
   'settings.bindingWarning.rightAlt':
-    'Right Alt is AltGr on many layouts, so it types accented characters. Right Ctrl is safer.',
+    'Right Alt is AltGr on many layouts, so it types accented characters. Left Ctrl, double tapped, is safer.',
 
   // ---------- Settings: key names ----------
   'keys.fn': '🌐 Fn / Globe',

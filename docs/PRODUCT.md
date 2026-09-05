@@ -85,7 +85,12 @@ Target latencies (measured, not aspirational: benchmarks in `bench/`):
   configurable. Windows: low-level hook; Copilot key remap (suppress default launch).
 - Coexistence: inspect only our own bindings, pass everything else through untouched.
   Windows: never swallow key-down while letting key-up escape (stuck-modifier bug).
-- AltGr trap: Right Alt is AltGr on many layouts: never default to it on Windows; default Right Ctrl.
+- AltGr trap: Right Alt is AltGr on many layouts: never default to it on Windows.
+- Default dictation key is chosen by POSITION so muscle memory carries between machines: the
+  bottom-left corner key on both. Globe/Fn on macOS, Left Ctrl on Windows, gesture DoubleTap on
+  both, and holding Shift makes it a Refine take. Left Ctrl is only safe to bind because DoubleTap
+  is the one mode that never swallows its key; in any other mode it would eat every Ctrl chord, so
+  the key and the gesture have to change together.
 
 ### Output/injection
 - macOS: AX insertion first, clipboard+⌘V fallback, secure-input detection -> clipboard-only + toast.

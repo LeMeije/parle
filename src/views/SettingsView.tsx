@@ -6,6 +6,7 @@ import { enable as enableAutostart, disable as disableAutostart } from '@tauri-a
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { api, onSyncStatus } from '../api';
 import type {
+  HotkeyMode,
   RefineModifier,
   RefineOutcome,
   RefineProvider,
@@ -194,7 +195,7 @@ const TRAY_STYLES: [string, string, [string, 'light' | 'dark'][]][] = IS_MAC
 
 const SPECIAL_KEYS = IS_MAC
   ? ['Fn', 'RightCommand', 'RightOption', 'RightControl', 'LeftControl']
-  : ['CopilotKey', 'RightCtrl', 'RightShift', 'LeftAlt', 'RightWin'];
+  : ['LeftCtrl', 'CopilotKey', 'RightCtrl', 'RightShift', 'LeftAlt', 'RightWin'];
 
 // Sentinel for the picker only — never stored in settings.
 const CUSTOM = '__custom__';
@@ -343,10 +344,13 @@ export default function SettingsView({
 
   const dictationKey = s.hotkeys.dictation.key;
   const isCustom = customPicked || !SPECIAL_KEYS.includes(dictationKey);
-  const warning = SPECIAL_KEYS.includes(dictationKey) ? null : bindingWarning(dictationKey);
+  // Not gated on SPECIAL_KEYS any more: Left Ctrl is now one of them AND the
+  // Windows default, so the old gate would have hidden the warning precisely
+  // when someone moved that default onto a gesture that does swallow the key.
+  const warning = bindingWarning(dictationKey, s.hotkeys.dictation.mode);
   const refineKey = s.hotkeys.refine.key;
   const isCustomRefine = customPickedRefine || !SPECIAL_KEYS.includes(refineKey);
-  const refineWarning = SPECIAL_KEYS.includes(refineKey) ? null : bindingWarning(refineKey);
+  const refineWarning = bindingWarning(refineKey, s.hotkeys.refine.mode);
   // The same physical key cannot serve two bindings: the dictation bindings
   // win in both listeners, and the palette chord is registered first, so a
   // clash makes the Refine key silently dead. Say so.
@@ -1891,7 +1895,12 @@ function bindingFromEvent(e: KeyboardEvent): string | null {
   return parts.join('+');
 }
 
-function bindingWarning(key: string): string | null {
+// The warning is about SWALLOWING, so it has to know the gesture. Double tap
+// is the one mode that never intercepts its key, which is exactly why Left
+// Ctrl is safe enough to be the Windows default — and why the same key in
+// Hold, Hybrid or Toggle still deserves the warning it always got.
+function bindingWarning(key: string, mode?: HotkeyMode): string | null {
+  if (mode === 'double_tap') return null;
   if (key === 'LeftCtrl' || key === 'LeftControl') return t('settings.bindingWarning.leftCtrl');
   if (key === 'LeftShift') return t('settings.bindingWarning.leftShift');
   if (key === 'RightAlt' || key === 'RightOption') return t('settings.bindingWarning.rightAlt');

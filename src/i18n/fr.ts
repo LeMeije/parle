@@ -164,7 +164,7 @@ export const fr: Record<string, string> = {
   'onboarding.hotkey.doNothing': 'Ne rien faire',
   'onboarding.hotkey.mac':
     'Par défaut : la {key}. Maintenez-la et parlez, relâchez pour coller, ou appuyez brièvement pour verrouiller l’enregistrement. Astuce : réglez Réglages système → Clavier → « Appuyer sur la touche 🌐 pour » sur {doNothing}, pour que la dictée de macOS ne vous la dispute pas.',
-  'onboarding.hotkey.winKey': 'Ctrl droite',
+  'onboarding.hotkey.winKey': 'Ctrl gauche',
   'onboarding.hotkey.win':
     'Par défaut : {key}. Maintenez-la et parlez, relâchez pour coller, ou appuyez brièvement pour verrouiller l’enregistrement. Vous avez une touche Copilot ? Associez-la dans Réglages → Raccourcis et Parle la prendra entièrement en charge.',
   'onboarding.hotkey.cta': 'Compris',
@@ -195,7 +195,7 @@ export const fr: Record<string, string> = {
   // ---------- Settings: hotkeys ----------
   'settings.dictationKey.label': 'Touche de dictée',
   'settings.dictationKey.hintMac': 'Fn requiert l’autorisation Accessibilité',
-  'settings.dictationKey.hintWin': 'Alt droite fait office d’AltGr sur beaucoup de dispositions, Ctrl droite est plus sûre',
+  'settings.dictationKey.hintWin': 'Ctrl gauche se trouve là où est la touche Globe sur un Mac. Le double appui la laisse fonctionner normalement ; Alt droite fait office d’AltGr sur beaucoup de dispositions',
   'settings.dictationKey.custom': 'Personnalisée…',
   'settings.customBinding.label': 'Raccourci personnalisé',
   'settings.customBinding.hint': 'Cliquez, puis appuyez sur la touche ou la combinaison voulue. Échap annule.',
@@ -227,7 +227,7 @@ export const fr: Record<string, string> = {
   'settings.bindingWarning.leftShift':
     'Maj gauche est sollicitée en permanence pendant la frappe : attendez-vous à des déclenchements intempestifs.',
   'settings.bindingWarning.rightAlt':
-    'Alt droite fait office d’AltGr sur beaucoup de dispositions : elle sert à taper des caractères accentués. Ctrl droite est plus sûre.',
+    'Alt droite fait office d’AltGr sur beaucoup de dispositions : elle sert à taper des caractères accentués. Ctrl gauche en double appui est plus sûre.',
 
   // ---------- Settings: key names ----------
   'keys.fn': '🌐 Fn / Globe',

@@ -152,9 +152,13 @@ export interface SyncSettings {
   sync_clipboard: boolean;
 }
 
+/// Named because the gesture decides whether the key is swallowed, which the
+/// Settings warnings now have to reason about.
+export type HotkeyMode = 'hold' | 'toggle' | 'hybrid' | 'double_tap';
+
 export interface HotkeyBinding {
   key: string;
-  mode: 'hold' | 'toggle' | 'hybrid' | 'double_tap';
+  mode: HotkeyMode;
   enabled: boolean;
 }
 
