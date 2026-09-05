@@ -244,7 +244,7 @@ fn r12_sec_macos_conceals_when_the_pipeline_says_it_would_conceal() {
 }
 
 // ---------------------------------------------------------------------------
-// R12-D. Windows marks its own write AFTER releasing the clipboard.
+// R12-D. Our own write is marked before the change can be observed.
 //
 // Round 11 moved the macOS `OUR_LAST_WRITE.store` to sit immediately after
 // `declareTypes_owner` and BEFORE the payload, and wrote out why: "Storing it
@@ -252,12 +252,21 @@ fn r12_sec_macos_conceals_when_the_pipeline_says_it_would_conceal() {
 // atomic still held the previous value, so a monitor poll landing in it saw
 // `we_wrote_change` as false and captured Parle's own write."
 //
-// It then introduced the identical mechanism on Windows in the same commit and
-// put the store AFTER `CloseClipboard()`, outside the session, reading a
-// sequence number that by then may belong to somebody else's write. Two
-// failures from one line: our own dictation gets captured as a clipboard row
-// (and replicated), and a real user copy that landed in the window is skipped
-// as "ours".
+// Round 12 then required the same ORDERING on Windows. That was wrong, and
+// round 13 spotted why without being able to prove it: a Win32 clipboard write
+// is a transaction whose sequence number is not final until `CloseClipboard`.
+// Measured on hardware 31/08/2026: 1756 inside the session, 1759 after the
+// close. The early read recorded a number no monitor could ever observe, and
+// BOTH failures this test exists to prevent happened anyway: our own dictation
+// was captured as a clipboard row (29 of 30 on Windows against 0 of 27 on the
+// Mac), and the restore guard never matched, so the user's previous clipboard
+// was never restored.
+//
+// The invariant is the GUARANTEE, not the line order: there must be no instant
+// in which the clipboard has changed and `we_wrote_change` says false. macOS
+// gets that from the ordering, because `declareTypes_owner` is the one call
+// that moves `changeCount`. Windows gets it from `WRITE_IN_FLIGHT`, raised
+// before the session opens and lowered after the number is recorded.
 //
 // Self-capture is the path that walks a withheld password back into the
 // history the pipeline just refused to put it in.
@@ -276,16 +285,25 @@ fn r12_sec_our_own_write_is_marked_before_the_change_is_visible() {
         "round 11's macOS ordering fix is gone; this test cannot discriminate"
     );
 
+    // Windows records the number AFTER the close, because only then is it
+    // final, and covers the resulting gap with a flag instead of the ordering.
     let w_store = win.find("OUR_LAST_WRITE.store(").expect("Windows marks its own write");
     let w_close = win.find("CloseClipboard()").expect("Windows closes the clipboard");
     assert!(
-        w_store < w_close,
-        "`write_clipboard_inner` stores OUR_LAST_WRITE after `CloseClipboard()`, so between \
-         releasing the clipboard and recording the sequence number the monitor can see the \
-         change, find `we_wrote_change` false and capture Parle's own write into history, \
-         where it replicates. It also reads `GetClipboardSequenceNumber()` outside the \
-         session, so another process's write can be recorded as ours and its content then \
-         skipped. This is the exact window round 11 closed on macOS in the same commit"
+        w_store > w_close,
+        "`write_clipboard_inner` records OUR_LAST_WRITE inside the clipboard session again.          The sequence number is not final until `CloseClipboard` (measured 1756 inside, 1759          after), so the recorded value is one the monitor can never observe: every injected          transcript is captured as a clipboard row and the restore guard never matches"
+    );
+    let w_raise = win
+        .find("WRITE_IN_FLIGHT.store(true")
+        .expect("Windows must raise WRITE_IN_FLIGHT; without it, recording the number after                  the close reopens round 11's window rather than closing it");
+    assert!(
+        w_raise < w_store,
+        "WRITE_IN_FLIGHT is raised after the number is recorded, leaving the window uncovered"
+    );
+    let checker = body_of("src-tauri/src/platform/windows.rs", "pub fn we_wrote_change(");
+    assert!(
+        checker.contains("WRITE_IN_FLIGHT.load"),
+        "we_wrote_change ignores WRITE_IN_FLIGHT, so the flag guards nothing and the write          is unmarked for the whole session"
     );
 }
 

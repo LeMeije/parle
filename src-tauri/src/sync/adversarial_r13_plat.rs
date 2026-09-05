@@ -340,14 +340,20 @@ fn r13_plat_windows_marking_probe_fails_closed() {
 /// has returned and therefore after `CloseClipboard`, and keeps that as
 /// `seq_after_write`.
 ///
-/// Those two reads straddle `CloseClipboard`. They are equal only if the
-/// Windows clipboard sequence number is unaffected by closing the clipboard,
-/// which is not documented in this repo and which the handover records as never
-/// having been checked on hardware ("Win+V exclusion unverified on hardware").
-/// If it is affected, then `we_wrote_change()` returns false for Parle's own
-/// dictation and the 400 ms monitor captures it as a clipboard row and
-/// replicates it: the exact failure round 12's commit message says the move was
-/// made to prevent.
+/// ANSWERED on hardware 31/08/2026 (Zephyrus G14, Win 11): closing the
+/// clipboard DOES move the counter, by three. One write went 1754 start, 1755
+/// after `EmptyClipboard`, 1756 after the payload, 1759 after the close. So the
+/// two reads were never equal, `we_wrote_change()` returned false for every
+/// dictation Parle injected, and the monitor captured it as a clipboard row:
+/// 29 of 30 dictations on that machine against 0 of 27 on the Mac. The restore
+/// guard, comparing the same recorded number against a live read, concluded a
+/// third party had written and silently never restored the user's clipboard.
+///
+/// `write_clipboard_inner` now records the number AFTER the close, where it is
+/// final, and raises `WRITE_IN_FLIGHT` across the whole transaction so that
+/// moving it does not reopen the window round 12 was protecting. This test
+/// keeps its original point, which survives the fix: `inject_text` must not ask
+/// the OS a second time.
 ///
 /// The point of this test is that the code need not depend on the answer at
 /// all. `inject_text` can read the number Parle actually recorded instead of
@@ -357,14 +363,13 @@ fn r13_plat_windows_marking_probe_fails_closed() {
 fn r13_plat_windows_restore_guard_and_self_capture_use_one_number() {
     let rel = "src-tauri/src/platform/windows.rs";
 
-    // CONTROL: the store really is inside the session.
+    // CONTROL: the store sits after the close, where the number is final.
     let writer = body_of(rel, "fn write_clipboard_inner(");
     let store_at = index_of(&writer, "OUR_LAST_WRITE.store(", rel);
     let close_at = index_of(&writer, "CloseClipboard()", rel);
     assert!(
-        store_at < close_at,
-        "{rel}: write_clipboard_inner no longer records OUR_LAST_WRITE before \
-         CloseClipboard; this test's premise is gone"
+        store_at > close_at,
+        "{rel}: write_clipboard_inner records OUR_LAST_WRITE inside the clipboard session          again. Closing the clipboard moves the counter (measured 1756 inside, 1759 after),          so the recorded number is one nothing can ever observe"
     );
 
     // CONTROL: the accessor that would make the two agree exists.

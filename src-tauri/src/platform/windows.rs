@@ -770,9 +770,39 @@ static RESTORE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 
 static OUR_LAST_WRITE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// True while Parle holds the clipboard open for a write of its own.
+///
+/// A Win32 clipboard write is a TRANSACTION, and its sequence number is not
+/// final until `CloseClipboard`. Measured on hardware 31/08/2026 (Zephyrus
+/// G14, Win 11): 1754 start, 1755 after `EmptyClipboard`, 1756 after the
+/// payload, and 1759 after the close. Round 13 asked whether closing moves the
+/// counter and recorded that it had never been checked; it does, by three.
+///
+/// So the number read INSIDE the session is one no monitor can ever observe.
+/// Round 12 moved the store there to mirror round 11's macOS fix, but the two
+/// platforms are not alike: on macOS `declareTypes_owner` is the single call
+/// that advances `changeCount`, so reading it early yields the FINAL value,
+/// while here it yields a value three short of it. That mirrored line caused
+/// both Windows clipboard defects seen in the field:
+///
+/// - `we_wrote_change` was false for every transcript Parle injected, so the
+///   monitor captured our own paste as a clipboard row. Measured at 29 of 30
+///   dictations on this machine against 0 of 27 on the Mac.
+/// - `inject_text`'s restore guard compared the recorded number against a live
+///   read, concluded a third party had written since, and bailed, so the
+///   user's previous clipboard was never restored and the transcript stayed.
+///
+/// Round 12's window is real and is closed HERE instead: while a write is in
+/// flight the monitor skips unconditionally, so there is no instant in which
+/// the clipboard has changed and the atomic still holds a previous value. That
+/// buys the freedom to record the number after the close, where it is correct.
+static WRITE_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Did WE write the clipboard's current contents?
 pub fn we_wrote_change(seq: u32) -> bool {
-    OUR_LAST_WRITE.load(std::sync::atomic::Ordering::SeqCst) == seq
+    WRITE_IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst)
+        || OUR_LAST_WRITE.load(std::sync::atomic::Ordering::SeqCst) == seq
 }
 
 /// Write text as the USER's own copy: no exclusion markers.
@@ -788,6 +818,16 @@ pub fn write_clipboard_excluded(text: &str) {
 }
 
 fn write_clipboard_inner(text: &str, exclude: bool) {
+    // Cleared by Drop so the early return below cannot leave the flag raised,
+    // which would mute the monitor for the rest of the session.
+    struct InFlight;
+    impl Drop for InFlight {
+        fn drop(&mut self) {
+            WRITE_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    WRITE_IN_FLIGHT.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _in_flight = InFlight;
     unsafe {
         if !open_clipboard_retry() {
             return;
@@ -827,17 +867,12 @@ fn write_clipboard_inner(text: &str, exclude: bool) {
                 }
             }
         }
-        // Read and stored BEFORE the close, matching macOS, where round 11
-        // moved the equivalent store above the payload and wrote down why:
-        // between the change becoming visible and us recording that it was
-        // ours, a monitor poll sees `we_wrote_change` as false. Two failures
-        // came out of that one line. Our own dictation could be captured as a
-        // clipboard row and replicated, which walks a withheld transcript back
-        // into history through the side door; and another process's write
-        // landing in the window was recorded as ours and then skipped, losing a
-        // real user copy.
-        OUR_LAST_WRITE.store(GetClipboardSequenceNumber(), std::sync::atomic::Ordering::SeqCst);
+        // Read and stored AFTER the close, because only then is the number
+        // final. See WRITE_IN_FLIGHT for the measurement and for why the macOS
+        // ordering does not transfer. `_in_flight` is still held here, so the
+        // gap round 12 worried about is covered without reading early.
         let _ = CloseClipboard();
+        OUR_LAST_WRITE.store(GetClipboardSequenceNumber(), std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -1366,5 +1401,49 @@ pub fn set_background_priority(on: bool) {
     let level = if on { THREAD_PRIORITY_BELOW_NORMAL } else { THREAD_PRIORITY_NORMAL };
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), level);
+    }
+}
+
+#[cfg(test)]
+mod clipboard_identity_tests {
+    //! The guard that source inspection could not give.
+    //!
+    //! Every other test of this mechanism reads the source and checks the order
+    //! of two lines, and that is precisely what let the defect ship: the order
+    //! was exactly what round 12 demanded and the behaviour was still wrong,
+    //! because whether `CloseClipboard` moves the sequence number is a fact
+    //! about Windows rather than about this file. Rounds 12 and 13 argued it
+    //! from the source for two rounds and reached opposite conclusions. This
+    //! asks the OS instead, so the question cannot be reopened by reasoning.
+
+    use super::*;
+
+    /// A write of ours must still be identifiable as ours once it has landed.
+    ///
+    /// If this fails, the clipboard monitor files every injected transcript as
+    /// a third party's copy (measured at 29 of 30 dictations before the fix)
+    /// and `inject_text`'s restore guard never matches, so the user's previous
+    /// clipboard is silently never restored.
+    #[test]
+    fn a_write_of_ours_is_still_ours_once_the_clipboard_has_settled() {
+        // Put the user's clipboard back: this runs on the dev machine.
+        let previous = read_clipboard();
+
+        write_clipboard("parle self-capture regression probe");
+        // Read the way the monitor reads it: a fresh call, after the write has
+        // fully completed, with no knowledge of what happened inside.
+        let seq = unsafe { GetClipboardSequenceNumber() };
+        let ours = we_wrote_change(seq);
+
+        if let Some(prev) = previous {
+            write_clipboard(&prev);
+        }
+
+        assert!(
+            ours,
+            "we_wrote_change() is false for Parle's own write, so the monitor will capture \
+             the injected transcript into history a second time and the restore guard will \
+             conclude a third party wrote the clipboard"
+        );
     }
 }
