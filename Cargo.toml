@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "src-tauri",
+    "crates/parle-core",
+    "crates/parle-audio",
+    "crates/parle-asr",
+    "crates/parle-hook",
+    "crates/parle-sync",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Benjamin Jacquet <contact@novairedigital.com>"]
+# Not an SPDX licence: PolyForm Noncommercial 1.0.0 + an internal-use grant.
+license-file = "LICENSE"
+# Guard rail: crates.io is for open-source distribution, this is source-available.
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+
+[profile.release]
+# "thin" not fat: fat LTO strips clang_rt's ___isPlatformVersionAtLeast that ggml-metal needs
+lto = "thin"
+codegen-units = 1
+strip = true

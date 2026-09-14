@@ -1,0 +1,18 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="cap" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fdfcf9"/>
+      <stop offset="100%" stop-color="#efece4"/>
+    </linearGradient>
+  </defs>
+  <!-- keycap base (bottom edge = 3D) -->
+  <rect x="96" y="132" width="832" height="800" rx="176" fill="#c9c4b6"/>
+  <rect x="96" y="96" width="832" height="792" rx="176" fill="url(#cap)" stroke="#2b2940" stroke-width="14"/>
+  <!-- mic glyph -->
+  <rect x="452" y="298" width="120" height="216" rx="60" fill="#2b5cff"/>
+  <path d="M 398 462 a 114 114 0 0 0 228 0" fill="none" stroke="#2b2940" stroke-width="38" stroke-linecap="round"/>
+  <rect x="494" y="576" width="36" height="56" rx="18" fill="#2b2940"/>
+  <rect x="432" y="632" width="160" height="36" rx="18" fill="#2b2940"/>
+  <!-- keycap legend corner -->
+  <text x="704" y="784" font-family="Avenir Next, Futura, sans-serif" font-size="120" font-weight="700" fill="#2b2940" opacity="0.55">⌐</text>
+</svg>

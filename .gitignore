@@ -1,0 +1,11 @@
+node_modules/
+dist/
+target/
+*.local
+.DS_Store
+
+# Staged Tauri sidecar (built by scripts/build-hook.mjs)
+src-tauri/binaries/
+
+# Local toolchain paths (machine-specific; see docs/WINDOWS_HANDOFF.md)
+env.sh

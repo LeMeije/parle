@@ -1,0 +1,83 @@
+[package]
+name = "parle"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license-file.workspace = true
+publish.workspace = true
+description = "Parle — on-device AI dictation and clipboard history"
+
+[lib]
+name = "parle_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+default = []
+# Windows: build whisper.cpp with CUDA (requires CUDA toolkit 12.8+).
+cuda = ["parle-asr/cuda"]
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = { workspace = true }
+crossbeam-channel = { workspace = true }
+arboard = "3"
+libc = "0.2"
+parle-core = { path = "../crates/parle-core" }
+parle-sync = { path = "../crates/parle-sync" }
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+parle-audio = { path = "../crates/parle-audio" }
+tauri-plugin-dialog = "2.7.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+parle-asr = { path = "../crates/parle-asr", features = ["metal", "parakeet"] }
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }
+window-vibrancy = "0.8"
+core-graphics = "0.24"
+core-foundation = "0.10"
+accessibility-sys = "0.1"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSPasteboardItem", "NSWorkspace", "NSRunningApplication"] }
+objc2-foundation = "0.3"
+block2 = "0.6"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+parle-asr = { path = "../crates/parle-asr" }
+# Wire protocol shared with the parle-hook helper process (lib target only;
+# the helper binary itself is built by scripts/build-hook.mjs).
+parle-hook = { path = "../crates/parle-hook" }
+window-vibrancy = "0.8"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_DataExchange",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Ole",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_System_Registry",
+] }
+
+[target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
+parle-asr = { path = "../crates/parle-asr" }
+
+[dependencies.unicode-normalization]
+version = "0.1"

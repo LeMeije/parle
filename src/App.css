@@ -1,0 +1,1566 @@
+/* Main window layout + shared controls. */
+
+#root {
+  height: 100vh;
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+  background: var(--bg);
+  /* The dictation bar is positioned against this, and grows out of the record
+     button's own box: one set of numbers drives the sidebar's padding and the
+     bar's insets so the two edges line up exactly and the morph never shifts
+     sideways, it only expands. */
+  position: relative;
+  --sidebar-w: 208px;
+  --sidebar-pad-x: 10px;
+  --sidebar-pad-y: 14px;
+}
+
+/* ---------- Sidebar ---------- */
+
+.sidebar {
+  width: var(--sidebar-w);
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--sidebar-pad-y) var(--sidebar-pad-x);
+  background: var(--bg-sunken);
+  border-right: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 700;
+  font-size: 15px;
+  padding: 6px 8px 16px;
+  letter-spacing: -0.01em;
+}
+
+.brand-mark-img {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  box-shadow: var(--shadow-1);
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.sidebar nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: none;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+  font-family: var(--font-ui);
+}
+
+.nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.nav-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.record-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 11px;
+  border: none;
+  border-radius: var(--radius-m);
+  background: var(--accent);
+  color: var(--accent-text, #fff);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  box-shadow: var(--shadow-1);
+  transition: transform 140ms var(--ease-spring), background 140ms ease, opacity 120ms ease 210ms;
+}
+
+.record-btn:hover {
+  transform: translateY(-1px);
+}
+
+/* While a recording runs this button has become the dictation bar, which
+   carries stop. It keeps its place in the layout so the sidebar does not
+   jump, and drifts down as the bar rises. */
+.record-btn.stowed {
+  opacity: 0;
+  pointer-events: none;
+  /* Out fast (the bar has taken its shape over) and back in late, once the
+     bar has finished collapsing onto it. */
+  transition: opacity 70ms ease;
+}
+
+.record-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ---------- Content ---------- */
+
+/* The scrolling column. The dictation bar is NOT in here: it spans the whole
+   window and half its morph happens over the sidebar. */
+.stage {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 26px 30px 40px;
+}
+
+/* Enough room to scroll the last row clear of the bar. */
+.content.with-bar {
+  padding-bottom: 124px;
+}
+
+.view-head h1 {
+  margin: 0 0 6px;
+  font-size: 21px;
+  letter-spacing: -0.02em;
+}
+
+.view-head p {
+  margin: 0 0 20px;
+  color: var(--text-dim);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+/* ---------- Shared controls ---------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 550;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  transition: transform 120ms var(--ease-spring), background 120ms ease;
+}
+
+.btn:hover { background: var(--bg-hover); }
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text, #fff);
+}
+.btn.primary:hover { filter: brightness(1.08); background: var(--accent); }
+
+.btn.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+
+.btn.ghost { border-color: transparent; background: transparent; color: var(--text-dim); }
+.btn.ghost:hover { background: var(--bg-hover); }
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-s);
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.icon-btn:hover { background: var(--bg-hover); color: var(--text); }
+.icon-btn.danger:hover { color: var(--danger); }
+
+.seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-s);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+}
+
+.seg button {
+  padding: 5px 11px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  font-weight: 550;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.seg button.active {
+  background: var(--bg-raised);
+  color: var(--text);
+  box-shadow: var(--shadow-1);
+}
+
+/* Segmented control whose options carry a leading glyph. */
+.seg-icons button { display: inline-flex; align-items: center; gap: 5px; }
+.seg-icons svg { flex: 0 0 auto; opacity: 0.8; }
+.seg-icons button.active svg { opacity: 1; }
+
+.switch { position: relative; display: inline-block; width: 38px; height: 22px; flex: 0 0 auto; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch span {
+  position: absolute;
+  inset: 0;
+  border-radius: 11px;
+  background: var(--border-strong);
+  transition: background 160ms ease;
+  cursor: pointer;
+}
+.switch span::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 180ms var(--ease-spring);
+}
+.switch input:checked + span { background: var(--accent); }
+.switch input:checked + span::after { transform: translateX(16px); }
+
+input[type='text'],
+input:not([type]),
+input[type='number'],
+select,
+textarea {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  padding: 8px 10px;
+  outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+}
+.pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
+.pill.accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft); }
+
+.section-body .callout {
+  margin: 10px 12px;
+}
+
+.callout {
+  padding: 10px 14px;
+  border-radius: var(--radius-s);
+  font-size: 13px;
+  margin: 10px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.callout.warn { background: color-mix(in srgb, var(--warn) 12%, transparent); color: var(--warn); }
+.callout.error { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+/* Success keeps ordinary text colour and puts the green in the tick alone: a
+   whole line of green reads as a warning at a glance. */
+.callout.ok { background: color-mix(in srgb, var(--ok) 10%, transparent); color: var(--text); }
+.callout.ok .status-tick { color: var(--ok); }
+.callout button {
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 60px 0;
+  color: var(--text-faint);
+  font-size: 13.5px;
+}
+
+.faint { color: var(--text-faint); }
+.hint { color: var(--text-faint); font-size: 12.5px; margin-top: 16px; }
+
+.toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-2);
+  font-size: 13px;
+  animation: toast-in 220ms var(--ease-spring);
+  max-width: 70%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  z-index: 50;
+}
+.toast-error { color: var(--danger); }
+
+/* The bar owns the bottom of the window while it is up. */
+.app.has-bar .toast { bottom: 106px; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+/* ---------- History ---------- */
+
+.history-top {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.search {
+  flex: 1;
+  padding: 10px 14px !important;
+  font-size: 13.5px !important;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-m);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  cursor: default;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.row.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.row.pinned { background: color-mix(in srgb, var(--accent-soft) 40%, var(--bg-raised)); }
+
+/* Rows this machine did not write.
+ *
+ * A pseudo-element rather than a left border or an inset shadow: `.row` already
+ * spends its border on selection and its box-shadow on the selected ring, and a
+ * marker that disappears the moment a row is selected is worse than none. This
+ * one is independent of both.
+ *
+ * Only peer rows are marked. Most rows are local, so marking those too would
+ * paint the whole list and leave nothing standing out. */
+.row.from-peer { position: relative; overflow: hidden; }
+.row.from-peer::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--device-hue, var(--accent));
+}
+
+.row-icon {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  margin-top: 1px;
+}
+
+.row-body { flex: 1; min-width: 0; }
+
+.row-text {
+  font-size: 13.5px;
+  line-height: 1.45;
+  user-select: text;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.row-edit {
+  width: 100%;
+  min-height: 60px;
+  resize: vertical;
+  font-size: 13.5px;
+}
+
+.row-footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 6px;
+}
+
+.row-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.badge {
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  border-radius: 999px;
+  font-size: 10.5px;
+  padding: 2px 9px;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-weight: 550;
+}
+
+/* Each badge kind carries its own pastel hue: pill AND text in one family. */
+.badge-warn {
+  color: #9a6a00;
+  background: color-mix(in srgb, #e8a417 14%, transparent);
+  border-color: color-mix(in srgb, #e8a417 38%, transparent);
+}
+[data-mode='dark'] .badge-warn { color: #f0c268; }
+
+.badge-trim {
+  color: #6d43d8;
+  background: color-mix(in srgb, #8b5cf6 13%, transparent);
+  border-color: color-mix(in srgb, #8b5cf6 36%, transparent);
+}
+[data-mode='dark'] .badge-trim { color: #bda4ff; }
+
+/* The machine that wrote the row. Takes its hue inline from `--device-hue`, so
+ * one rule serves every device instead of one class per colour. Mixed against
+ * `transparent` exactly like the badges above it, which is what keeps it
+ * legible in both themes without a second definition. */
+.badge-device {
+  color: color-mix(in srgb, var(--device-hue) 78%, #000);
+  background: color-mix(in srgb, var(--device-hue) 13%, transparent);
+  border-color: color-mix(in srgb, var(--device-hue) 38%, transparent);
+  cursor: default;
+}
+[data-mode='dark'] .badge-device { color: color-mix(in srgb, var(--device-hue) 62%, #fff); }
+
+/* Sits beside the kind filter; matches the segmented control it stands next
+ * to rather than inventing a third control shape for the same toolbar. */
+.device-filter {
+  padding: 6px 10px;
+  border-radius: var(--radius-s);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12.5px;
+  font-weight: 550;
+  font-family: var(--font-ui);
+  cursor: pointer;
+  max-width: 190px;
+}
+
+.badge-lang {
+  color: #0b7d88;
+  background: color-mix(in srgb, #0d9aa8 13%, transparent);
+  border-color: color-mix(in srgb, #0d9aa8 36%, transparent);
+  cursor: default;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+[data-mode='dark'] .badge-lang { color: #6fd3dd; }
+
+.trim-review {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.trim-review s { color: var(--danger); opacity: 0.75; }
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.row-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  transition: background 120ms ease, color 120ms ease, transform 120ms var(--ease-spring);
+}
+.row-actions button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+  transform: scale(1.05);
+}
+.row-actions button.cta {
+  width: auto;
+  padding: 0 14px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.row-actions button.cta:hover {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: var(--accent);
+}
+.row-actions button.danger:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+
+/* ---------- Models ---------- */
+
+.model-list { display: flex; flex-direction: column; gap: 8px; }
+
+.model-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+.model-card.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+
+.model-name { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.model-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.model-langs { display: inline-flex; align-items: center; gap: 4px; }
+
+.rating { display: inline-flex; align-items: center; gap: 3px; color: var(--text-dim); }
+.rating i {
+  width: 5px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--border);
+}
+.rating i.on { background: var(--accent); }
+
+.model-actions { display: flex; align-items: center; gap: 8px; }
+
+.dl-progress {
+  position: relative;
+  width: 130px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.dl-progress.big { width: 100%; height: 34px; margin-top: 8px; }
+.dl-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--accent-soft);
+  transition: width 200ms ease;
+}
+.dl-progress span { position: relative; }
+
+/* ---------- Dictionary ---------- */
+
+.dict-add {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr auto;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.dict-list { display: flex; flex-direction: column; gap: 6px; }
+
+.dict-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+.dict-row.disabled { opacity: 0.55; }
+.dict-term { font-weight: 600; font-size: 13.5px; display: flex; gap: 8px; align-items: center; min-width: 160px; }
+.dict-corrections { flex: 1; font-size: 12.5px; color: var(--text-dim); }
+
+/* ---------- Settings ---------- */
+
+.settings-section { margin-bottom: 26px; }
+.settings-section h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-faint);
+  margin: 0 0 10px;
+}
+
+.section-body {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.field:last-child { border-bottom: none; }
+
+.field-label { display: flex; flex-direction: column; gap: 2px; }
+.field-label span { font-size: 13.5px; font-weight: 500; }
+.field-label small { font-size: 11.5px; color: var(--text-faint); max-width: 380px; line-height: 1.4; }
+
+.field-control { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+
+.number-input { display: inline-flex; align-items: center; gap: 6px; }
+/* Right padding, not the shared 10px: the digits are right-aligned and the
+   engine draws the stepper inside the content box, so at the shared padding the
+   number sits flush against the arrows. */
+.number-input input { width: 72px; text-align: right; padding-right: 4px; }
+.number-input .suffix { font-size: 12px; color: var(--text-faint); }
+
+.key-input { width: 140px; text-align: center; font-family: var(--font-mono); }
+
+.key-capture {
+  min-width: 200px;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.key-capture.listening {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.accent-row { display: flex; gap: 8px; }
+.accent-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: transform 120ms var(--ease-spring);
+}
+.accent-dot:hover { transform: scale(1.15); }
+.accent-dot.active { border-color: var(--text); transform: scale(1.12); }
+
+.excluded-apps { width: 320px; min-height: 90px; font-family: var(--font-mono); font-size: 11.5px !important; }
+
+.settings-footer {
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 12px;
+  padding: 10px 0 30px;
+}
+
+/* ---------- Sync ---------- */
+
+/* A full-width row inside .section-body, for content that can't sit in the
+   label/control split a .field gives you. */
+.sync-block {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.sync-block:last-child { border-bottom: none; }
+.sync-block .seg { align-self: flex-start; }
+.sync-block .callout { margin: 0; }
+
+.sync-empty { font-size: 12.5px; color: var(--text-faint); line-height: 1.5; }
+
+.sync-name-input { width: 220px; }
+.sync-device-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  user-select: text;
+}
+
+.sync-list { display: flex; flex-direction: column; gap: 6px; }
+
+.sync-device {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 11px;
+  padding: 10px 12px;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+}
+
+.sync-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.sync-dot.online {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent);
+}
+
+.sync-device-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sync-device-name { font-size: 13.5px; font-weight: 550; }
+.sync-device-meta { font-size: 11.5px; color: var(--text-faint); }
+
+/* Destructive, so it drops onto its own line rather than squeezing the name. */
+.sync-confirm {
+  flex: 1 0 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.sync-confirm > span { flex: 1; min-width: 180px; }
+
+/* The code is a human verification step: it has to be readable across a room
+   and out loud, so it gets real size and a gap between the two triplets. */
+.sync-showing { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 8px 0 4px; }
+
+.sync-code { display: flex; gap: 8px; }
+.sync-code b {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 58px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-sunken);
+  font-family: var(--font-mono);
+  font-size: 30px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  user-select: text;
+}
+.sync-code b.split { margin-left: 18px; }
+
+.sync-countdown { font-size: 12.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+.sync-peers { display: flex; flex-direction: column; gap: 6px; }
+
+.sync-peer {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--text);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  text-align: left;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.sync-peer:hover { background: var(--bg-hover); }
+.sync-peer.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.sync-peer-name { font-size: 13.5px; font-weight: 550; }
+.sync-peer-addr { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
+
+.sync-enter { display: flex; align-items: center; gap: 10px; }
+.sync-code-input {
+  width: 180px;
+  font-family: var(--font-mono) !important;
+  font-size: 20px !important;
+  letter-spacing: 0.32em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  padding: 9px 10px !important;
+}
+
+/* ---------- Onboarding ---------- */
+
+.onboarding {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  background: var(--bg);
+}
+
+.ob-card {
+  width: 480px;
+  max-width: calc(100vw - 60px);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-2);
+  padding: 36px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+  animation: ob-in 320ms var(--ease-spring);
+}
+
+@keyframes ob-in {
+  from { opacity: 0; transform: translateY(16px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.ob-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 20px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: grid;
+  place-items: center;
+}
+
+.ob-card h1 { margin: 0; font-size: 22px; letter-spacing: -0.02em; }
+.ob-card p { margin: 0; color: var(--text-dim); font-size: 13.5px; line-height: 1.55; }
+
+.ob-steps { display: flex; gap: 8px; }
+.ob-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  transition: background 160ms ease, transform 160ms var(--ease-spring);
+}
+.ob-dot.active { background: var(--accent); transform: scale(1.3); }
+
+.ob-perms { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+
+.ob-perm {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.ob-perm.ok { border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.ob-perm-status { color: var(--ok); width: 20px; display: grid; place-items: center; }
+.ob-perm-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); display: block; }
+.ob-perm-text { flex: 1; display: flex; flex-direction: column; gap: 1px; }
+.ob-perm-text strong { font-size: 13.5px; }
+.ob-perm-text small { color: var(--text-faint); font-size: 11.5px; }
+.ob-perm-actions { display: flex; gap: 6px; }
+
+.ob-note { font-size: 12px !important; color: var(--text-faint) !important; }
+
+.ob-result {
+  width: 100%;
+  padding: 14px;
+  border-radius: var(--radius-m);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  font-size: 14px;
+  user-select: text;
+  animation: ob-in 260ms var(--ease-spring);
+}
+
+
+/* ---------- Icon picker ---------- */
+
+.icon-picker { display: flex; gap: 10px; }
+.icon-choice {
+  width: 52px;
+  height: 52px;
+  padding: 4px;
+  border-radius: 14px;
+  border: 2px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  transition: transform 120ms var(--ease-spring), border-color 120ms ease;
+}
+.icon-choice img { width: 100%; height: 100%; border-radius: 10px; display: block; }
+.icon-choice:hover { transform: scale(1.08); }
+.icon-choice.active { border-color: var(--accent); }
+
+/* Tray icon preview: each asset sits on the backdrop it was drawn for, so an
+   outline never disappears into the settings background. */
+.tray-preview { display: inline-flex; gap: 6px; }
+.tray-chip {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+}
+.tray-chip[data-bg='light'] { background: #f2f2f4; }
+.tray-chip[data-bg='dark'] { background: #2a2c30; border-color: #43464c; }
+.tray-chip img { width: 17px; height: 17px; display: block; }
+
+.accent-custom {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: inline-block;
+  background: conic-gradient(#d5382f, #b06a00, #178a50, #0d9aa8, #2b5cff, #8b5cf6, #d6336c, #d5382f);
+  border: 2px solid var(--bg-raised);
+  box-shadow: 0 0 0 1px var(--border-strong);
+  transition: transform 120ms var(--ease-spring);
+  position: relative;
+  overflow: hidden;
+}
+.accent-custom:hover { transform: scale(1.15); }
+.accent-custom input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* ---------- Compose ---------- */
+
+.compose { max-width: 760px; }
+
+.compose-stage {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  background: var(--bg-raised);
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.compose-wave {
+  height: 72px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px;
+}
+.compose-wave .wave-bar { flex: 1; border-radius: 3px; background: var(--wave, var(--accent)); opacity: 0.9; transition: height 60ms linear; min-height: 4%; }
+
+.compose-controls { display: flex; align-items: center; gap: 12px; }
+.compose-time { font-family: var(--font-mono); font-size: 13px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+.compose-partial {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  min-height: 20px;
+  user-select: text;
+}
+
+.mark-note { margin: 0; font-size: 12.5px; line-height: 1.5; }
+
+.mark-chips { display: flex; flex-direction: column; gap: 6px; }
+.mark-chip {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 12px;
+  border-radius: var(--radius-s);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  font-size: 12.5px;
+  animation: ob-in 200ms var(--ease-spring);
+}
+.mark-chip .mark-time { font-family: var(--font-mono); font-size: 11px; color: var(--accent); flex: 0 0 auto; padding-top: 2px; }
+/* A pasted mark can be several lines: show the first three rather than one
+   ellipsised line, and keep the line breaks the transcript will keep. */
+.mark-chip .mark-text {
+  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  user-select: text;
+}
+
+.compose-result {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--bg-sunken);
+  padding: 16px;
+  font-size: 14px;
+  line-height: 1.6;
+  user-select: text;
+  white-space: pre-wrap;
+  animation: ob-in 240ms var(--ease-spring);
+}
+
+/* Bold palette: the hard offset shadow must fit inside the seg's 3px padding. */
+[data-palette='bold'] .seg button.active {
+  box-shadow: 2px 2px 0 rgba(17, 17, 17, 0.9);
+}
+[data-palette='bold'][data-mode='dark'] .seg button.active {
+  box-shadow: 2px 2px 0 rgba(245, 245, 245, 0.7);
+}
+
+
+/* ---------- Backend pill: hardware at a glance ---------- */
+
+.backend-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+.backend-pill.metal {
+  color: #4756d6;
+  background: color-mix(in srgb, #5a6cff 13%, transparent);
+  border-color: color-mix(in srgb, #5a6cff 36%, transparent);
+}
+[data-mode='dark'] .backend-pill.metal { color: #9daaff; }
+
+.backend-pill.cuda {
+  color: #3d8b2f;
+  background: color-mix(in srgb, #76b900 15%, transparent);
+  border-color: color-mix(in srgb, #76b900 40%, transparent);
+}
+[data-mode='dark'] .backend-pill.cuda { color: #a4d96c; }
+
+.backend-pill.cpu {
+  color: #8a6420;
+  background: color-mix(in srgb, #c8922a 14%, transparent);
+  border-color: color-mix(in srgb, #c8922a 38%, transparent);
+}
+[data-mode='dark'] .backend-pill.cpu { color: #e2b56c; }
+
+/* Slider row: the control and its readout on one line. */
+.row-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+.row-inline input[type='range'] {
+  flex: 1;
+  min-width: 0;
+}
+.row-inline .mono {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  opacity: 0.75;
+  min-width: 34px;
+  text-align: right;
+}
+
+/* Add-a-local-model row under the model list. */
+.model-add {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+.model-add .hint {
+  margin: 0;
+  flex: 1;
+  min-width: 220px;
+}
+.pill.warn {
+  background: color-mix(in srgb, var(--warn, #c98a00) 16%, transparent);
+  color: var(--warn, #c98a00);
+}
+
+/* First-run language picker. */
+.ob-langs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin: 18px 0 12px;
+}
+.ob-lang {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  cursor: pointer;
+  text-align: left;
+}
+.ob-lang:hover { border-color: var(--accent); }
+.ob-lang.active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.ob-lang-name { font-weight: 600; }
+.ob-lang-en { font-size: 12px; opacity: 0.6; }
+
+/* Onboarding: the "what Parle does" screen. */
+.ob-about {
+  display: grid;
+  gap: 14px;
+  margin: 18px 0 20px;
+  text-align: left;
+}
+.ob-about-item p {
+  margin: 2px 0 0;
+  font-size: 13px;
+  opacity: 0.75;
+  line-height: 1.5;
+}
+.ob-about-title { font-weight: 600; }
+button.linkish {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+
+/* --- Manual sync ------------------------------------------------------- */
+
+/* The paired-devices heading and its "Sync now" action share a line: the
+ * button belongs to that list, not to the sync panel as a whole. */
+.sync-paired-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sync-now-msg {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+@keyframes parle-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Honest feedback: the icon turns only while an exchange is actually in
+ * flight, so a stopped icon never implies work that is not happening. */
+.spin { animation: parle-spin 900ms linear infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation: none; }
+}
+
+/* The causes of an empty peer list that the app cannot see for itself: a VPN
+ * blocking LAN traffic, and a guest network isolating its clients. Set on its
+ * own line and dimmer than the hint above it, because it is the second thing to
+ * try, not the first. */
+.sync-hint-extra {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-dim);
+  opacity: 0.85;
+}
+
+/* ---------- Dictation bar ---------- */
+
+/* Always mounted, parked below the fold when idle. Mounted rather than
+   conditionally rendered so an unsent draft survives the recording that ends
+   before you press Enter. */
+.dictation-bar {
+  position: absolute;
+  /* Flush with the record button's own edges: same left inset, same bottom
+     inset, full window width. */
+  left: var(--sidebar-pad-x);
+  right: var(--sidebar-pad-x);
+  bottom: var(--sidebar-pad-y);
+  z-index: 40;
+  padding: 10px;
+  border-radius: var(--radius-l);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-2);
+  /* Top left, because the morph maps this box onto the button's box with one
+     translate plus scale and that maths assumes this origin. */
+  transform-origin: 0 0;
+  transform: translateY(calc(100% + 24px));
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 280ms var(--ease-spring), opacity 160ms ease;
+}
+
+.dictation-bar[data-open='true'] {
+  transform: none;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* While the morph is running it owns transform outright: the transition above
+   would otherwise fight the animation for it. `will-change` asks for the layer
+   up front, so the first frame is not the one that pays for promotion. */
+.dictation-bar[data-morph='true'] {
+  transition: none;
+  opacity: 1;
+  will-change: transform;
+}
+
+/* The record button's fill, laid over the bar's own surface and faded out as
+   the shape opens. This is here rather than a background-color animation
+   because opacity is composited and background-color is a repaint. */
+.bar-tint {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Above the tint. */
+.bar-inner {
+  position: relative;
+}
+
+/* Centred, so the stop and insert buttons stay level with the middle of the
+   box as it grows to two or three lines instead of hanging off its bottom. */
+.bar-inner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bar-left {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bar-meter {
+  flex: 0 0 auto;
+  width: 62px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.bar-meter .wave-bar {
+  flex: 1;
+  min-height: 8%;
+  border-radius: 2px;
+  background: var(--wave, var(--accent));
+  opacity: 0.85;
+  transition: height 60ms linear;
+}
+
+.bar-time {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The count of what you have pinned, and the way through to the detail. The
+   bar deliberately does not list the marks: Compose does that properly. */
+.bar-marks {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.bar-marks:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+
+.bar-box {
+  flex: 1;
+  min-width: 90px;
+  position: relative;
+  display: flex;
+}
+.bar-box textarea {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  /* The ceiling for a huge paste. Proportional to the window so a short one
+     never has the box growing over the sidebar's nav, capped so a tall one
+     does not hand you a wall of text either. Read back by the auto-grow. */
+  max-height: min(38vh, 240px);
+  overflow-y: auto;
+  line-height: 1.45;
+  background: var(--bg-sunken);
+}
+
+.bar-error {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  padding: 7px 10px;
+  border-radius: var(--radius-s);
+  background: color-mix(in srgb, var(--danger) 14%, var(--bg-raised));
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.bar-stop, .bar-insert { flex: 0 0 auto; }
+
+/* A 720px window (the minimum) leaves about 470px here, so the decoration
+   goes first and the labels second. The icons keep their tooltips. */
+@media (max-width: 940px) {
+  .bar-meter { display: none; }
+}
+@media (max-width: 860px) {
+  .bar-time { display: none; }
+  .bar-stop-label,
+  .bar-insert-label { display: none; }
+}
+
+
+/* ---------- Refine ---------- */
+
+/* Anything that rescopes `--accent` MUST rescope the tint alongside it. A
+   custom property is substituted where it is DECLARED, so the root's
+   `--accent-soft` keeps computing from the root's blue however far below it
+   `--accent` is overridden: the Refine button and the recording pill came out
+   as a 12% BLUE wash carrying coral text, which read as grey. Repeating the
+   declaration here recomputes it from the scoped accent, and `--accent-soft-mix`
+   keeps each theme's own strength. */
+[style*='--accent'],
+.badge-refined {
+  --accent-soft: color-mix(in srgb, var(--accent) var(--accent-soft-mix), transparent);
+}
+
+/* The waveform too, but ONLY on the two elements that actually scope the
+   accent for a live Refine take. Two themes set `--wave` to a fixed hue on
+   purpose, so this must not be a blanket override: matched any wider it would
+   repaint their normal-mode waveform with the plain accent. */
+.compose[data-dictation-mode='refine'],
+.dictation-bar[data-refine='true'] {
+  --wave: var(--accent);
+}
+
+/* The refined badge follows the accent the user picked for Refine rather than
+   a hardcoded coral, so History agrees with Compose and the dictation bar. */
+.badge-refined {
+  --accent: var(--refine-accent, #ff7a59);
+  background: var(--accent-soft);
+  color: color-mix(in srgb, var(--accent) 70%, var(--text));
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.wide-input { width: 320px; }
+.mono { font-family: var(--font-mono); font-size: 12px; }
+
+/* A row in the section's own rhythm, not a floating box: the field above
+   supplies the divider on top and this supplies the one below, so the result
+   sits between the path and the model instead of drifting between them. Same
+   shape as `.sync-block`. The `.section-body` prefix is needed to beat that
+   selector's own callout margin. */
+.section-body .refine-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  padding: 12px 16px;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+}
+.section-body .refine-status:last-child { border-bottom: none; }
+/* Everything but the buttons shares the line's slack. `:not` matters: the
+   actions are a span too, and taking flex: 1 they pushed the path off. */
+.refine-status > span:not(.status-actions) {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+.refine-status strong { font-weight: 600; }
+.refine-status .status-tick { flex: 0 0 auto; }
+.refine-status .status-path { font-size: 11.5px; color: var(--text-dim); overflow-wrap: anywhere; }
+.refine-status .status-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.refine-status button { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+
+textarea.refine-rules {
+  width: 360px;
+  min-height: 96px;
+  resize: vertical;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.voice-file { display: flex; align-items: center; gap: 8px; }
+/* Capped and allowed to WRAP: with "Something else…" chosen this row carries a
+   select, a text box and a refresh button, which together are wider than the
+   control column and were squeezing the hint into a one-word-per-line ribbon.
+   The box drops to a second line instead. */
+.model-pick {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 260px;
+}
+/* A model name is a token to read, not a value to centre: left-aligned, and
+   wide enough for a full name like claude-sonnet-5. */
+.model-pick .key-input { width: 170px; text-align: left; }
+.voice-path {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.refine-result {
+  margin: 0 16px 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-m);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  user-select: text;
+}
+.refine-result small { color: var(--text-dim); font-size: 11.5px; }
+.refine-result p { margin: 6px 0 0; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+.refine-result .warn-text { display: block; margin-top: 6px; color: var(--warn); }
+
+.refine-privacy { margin: 4px 16px 12px; font-size: 12px; line-height: 1.5; }
+
+/* The bar says which mode the take is in, in the (Refine) accent. */
+.bar-mode {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  flex: 0 0 auto;
+}

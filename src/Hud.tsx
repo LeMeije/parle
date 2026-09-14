@@ -1,0 +1,386 @@
+// The recording HUD: non-focus-stealing overlay. Waveform + streaming partial
+// text + click-to-stop / cancel. The cassette and metal styles render a deck:
+// spinning reels either side of a segmented level meter.
+
+import { useEffect, useRef, useState } from 'react';
+import { api, onLevel, onPartial, onPipelineEvent } from './api';
+import { PASTE_KEYS } from './types';
+import { applyLang } from './i18n/apply';
+import type { DictationMode, PipelineState, Settings } from './types';
+import { useT } from './i18n/useT';
+import './hud.css';
+
+const BAR_COUNT = 27;
+
+// Deck meter: discrete segments rather than the pill's continuous bar.
+const SEG_COUNT = 18;
+
+// Reel cut-outs: three trapezes whose outer edge follows the rim as an arc.
+// Fixed geometry against a 0 0 40 40 viewBox — do not redraw by hand.
+const REEL_CUTS = [
+  'M16.2,13.42 L8.2,8.61 A16.4,16.4 0 0 1 31.8,8.61 L23.8,13.42 A7.6,7.6 0 0 0 16.2,13.42 Z',
+  'M27.6,20.0 L35.76,15.48 A16.4,16.4 0 0 1 23.97,35.91 L23.8,26.58 A7.6,7.6 0 0 0 27.6,20.0 Z',
+  'M16.2,26.58 L16.03,35.91 A16.4,16.4 0 0 1 4.24,15.48 L12.4,20.0 A7.6,7.6 0 0 0 16.2,26.58 Z',
+];
+
+export default function Hud() {
+  const t = useT();
+  const [state, setState] = useState<PipelineState>('idle');
+  // Which key started the take. Drives the accent: a Refine take is coloured
+  // with its own accent so the two modes are never mistaken for each other at
+  // the moment it matters, which is while you are still speaking.
+  const [mode, setMode] = useState<DictationMode>('standard');
+  // Seconds spent waiting on the AI, ticked locally: no level events arrive
+  // once the microphone has closed, so the recording clock would sit still.
+  const [refineSecs, setRefineSecs] = useState(0);
+  const [partial, setPartial] = useState('');
+  const [outcome, setOutcome] = useState<{ text: string; kind: 'ok' | 'error' } | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [settings, setSettings] = useState<Settings | null>(null);
+  // Mirrored into a ref because the level subscription below is registered
+  // once and would otherwise close over the settings as they were at mount,
+  // so changing the sensitivity would not take effect until the HUD remounted.
+  const settingsRef = useRef<Settings | null>(null);
+  settingsRef.current = settings;
+  // Same reason as `settingsRef`: the level subscription is registered once and
+  // would read the state as it was at mount. The clock is driven by the elapsed
+  // time riding on level updates, so it must only move while we are recording.
+  // The engine no longer sends any once a stop is in flight, and this makes a
+  // stray one harmless rather than a clock ticking under the word Transcribing.
+  const recordingRef = useRef(false);
+  recordingRef.current = state === 'recording';
+  const barsRef = useRef<number[]>(new Array(BAR_COUNT).fill(0.05));
+  const [, force] = useState(0);
+  const envelopeRef = useRef(0);
+
+  useEffect(() => {
+    api.getSettings().then((s) => { applyTheme(s); applyLang(s); return s; }).then(setSettings).catch(() => {});
+    const un1 = onPipelineEvent((e) => {
+      if (e.kind === 'mode_changed') setMode(e.mode);
+      if (e.kind === 'state_changed') {
+        setState(e.state);
+        setMode(e.mode);
+        if (e.state === 'refining') setRefineSecs(0);
+        if (e.state === 'recording') {
+          setPartial('');
+          setOutcome(null);
+          setElapsed(0);
+          barsRef.current = new Array(BAR_COUNT).fill(0.05);
+        }
+      }
+      if (e.kind === 'empty') setOutcome({ text: e.reason, kind: 'ok' });
+      // A withheld dictation still needs the paste instruction. It IS on the
+      // clipboard and the field IS empty, and this is the only instruction the
+      // product ever gives. Round 13's blanket early return removed it, so a
+      // local-only dictation left the user with "Saved on this device only",
+      // an empty field and nothing to do. The instruction names no transcript.
+      if (e.kind === 'completed' && e.withheld && !e.injection?.manual_paste_required) return;
+      if (e.kind === 'error') setOutcome({ text: e.message, kind: 'error' });
+      if (e.kind === 'completed' && e.injection?.manual_paste_required) {
+        // PLATFORM-AWARE, and it does not claim to know why.
+        //
+        // This was a bare '⌘V', which is wrong on the half of the product that
+        // runs on Windows, and it is the only paste instruction Parle ever
+        // gives. It also asserted "(secure field)" unconditionally, while the
+        // same outcome is returned when the field is ordinary and merely a
+        // password manager is running.
+        setOutcome({ text: t('hud.pasteInstruction', { keys: PASTE_KEYS }), kind: 'ok' });
+      }
+      // Theme may have changed while the HUD was hidden.
+      if (e.kind === 'state_changed' && e.state === 'recording') {
+        api.getSettings().then((s) => { applyTheme(s); applyLang(s); return s; }).then(setSettings).catch(() => {});
+      }
+    });
+    const un2 = onLevel((u) => {
+      envelopeRef.current = u.envelope;
+      // Frozen once the microphone closes: what it reads then is the length of
+      // the take, which is what it should go on showing while we transcribe.
+      if (recordingRef.current) setElapsed(u.elapsed_ms);
+      const bars = barsRef.current;
+      // Perceptual mapping: speech RMS spans a narrow linear range, so a raw
+      // mapping looks flat. dB scale (-44dB floor .. -12dB ceiling) with a
+      // contrast power makes speech visibly dramatic against pauses.
+      const db = 20 * Math.log10(Math.max(u.rms, 1e-6));
+      // Floor -50 dB, ceiling -20 dB. The old window (-44..-12) put ordinary
+      // speech near the bottom, and a 1.7 power then crushed what was left, so
+      // the bars barely moved. A narrower window and a gentler curve put normal
+      // speech across the middle of the range where it can actually be seen.
+      // SENSITIVITY shifts the window, it does not scale the bars.
+      //
+      // Scaling the drawn height would stretch what was already visible and
+      // leave quiet speech pinned at the floor. Moving the window in dB is what
+      // actually lifts a quiet microphone, a distant one, or a soft speaker
+      // into the part of the range the eye can read. 1.0 is the tuned default,
+      // 2.0 adds 20 dB of headroom, 0.5 takes 10 dB away.
+      const gainDb = ((settingsRef.current?.overlay.waveform_sensitivity ?? 1) - 1) * 20;
+      let v = (db + 50 + gainDb) / 30;
+      v = Math.pow(Math.max(0, Math.min(1, v)), 1.15);
+      // A touch of peak keeps plosives snappy.
+      const peakDb = 20 * Math.log10(Math.max(u.peak, 1e-6));
+      const p = Math.max(0, Math.min(1, (peakDb + 46 + gainDb) / 32));
+      bars.push(Math.min(1, v * 0.85 + p * 0.3));
+      if (bars.length > BAR_COUNT) bars.shift();
+      force((n) => n + 1);
+    });
+    const un3 = onPartial((text) => setPartial(text));
+    return () => {
+      un1.then((f) => f());
+      un2.then((f) => f());
+      un3.then((f) => f());
+    };
+  }, []);
+
+  // The accent follows the MODE, not just the theme: while a Refine take runs
+  // every accent-driven surface (stop disc, waveform, spinner) takes the
+  // Refine colour, and the ordinary accent comes back the moment it ends.
+  useEffect(() => {
+    if (!settings) return;
+    const accent = mode === 'refine' && state !== 'idle' ? settings.refine.accent : settings.appearance.accent;
+    document.documentElement.style.setProperty('--accent', accent);
+    document.documentElement.dataset.dictationMode = state === 'idle' ? '' : mode;
+  }, [mode, state, settings]);
+
+  useEffect(() => {
+    if (state !== 'refining') return;
+    const id = window.setInterval(() => setRefineSecs((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [state]);
+
+  const style = settings?.overlay.style ?? 'pill';
+  const isDeck = style === 'cassette' || style === 'metal';
+  const refining = state === 'refining';
+  const busyLabel = refining
+    ? t('hud.refining', { provider: providerName(settings?.refine.provider), secs: refineSecs })
+    : t('hud.transcribing');
+  const showPartial = settings?.overlay.show_partial_text ?? true;
+  const mm = Math.floor(elapsed / 60000);
+  const ss = Math.floor((elapsed % 60000) / 1000);
+  const time = `${mm}:${ss.toString().padStart(2, '0')}`;
+
+  if (state === 'idle' && outcome) {
+    return (
+      <div className={`hud hud-${style} idle`}>
+        <div className={`hud-outcome ${outcome.kind}`}>{outcome.text}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={`hud hud-${style} ${state}`}
+      onClick={isDeck && state === 'recording' ? () => api.stopRecording() : undefined}
+    >
+      {style === 'minimal' ? (
+        <div
+          className="hud-min-inner"
+          title={state === 'recording' ? t('hud.recordingClickToStop') : busyLabel}
+          onClick={() => (state === 'recording' ? api.stopRecording() : undefined)}
+        >
+          {state === 'recording' ? <span className="hud-dot" /> : <Spinner />}
+          <span className="hud-time">{refining ? fmtSecs(refineSecs) : time}</span>
+          <button className="hud-cancel" title={t('hud.cancel')} onClick={(e) => { e.stopPropagation(); api.cancelRecording(); }}>
+            ✕
+          </button>
+        </div>
+      ) : isDeck ? (
+        <Deck
+          variant={style === 'metal' ? 'metal' : 'cassette'}
+          recording={state === 'recording'}
+          refining={refining}
+          refineMode={mode === 'refine'}
+          envelope={envelopeRef.current}
+          time={refining ? fmtSecs(refineSecs) : time}
+        />
+      ) : (
+        <>
+          <button
+            className="hud-stop"
+            title={
+              state === 'recording'
+                ? mode === 'refine'
+                  ? t('hud.stopAndRefine')
+                  : t('hud.stopAndPaste')
+                : t('hud.working')
+            }
+            onClick={() => (state === 'recording' ? api.stopRecording() : undefined)}
+          >
+            {state === 'recording' ? <span className="hud-dot" /> : <Spinner />}
+          </button>
+          <div className="hud-center">
+            {state === 'recording' ? (
+              <Waveform bars={barsRef.current} />
+            ) : (
+              <span className="hud-status">{busyLabel}</span>
+            )}
+            {mode === 'refine' && state === 'recording' && (
+              <div className="hud-partial hud-mode-tag">{t('hud.refineTag')}</div>
+            )}
+            {showPartial && partial && state !== 'refining' && <div className="hud-partial">{partial}</div>}
+          </div>
+          <div className="hud-right">
+            <span className="hud-time">{refining ? fmtSecs(refineSecs) : time}</span>
+            <button className="hud-cancel" title={t('hud.cancel')} onClick={() => api.cancelRecording()}>
+              ✕
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Waveform({ bars }: { bars: number[] }) {
+  return (
+    <div className="wave">
+      {bars.map((v, i) => (
+        <div key={i} className="wave-bar" style={{ height: `${Math.max(6, v * 100)}%` }} />
+      ))}
+    </div>
+  );
+}
+
+function Spinner() {
+  return <span className="hud-spinner" />;
+}
+
+// Spinning reels either side of a segmented meter. Shared by the cassette
+// (paper reels, racing stripe) and metal (graphite reels, orange hub) styles;
+// the shell itself is drawn by the .hud-cassette / .hud-metal rules.
+function Deck({
+  variant,
+  recording,
+  refining,
+  refineMode,
+  envelope,
+  time,
+}: {
+  variant: 'cassette' | 'metal';
+  recording: boolean;
+  refining: boolean;
+  /// The take will go to the AI. The decks are fixed-colour objects, so the
+  /// mode shows in the label rather than in a tint.
+  refineMode: boolean;
+  envelope: number;
+  time: string;
+}) {
+  const t = useT();
+  // Same dB window as the pill waveform, quantised into discrete segments.
+  const db = 20 * Math.log10(Math.max(envelope, 1e-6));
+  const level = Math.min(1, Math.pow(Math.max(0, (db + 50) / 30), 1.15));
+  const lit = Math.round(level * SEG_COUNT);
+  return (
+    <>
+      <Reel variant={variant} spinning={recording} rewinding={!recording} />
+      <div className="deck-mid">
+        <div className="deck-seg">
+          {Array.from({ length: SEG_COUNT }, (_, i) => {
+            // Transcribing: there is no live level any more, so run an
+            // indeterminate sweep instead of leaving the last frame frozen.
+            if (!recording) {
+              return (
+                <i
+                  key={i}
+                  className={variant === 'metal' ? 'hot sweep' : 'lit sweep'}
+                  style={{ animationDelay: `${i * 55}ms` }}
+                />
+              );
+            }
+            // Peak-meter colouring: on the cassette the top two lit segments
+            // read hot; the metal meter is orange throughout.
+            const tone =
+              i >= lit ? '' : variant === 'metal' ? 'hot' : i >= lit - 2 ? 'warn' : 'lit';
+            const flick = i === lit - 1 ? ' edge' : '';
+            return <i key={i} className={tone + flick} />;
+          })}
+        </div>
+        <div className={`deck-label${recording ? '' : ' working'}`}>
+          {refining ? t('hud.deck.ai') : recording ? t('hud.deck.rec') : t('hud.deck.proc')}
+          {refineMode && !refining && <span className="deck-ai"> {t('hud.deck.aiTag')}</span>}{' '}
+          <span className="deck-time">{time}</span>
+        </div>
+      </div>
+      <Reel variant={variant} spinning={recording} rewinding={!recording} slow />
+      {variant === 'cassette' && <span className="deck-stripe" />}
+      <button
+        className="deck-cancel"
+        title={t('hud.cancel')}
+        onClick={(e) => {
+          e.stopPropagation();
+          api.cancelRecording();
+        }}
+      >
+        <svg viewBox="0 0 7 7" width="7" height="7" aria-hidden="true">
+          <line x1="1.5" y1="1.5" x2="5.5" y2="5.5" />
+          <line x1="5.5" y1="1.5" x2="1.5" y2="5.5" />
+        </svg>
+      </button>
+    </>
+  );
+}
+
+function Reel({
+  variant,
+  spinning,
+  rewinding,
+  slow,
+}: {
+  variant: 'cassette' | 'metal';
+  spinning: boolean;
+  rewinding?: boolean;
+  slow?: boolean;
+}) {
+  const paper = variant === 'cassette';
+  const motion = spinning ? ' spin' : rewinding ? ' rewind' : '';
+  return (
+    <svg
+      className={`deck-reel${motion}${slow ? ' slow' : ''}`}
+      viewBox="0 0 40 40"
+      width="44"
+      height="44"
+      aria-hidden="true"
+    >
+      <circle cx="20" cy="20" r="19" fill={paper ? '#d9d6cf' : '#2f3237'} />
+      {REEL_CUTS.map((d, i) => (
+        <path key={i} d={d} fill={paper ? '#fbfbfa' : '#8f959c'} />
+      ))}
+      <circle cx="20" cy="20" r="6.2" fill={paper ? '#b9b5ac' : '#22252a'} />
+      {!paper && <circle cx="20" cy="20" r="2.5" fill="#ff6a1f" />}
+    </svg>
+  );
+}
+
+function fmtSecs(secs: number): string {
+  const mm = Math.floor(secs / 60);
+  const ss = secs % 60;
+  return `${mm}:${ss.toString().padStart(2, '0')}`;
+}
+
+/// The name shown while waiting on the AI. Falls back to a neutral word for a
+/// custom command, whose program name would mean nothing on screen.
+function providerName(p: string | undefined): string {
+  switch (p) {
+    case 'claude':
+      return 'Claude';
+    case 'codex':
+      return 'Codex';
+    case 'gemini':
+      return 'Gemini';
+    default:
+      return 'AI';
+  }
+}
+
+function applyTheme(s: Settings): Settings {
+  const root = document.documentElement;
+  root.dataset.palette = s.appearance.palette;
+  const mode =
+    s.appearance.theme_mode === 'system'
+      ? window.matchMedia('(prefers-color-scheme: dark)').matches
+        ? 'dark'
+        : 'light'
+      : s.appearance.theme_mode;
+  root.dataset.mode = mode;
+  root.dataset.reduceMotion = String(s.appearance.reduce_motion);
+  root.style.setProperty('--accent', s.appearance.accent);
+  return s;
+}
