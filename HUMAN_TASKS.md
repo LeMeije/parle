@@ -111,10 +111,24 @@ starts a coral take. None of this has run on Windows yet.
 
 ## 4. Distribution (only when you want to ship to others)
 
-- Apple Developer ID cert + notarisation for the .dmg
-  (`bundle.macOS.signingIdentity` + `tauri notarize` env vars; also swap the
-  updater keys in, see tauri-plugin-updater docs). Until then the app runs
-  fine locally; Gatekeeper will warn other people's machines.
+Installers are built by `.github/workflows/release.yml`: push a tag
+(`git tag v0.1.0 && git push origin v0.1.0`) or press "Run workflow" on the
+Actions tab, wait for both jobs, then open the DRAFT release on the Releases
+page, check the two files and click Publish. `docs/INSTALL.md` is the guide
+to send people.
+
+Without the items below, the installers work but both operating systems
+warn on first open (the install guide walks people past it).
+
+- Apple Developer ID cert + notarisation for the .dmg. Needs the Apple
+  Developer Program. Then add six repository secrets (Settings > Secrets and
+  variables > Actions): `APPLE_CERTIFICATE` (base64 of the exported
+  Developer ID Application .p12), `APPLE_CERTIFICATE_PASSWORD`,
+  `APPLE_SIGNING_IDENTITY` ("Developer ID Application: Name (TEAMID)"),
+  `APPLE_ID`, `APPLE_PASSWORD` (an app-specific password) and
+  `APPLE_TEAM_ID`. The workflow switches over by itself; this path has not
+  been run yet. It also stops Mac users having to re-grant Accessibility
+  after every update, which ad-hoc builds need.
 - Windows: an Authenticode cert if you want SmartScreen-clean installers.
 - Updater: generate a minisign keypair (`npm run tauri signer generate`),
   add the pubkey to tauri.conf.json, host latest.json somewhere static.

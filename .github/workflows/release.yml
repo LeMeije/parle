@@ -1,0 +1,131 @@
+# Builds the downloadable installers and attaches them to a GitHub Release.
+#
+#   macOS:   Parle_<version>_universal.dmg   (Apple Silicon and Intel in one file)
+#   Windows: Parle_<version>_x64-setup.exe   (per-user install, no admin prompt)
+#
+# Run it by pushing a tag (git tag v0.1.0 && git push origin v0.1.0) or from
+# the Actions tab ("Run workflow"). The release is created as a DRAFT so the
+# files can be checked before anyone sees it: publish it from the Releases page.
+#
+# Signing. With no secrets set, the Mac app is ad-hoc signed and the Windows
+# installer is unsigned, so both operating systems show a one-time warning on
+# first open (docs/INSTALL.md walks people through it). Adding the Apple
+# secrets listed in the "Choose the macOS signing identity" step switches the
+# Mac build to Developer ID signing plus notarisation with no other change.
+#
+# CPU tuning. whisper.cpp otherwise compiles with -march=native for whatever
+# CPU the build machine has, and the installer then crashes with an illegal
+# instruction on an older machine. The GGML_* variables below (whisper-rs-sys
+# passes every GGML_* variable through to cmake) pin the x86 baseline to AVX2,
+# which every Intel CPU since 2013 (Haswell) and every AMD CPU since 2015 has.
+# Apple Silicon ignores them; Metal does the heavy lifting there.
+#
+# The Windows build is CPU only. The CUDA build needs NVIDIA's runtime DLLs at
+# launch, so it would refuse to start on any PC without an NVIDIA GPU.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target universal-apple-darwin --bundles dmg
+          - platform: windows-latest
+            rust_targets: x86_64-pc-windows-msvc
+            args: --bundles nsis
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 90
+    env:
+      GGML_NATIVE: "OFF"
+      GGML_AVX: "ON"
+      GGML_AVX2: "ON"
+      GGML_FMA: "ON"
+      GGML_F16C: "ON"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: ${{ matrix.platform }}
+
+      - name: Point bindgen at the preinstalled LLVM
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+
+      # tauri.conf.json names "Parle Dev", the self-signed certificate on the
+      # author's Mac. It does not exist here, so it is always overridden.
+      # Developer ID signing needs these repository secrets:
+      #   APPLE_CERTIFICATE           base64 of the exported .p12
+      #   APPLE_CERTIFICATE_PASSWORD  the .p12 export password
+      #   APPLE_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
+      #   APPLE_ID, APPLE_PASSWORD (app-specific password), APPLE_TEAM_ID  for notarisation
+      # Each variable is only exported when its secret is set: the Tauri CLI
+      # treats a variable that is present but empty as a value and fails on it.
+      - name: Choose the macOS signing identity
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          identity="${APPLE_SIGNING_IDENTITY:--}"
+          printf '{"bundle":{"macOS":{"signingIdentity":"%s"}}}' "$identity" > "$RUNNER_TEMP/macos-signing.json"
+          echo "MACOS_CONFIG=--config $RUNNER_TEMP/macos-signing.json" >> "$GITHUB_ENV"
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -n "${!name}" ]; then echo "$name=${!name}" >> "$GITHUB_ENV"; fi
+          done
+          if [ "$identity" = "-" ]; then echo "Ad-hoc signing (no Developer ID secrets set)"; else echo "Signing as $identity"; fi
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: Parle v__VERSION__
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }} ${{ env.MACOS_CONFIG }}
+          releaseBody: |
+            ## Download
+
+            - **Mac** (Apple Silicon or Intel, macOS 12 or later): the file ending in `_universal.dmg`
+            - **Windows 11** (64-bit): the file ending in `_x64-setup.exe`
+
+            Ignore the two "Source code" files at the bottom: those are for developers.
+
+            The first time you open Parle your computer will warn you that it does not recognise the developer. That is expected for a free app from an independent developer. Step-by-step help, with what to click: [INSTALL.md](https://github.com/${{ github.repository }}/blob/main/docs/INSTALL.md).
+
+            During setup Parle downloads its speech model once (the recommended one is about 200 MB), then works fully offline.

@@ -4,6 +4,19 @@ On-device AI dictation + unified transcription/clipboard history for macOS and
 Windows 11. Hold a key, speak, release: your words appear where your cursor
 is. **Everything runs locally. No telemetry, no cloud, ever.**
 
+## Download
+
+**[Download the latest version](https://github.com/LeMeije/parle/releases/latest)**,
+then under **Assets** pick one file:
+
+- **Mac** (Apple Silicon or Intel): the file ending in `_universal.dmg`
+- **Windows 11**: the file ending in `_x64-setup.exe`
+
+Not the green **Code > Download ZIP** button, and not the "Source code" files:
+those are the programming files, not the app. The first launch shows a
+security warning because the app is free and unsigned. **[The install guide](docs/INSTALL.md)**
+shows exactly what to click.
+
 Tauri 2 + Rust core + React UI. whisper.cpp (Metal on macOS, CUDA on Windows)
 behind a fallback ladder that never loses a recording.
 
@@ -75,9 +88,10 @@ npx tsc --noEmit -p tsconfig.json      # the frontend's only gate
 ```
 
 Dev note: sign dev builds with one stable certificate or macOS TCC forgets the
-Accessibility grant on every rebuild: see HUMAN_TASKS.md §2. There is no CI:
-**docs/TESTING.md** is the record of what is actually verified, how, and what
-is only claimed.
+Accessibility grant on every rebuild: see HUMAN_TASKS.md §2. CI only builds
+the release installers (`.github/workflows/release.yml`, run by pushing a `v*`
+tag); it runs no tests. **docs/TESTING.md** is the record of what is actually
+verified, how, and what is only claimed.
 
 The project shipped under a different name before it was called Parle. Nothing
 internal carries the old name any more: crates, modules, the mDNS service and
@@ -114,6 +128,7 @@ docs                   see below
 
 | File | What it is for |
 |---|---|
+| `docs/INSTALL.md` | Plain-language install guide for people downloading a release |
 | `docs/PRODUCT.md` | What Parle is, the feature surface, shipped versus deferred |
 | `docs/ARCHITECTURE.md` | Stack, threading model, data flow, failure ladder |
 | `docs/UI.md` | The UI contract: design tokens, the scoped-accent trap, layout primitives, wording rules, i18n |
