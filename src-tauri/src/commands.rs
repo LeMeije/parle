@@ -456,6 +456,21 @@ pub fn engine_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
     }
 }
 
+/// The main window's page has painted a fresh frame since it was shown, so
+/// the snapshot covering it can fade out (see main_window.rs).
+#[tauri::command]
+pub fn main_window_painted(app: AppHandle) {
+    crate::main_window::painted(&app);
+}
+
+/// The main window's page has rendered for the first time, so a window that
+/// a login launch kept hidden can be photographed while it is awake (see
+/// main_window.rs).
+#[tauri::command]
+pub fn main_window_ready(window: tauri::WebviewWindow) {
+    crate::main_window::ready(&window);
+}
+
 #[tauri::command]
 pub fn machine_profile() -> registry::MachineProfile {
     registry::detect_machine()

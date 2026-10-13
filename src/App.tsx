@@ -104,6 +104,33 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Back from hidden: once this page has painted a fresh frame, the snapshot
+  // Rust laid over the window can fade out (src-tauri/src/main_window.rs).
+  // Two frames, because the first callback runs before its frame is drawn.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          api.mainWindowPainted().catch(() => {});
+        }),
+      );
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
+  // A login launch keeps this window hidden from the start, so nothing has
+  // photographed it yet. Once it has had time to load, let Rust take the first
+  // snapshot while the page is still awake: WebKit suspends a hidden page
+  // within half a minute, and a suspended page cannot be photographed.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      api.mainWindowReady().catch(() => {});
+    }, 2000);
+    return () => window.clearTimeout(t);
+  }, []);
+
   // The previous toast's timer is cleared first: left running, it dismissed
   // the NEXT toast early, which for an error following a success cut the
   // error's six seconds down to whatever the success had left.

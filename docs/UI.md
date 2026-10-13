@@ -23,6 +23,32 @@ load, which is why every colour belongs there rather than in a component.
 Tauri capabilities must list BOTH windows (`src-tauri/capabilities/default.json`);
 a window missing from that list gets silent IPC failures, not errors.
 
+## Reopening the main window: no white flash
+
+The main window is hidden, never closed. Reopening it after a while used to
+show a white window for a split second. Measured 13/10/2026 in a standalone
+WKWebView probe: WebKit suspends a hidden page somewhere between 10 and 30
+seconds after it is hidden (snapshots came back at 10 s, none at 30 s), so on a
+later show the page has to wake before it can draw, and there is nothing to
+show until it does.
+
+`src-tauri/src/main_window.rs` photographs the page while it is still awake,
+as the window hides, and lays the photograph over the web view on the next
+show. App.tsx tells Rust when the live page has painted (`visibilitychange`,
+two animation frames, `main_window_painted`) and the photograph fades out over
+it in 0.12 s. A login launch never shows the window, so App.tsx also calls
+`main_window_ready` two seconds after the page loads and the first photograph
+is taken then. A hide waits at most 250 ms for its photograph; the photograph
+comes off after 2 s even if the page never reports a paint. It costs one
+window-sized image while the window is hidden.
+
+**Every show and hide of the main window goes through `main_window::show` and
+`main_window::hide`**, never `window.show()` or `window.hide()` directly, or the
+photograph is never taken or goes stale. Callers today: `show_main`,
+`toggle_palette` and `hide_main_to_tray` in hud.rs, and the CloseRequested
+handler in lib.rs. The one direct `hide()` left, in the login-launch path of
+lib.rs setup, is deliberate: nothing has rendered yet.
+
 ## Design tokens and how the cascade works
 
 `src/theme.css`. Palettes are attributes on `<html>`: `data-palette` is one of

@@ -4,6 +4,7 @@ mod commands;
 mod hotkey_logic;
 mod hud;
 mod icons;
+mod main_window;
 mod model_idle;
 mod pipeline;
 mod platform;
@@ -221,6 +222,8 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
+            commands::main_window_painted,
+            commands::main_window_ready,
             commands::add_custom_model,
             commands::remove_custom_model,
             commands::set_settings,
@@ -371,7 +374,12 @@ pub fn run() {
             if window.label() == hud::MAIN_LABEL {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
-                    let _ = window.hide();
+                    match window.app_handle().get_webview_window(hud::MAIN_LABEL) {
+                        Some(main) => main_window::hide(&main),
+                        None => {
+                            let _ = window.hide();
+                        }
+                    }
                     // Window gone -> back to menu-bar-only (out of Cmd+Tab/Dock).
                     #[cfg(target_os = "macos")]
                     let _ = window

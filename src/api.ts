@@ -37,6 +37,8 @@ export const api = {
   deleteModel: (modelId: string) => invoke<void>('delete_model', { modelId }),
   selectModel: (modelId: string) => invoke<void>('select_model', { modelId }),
   engineStatus: () => invoke<EngineStatus>('engine_status'),
+  mainWindowPainted: () => invoke<void>('main_window_painted'),
+  mainWindowReady: () => invoke<void>('main_window_ready'),
 
   dictList: () => invoke<DictEntry[]>('dict_list'),
   dictAdd: (term: string, corrections: string[]) =>

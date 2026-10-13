@@ -225,7 +225,7 @@ pub fn hide_main_to_tray(app: &AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(main) = handle.get_webview_window(MAIN_LABEL) {
-            let _ = main.hide();
+            crate::main_window::hide(&main);
         }
         #[cfg(target_os = "macos")]
         let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -243,9 +243,10 @@ pub fn toggle_palette(app: &AppHandle) {
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || {
                 if let Some(main) = handle.get_webview_window(MAIN_LABEL) {
-                    let _ = main.show();
-                    let _ = main.set_focus();
+                    // Before the show, so the snapshot taken for the reveal
+                    // already has the History tab in it.
                     let _ = main.emit("focus-palette", ());
+                    crate::main_window::show(&main);
                 }
             });
         }
@@ -258,8 +259,7 @@ pub fn show_main(app: &AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(main) = handle.get_webview_window(MAIN_LABEL) {
-            let _ = main.show();
-            let _ = main.set_focus();
+            crate::main_window::show(&main);
         }
     });
 }

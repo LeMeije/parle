@@ -192,6 +192,9 @@ the load runs while the user talks. Five idle minutes by default (Settings, Gene
 the old behaviour), 30 s under a memory pressure warning, at once under critical, never mid-take.
 Measured in the installed app: 696 MB before the release, 59 MB after. Off by default on Windows
 until measured there (docs/WINDOWS_HANDOFF.md).
+Same day: the main window reopens over a snapshot of itself instead of flashing white. WebKit
+suspends a hidden page within 30 s; after a 45 s hide the live page took 121 ms to paint, all of it
+covered by the snapshot (docs/UI.md, "Reopening the main window").
 
 DEFERRED (tracked in HUMAN_TASKS.md / WINDOWS_HANDOFF.md): local-LLM cleanup tier (settings
 scaffolded), per-file model checksums, overlay position presets, per-app paste
