@@ -4,6 +4,7 @@ mod commands;
 mod hotkey_logic;
 mod hud;
 mod icons;
+mod model_idle;
 mod pipeline;
 mod platform;
 mod refine;

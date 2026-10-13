@@ -145,6 +145,18 @@ pub struct ModelSettings {
     pub backend: String,
     /// Pre-load and warm the model at app startup.
     pub prewarm: bool,
+    /// Free the model's memory after this many minutes without dictation; 0
+    /// keeps it loaded for good (the behaviour before this setting existed).
+    ///
+    /// Nothing is lost by freeing it: the app loads it again the moment a
+    /// recording STARTS, so the load (well under a second) runs while the user
+    /// is still talking. Under macOS memory pressure it is freed sooner.
+    ///
+    /// No field-level `#[serde(default)]` here on purpose: that would fill a
+    /// missing key from u32's default, 0, which means "never", and every
+    /// existing install would silently keep the old behaviour. The struct-level
+    /// attribute fills it from `ModelSettings::default()` instead.
+    pub idle_unload_minutes: u32,
     /// Models the user pointed at themselves, on disk, outside the registry.
     ///
     /// Kept in settings rather than copied into the models directory, so a
@@ -182,8 +194,26 @@ impl Default for ModelSettings {
             fallback_chain: Vec::new(),
             backend: "auto".into(),
             prewarm: true,
+            idle_unload_minutes: default_idle_unload_minutes(),
             custom: Vec::new(),
         }
+    }
+}
+
+/// Five minutes on macOS. Measured 13/10/2026 on an M2 (24 GB) with Large v3
+/// Turbo q5_0: the weights were 548 MB of the app's 607 MB footprint; 35 timed
+/// reloads had a median of 0.59 s (0.21 to 1.6 s, the three slowest in one run
+/// with other builds saturating the machine); and across 1,549 real
+/// dictations, no recording that followed a gap of over five minutes was
+/// shorter than one second, and 95% ran past 6.4 s. The reload starts with the
+/// recording, so it finishes while the user is talking. Off on Windows until
+/// it is measured there (CUDA keeps the weights in VRAM, so the RAM case is
+/// weaker).
+pub fn default_idle_unload_minutes() -> u32 {
+    if cfg!(target_os = "macos") {
+        5
+    } else {
+        0
     }
 }
 
@@ -1141,6 +1171,43 @@ pub fn history_db_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- freeing the model when idle ----
+
+    #[test]
+    fn an_install_that_predates_idle_unload_gets_the_platform_default() {
+        // Ben's own settings.json from before this field existed, models block
+        // verbatim. A field-level `#[serde(default)]` would read this as 0
+        // ("never") and the feature would ship switched off for everyone who
+        // already had the app.
+        let json = r#"{"models":{"active_model":"whisper-large-v3-turbo-q5_0",
+            "fallback_chain":["whisper-large-v3-turbo-q5_0","whisper-base-q5_1"],
+            "backend":"auto","prewarm":true,"custom":[]}}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.models.idle_unload_minutes, default_idle_unload_minutes());
+        assert_eq!(s.models.active_model, "whisper-large-v3-turbo-q5_0", "the rest of the block survives");
+        assert!(s.models.prewarm);
+    }
+
+    #[test]
+    fn idle_unload_is_on_for_macos_and_off_elsewhere() {
+        let minutes = ModelSettings::default().idle_unload_minutes;
+        if cfg!(target_os = "macos") {
+            assert_eq!(minutes, 5);
+        } else {
+            assert_eq!(minutes, 0, "unmeasured on Windows, so it keeps the old behaviour there");
+        }
+    }
+
+    #[test]
+    fn a_chosen_idle_unload_value_round_trips_including_never() {
+        for minutes in [0u32, 2, 5, 15, 60] {
+            let mut s = Settings::default();
+            s.models.idle_unload_minutes = minutes;
+            let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+            assert_eq!(back.models.idle_unload_minutes, minutes);
+        }
+    }
 
     // ---- the history-palette chord ----
 

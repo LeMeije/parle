@@ -1207,6 +1207,27 @@ export default function SettingsView({
           }}
         />
         <Toggle label={t('settings.prewarm.label')} hint={t('settings.prewarm.hint')} value={s.models.prewarm} onChange={(v) => set((d) => (d.models.prewarm = v))} />
+        <Field
+          label={t('settings.idleUnload.label')}
+          hint={IS_MAC ? t('settings.idleUnload.hintMac') : t('settings.idleUnload.hintWin')}
+        >
+          <select
+            value={s.models.idle_unload_minutes}
+            onChange={(e) => set((d) => (d.models.idle_unload_minutes = Number(e.target.value)))}
+          >
+            {/* A value set by hand in settings.json still shows, rather than
+                the select silently displaying the first option. */}
+            {[...new Set([2, 5, 15, 60, 0, s.models.idle_unload_minutes])].map((m) => (
+              <option key={m} value={m}>
+                {m === 0
+                  ? t('settings.idleUnload.never')
+                  : m === 60
+                    ? t('settings.idleUnload.hour')
+                    : t('settings.idleUnload.minutes', { n: m })}
+              </option>
+            ))}
+          </select>
+        </Field>
       </Section>
 
       <footer className="settings-footer">

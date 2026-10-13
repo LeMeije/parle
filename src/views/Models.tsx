@@ -3,7 +3,15 @@
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Check, Cpu, Download, FolderOpen, Gauge, Globe2, Target, Trash2, X } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
-import { api, onDownloadCancelled, onDownloadComplete, onDownloadError, onDownloadProgress } from '../api';
+import {
+  api,
+  onDownloadCancelled,
+  onDownloadComplete,
+  onDownloadError,
+  onDownloadProgress,
+  onEngineStatus,
+  type EngineStatus,
+} from '../api';
 import type { DownloadProgress, ModelRow } from '../types';
 import { useT } from '../i18n/useT';
 
@@ -51,7 +59,7 @@ export default function ModelsView() {
     }
   }
   const [error, setError] = useState<string | null>(null);
-  const [engine, setEngine] = useState<{ loaded_model: string | null; warm: boolean } | null>(null);
+  const [engine, setEngine] = useState<EngineStatus | null>(null);
 
   const refresh = useCallback(() => {
     api.listModels().then(setModels);
@@ -88,11 +96,15 @@ export default function ModelsView() {
       dropRow(id);
       refresh();
     });
+    // The model is freed when idle and reloaded when a recording starts, so
+    // the pill follows the Rust side live rather than only on refresh.
+    const un5 = onEngineStatus(setEngine);
     return () => {
       un1.then((f) => f());
       un2.then((f) => f());
       un3.then((f) => f());
       un4.then((f) => f());
+      un5.then((f) => f());
     };
   }, [refresh]);
 
@@ -104,6 +116,8 @@ export default function ModelsView() {
           {t('models.subtitle')}{' '}
           {engine?.warm ? (
             <span className="pill ok">{t('models.warm', { model: shortName(engine.loaded_model ?? '') })}</span>
+          ) : engine?.resting ? (
+            <span className="pill">{t('models.resting')}</span>
           ) : (
             <span className="pill">{t('models.loadsOnFirstUse')}</span>
           )}

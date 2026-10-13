@@ -48,11 +48,22 @@ fn default_threads() -> i32 {
 
 impl WhisperEngine {
     pub fn load(model_path: &Path, model_id: &str, multilingual: bool, use_gpu: bool) -> Result<Self, AsrError> {
+        Self::load_with(model_path, model_id, multilingual, use_gpu, false)
+    }
+
+    pub fn load_with(
+        model_path: &Path,
+        model_id: &str,
+        multilingual: bool,
+        use_gpu: bool,
+        flash_attn: bool,
+    ) -> Result<Self, AsrError> {
         if !model_path.exists() {
             return Err(AsrError::ModelMissing(model_path.display().to_string()));
         }
         let mut params = WhisperContextParameters::default();
         params.use_gpu(use_gpu);
+        params.flash_attn(flash_attn);
         let ctx = WhisperContext::new_with_params(
             model_path.to_str().ok_or_else(|| AsrError::LoadFailed("non-utf8 path".into()))?,
             params,

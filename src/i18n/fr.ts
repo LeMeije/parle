@@ -112,6 +112,7 @@ export const fr: Record<string, string> = {
   'models.warm': 'Chargé · {model}',
   'models.loadsOnFirstUse': 'Chargé à la première utilisation',
   'models.active': 'Actif',
+  'models.resting': 'Au repos pour libérer la mémoire · se charge quand vous dictez',
   'models.backendTitle': 'Le matériel sur lequel ce modèle s’exécute',
   'models.yourFile': 'Votre fichier',
   'models.speedRating': 'vitesse {value}/5',
@@ -489,7 +490,13 @@ export const fr: Record<string, string> = {
   // ---------- Settings: general ----------
   'settings.launchAtLogin.label': 'Lancer à l’ouverture de session',
   'settings.prewarm.label': 'Précharger le modèle au démarrage',
-  'settings.prewarm.hint': 'Occupe de la mémoire au repos, rend la première dictée instantanée',
+  'settings.prewarm.hint': 'Prépare le modèle au lancement de Parle, pour que même la première dictée soit rapide',
+  'settings.idleUnload.label': 'Libérer la mémoire du modèle au repos',
+  'settings.idleUnload.hintMac': 'Rechargé dès que vous commencez à dicter, pendant que vous parlez encore, vous ne devriez donc rien remarquer. Libéré plus tôt si votre Mac manque de mémoire.',
+  'settings.idleUnload.hintWin': 'Rechargé dès que vous commencez à dicter, pendant que vous parlez encore, vous ne devriez donc rien remarquer.',
+  'settings.idleUnload.minutes': '{n} minutes',
+  'settings.idleUnload.hour': '1 heure',
+  'settings.idleUnload.never': 'Jamais (le garder chargé)',
 
   // ---------- Settings: sync ----------
   'sync.section': 'Synchronisation',

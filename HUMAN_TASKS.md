@@ -80,6 +80,17 @@ directly instead of the script), just delete it:
 `rm -rf target/debug/bundle/macos/Parle.app target/release/bundle/macos/Parle.app`
 The canonical app is always /Applications/Parle.app, so launch that one.
 
+## 1c. The model now rests when idle (13/10/2026): nothing to do
+
+Parle frees the voice model after 5 idle minutes (30 s when the Mac is under
+memory pressure) and loads it again the moment you start dictating, while you
+talk. Measured: 696 MB before a release, 59 MB after. You should not notice it.
+If you ever see a pause before text appears after a quiet spell, look in
+`~/Library/Application Support/Parle/parle.log` for
+`model loaded for this dictation in N ms` and compare N with how long you
+spoke. To switch it off: Settings, General, "Free the model's memory when
+idle", Never.
+
 ## 2. Stable dev signing (5 minutes, once), needed before rebuilding often
 
 TCC ties permission grants to the code signature; unsigned rebuilds lose the

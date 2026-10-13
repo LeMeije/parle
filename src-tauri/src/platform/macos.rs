@@ -1018,3 +1018,95 @@ pub fn clipboard_is_concealed() -> bool {
         false
     }
 }
+
+// -- Memory -----------------------------------------------------------------
+
+/// `kern.memorystatus_vm_pressure_level`, which the kernel reports in the
+/// same values as DISPATCH_SOURCE_TYPE_MEMORYPRESSURE: 1 normal, 2 warning,
+/// 4 critical. Readable without privileges. Anything unreadable or unknown is
+/// treated as Normal, so a failure here can only make the app keep the model
+/// longer, never free it at a bad moment.
+pub fn memory_pressure() -> super::MemoryPressure {
+    let mut level: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>();
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"kern.memorystatus_vm_pressure_level".as_ptr(),
+            (&mut level as *mut libc::c_int).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    match (rc, level) {
+        (0, 4) => super::MemoryPressure::Critical,
+        (0, 2) => super::MemoryPressure::Warn,
+        _ => super::MemoryPressure::Normal,
+    }
+}
+
+/// `ri_phys_footprint` from proc_pid_rusage(RUSAGE_INFO_V4): what Activity
+/// Monitor shows as this app's Memory.
+pub fn footprint_bytes() -> Option<u64> {
+    extern "C" {
+        fn proc_pid_rusage(pid: libc::c_int, flavor: libc::c_int, buffer: *mut u64) -> libc::c_int;
+    }
+    const RUSAGE_INFO_V4: libc::c_int = 4;
+    // rusage_info_v4 is 16 bytes of uuid then u64 fields; phys_footprint is
+    // the ninth u64 slot counting the uuid as two. Sized well past the struct.
+    let mut buf = [0u64; 64];
+    let rc = unsafe { proc_pid_rusage(std::process::id() as libc::c_int, RUSAGE_INFO_V4, buf.as_mut_ptr()) };
+    (rc == 0).then_some(buf[9])
+}
+
+#[cfg(test)]
+mod memory_tests {
+    #[test]
+    fn the_pressure_level_is_readable_without_privileges() {
+        // The sysctl must answer at all, or the reaper is silently blind to
+        // pressure (it would read every failure as Normal by design).
+        let mut level: libc::c_int = -1;
+        let mut len = std::mem::size_of::<libc::c_int>();
+        let rc = unsafe {
+            libc::sysctlbyname(
+                c"kern.memorystatus_vm_pressure_level".as_ptr(),
+                (&mut level as *mut libc::c_int).cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        assert_eq!(rc, 0, "sysctl failed");
+        assert!([1, 2, 4].contains(&level), "unexpected level {level}");
+    }
+
+    #[test]
+    fn the_footprint_is_the_figure_macos_itself_reports() {
+        // Resident size (the slot next door) also rises when memory is
+        // touched, so "it went up" cannot prove the right field was read. The
+        // oracle is macOS's own `footprint` tool on this same process.
+        let block = std::hint::black_box(vec![1u8; 64 << 20]);
+        let ours = super::footprint_bytes().expect("proc_pid_rusage") as f64 / 1_048_576.0;
+        let out = std::process::Command::new("footprint")
+            .arg(std::process::id().to_string())
+            .output()
+            .expect("the footprint tool ships with macOS");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("phys_footprint:"))
+            .unwrap_or_else(|| panic!("no phys_footprint line in:\n{text}"));
+        let mut parts = line["phys_footprint:".len()..].split_whitespace();
+        let value: f64 = parts.next().and_then(|v| v.parse().ok()).expect("a number");
+        let theirs = match parts.next() {
+            Some("GB") => value * 1024.0,
+            Some("MB") => value,
+            Some("KB") => value / 1024.0,
+            other => panic!("unexpected unit {other:?} in {line}"),
+        };
+        assert!(theirs > 64.0, "the 64 MB block must be in it: {theirs} MB");
+        assert!((ours - theirs).abs() <= 3.0 + theirs * 0.03, "ours {ours:.1} MB, footprint tool {theirs:.1} MB");
+        drop(block);
+    }
+}

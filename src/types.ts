@@ -11,6 +11,8 @@ export interface Settings {
     fallback_chain: string[];
     backend: string;
     prewarm: boolean;
+    /** Free the model's memory after this many idle minutes; 0 = never. */
+    idle_unload_minutes: number;
   };
   language: {
     language: string;

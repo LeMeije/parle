@@ -8,7 +8,7 @@ traced to a command someone actually typed.
 ## The suites
 
 ```bash
-cargo test --workspace          # macOS: ~40s. 718 passing, 11 ignored, as of 10/09/2026.
+cargo test --workspace          # macOS: ~40s. 734 passing, 11 ignored, as of 13/10/2026.
 npx tsc --noEmit -p tsconfig.json   # the frontend has no test runner; this is the only gate
 ```
 

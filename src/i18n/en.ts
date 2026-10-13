@@ -115,6 +115,7 @@ export const en: Record<string, string> = {
   'models.warm': 'Warm · {model}',
   'models.loadsOnFirstUse': 'Model loads on first use',
   'models.active': 'Active',
+  'models.resting': 'Resting to free memory · loads when you dictate',
   'models.backendTitle': 'The hardware this model runs on',
   'models.yourFile': 'Your file',
   'models.speedRating': 'speed {value}/5',
@@ -495,7 +496,13 @@ export const en: Record<string, string> = {
   // ---------- Settings: general ----------
   'settings.launchAtLogin.label': 'Launch at login',
   'settings.prewarm.label': 'Pre-warm model at startup',
-  'settings.prewarm.hint': 'Uses memory while idle, makes the first dictation instant',
+  'settings.prewarm.hint': 'Gets the model ready as Parle starts, so even the first dictation is quick',
+  'settings.idleUnload.label': 'Free the model’s memory when idle',
+  'settings.idleUnload.hintMac': 'Reloaded the moment you start dictating, while you are still talking, so you should not notice. Freed sooner if your Mac runs short of memory.',
+  'settings.idleUnload.hintWin': 'Reloaded the moment you start dictating, while you are still talking, so you should not notice.',
+  'settings.idleUnload.minutes': '{n} minutes',
+  'settings.idleUnload.hour': '1 hour',
+  'settings.idleUnload.never': 'Never (keep it loaded)',
 
   // ---------- Settings: sync ----------
   'sync.section': 'Sync',

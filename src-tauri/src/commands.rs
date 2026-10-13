@@ -452,7 +452,7 @@ pub fn engine_status(state: State<'_, Arc<AppState>>) -> serde_json::Value {
     // Never block the UI behind an in-flight transcription.
     match state.engine.try_lock() {
         Some(e) => serde_json::to_value(e.status()).unwrap_or_default(),
-        None => serde_json::json!({ "loaded_model": null, "warm": true, "busy": true }),
+        None => serde_json::json!({ "loaded_model": null, "warm": true, "resting": false, "busy": true }),
     }
 }
 

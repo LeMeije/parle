@@ -117,6 +117,7 @@ export const pt: Record<string, string> = {
   'models.warm': 'Carregado · {model}',
   'models.loadsOnFirstUse': 'O modelo carrega no primeiro uso',
   'models.active': 'Ativo',
+  'models.resting': 'Em repouso para liberar memória · carrega quando você dita',
   'models.backendTitle': 'O hardware em que este modelo roda',
   'models.yourFile': 'Seu arquivo',
   'models.speedRating': 'velocidade {value}/5',
@@ -494,7 +495,13 @@ export const pt: Record<string, string> = {
   // ---------- Settings: general ----------
   'settings.launchAtLogin.label': 'Abrir ao fazer login',
   'settings.prewarm.label': 'Pré-carregar o modelo ao iniciar',
-  'settings.prewarm.hint': 'Usa memória enquanto está ocioso, deixa o primeiro ditado instantâneo',
+  'settings.prewarm.hint': 'Prepara o modelo ao abrir o Parle, para que até o primeiro ditado seja rápido',
+  'settings.idleUnload.label': 'Liberar a memória do modelo quando ocioso',
+  'settings.idleUnload.hintMac': 'Recarregado assim que você começa a ditar, enquanto ainda fala, então você não deve notar. Liberado mais cedo se o seu Mac estiver com pouca memória.',
+  'settings.idleUnload.hintWin': 'Recarregado assim que você começa a ditar, enquanto ainda fala, então você não deve notar.',
+  'settings.idleUnload.minutes': '{n} minutos',
+  'settings.idleUnload.hour': '1 hora',
+  'settings.idleUnload.never': 'Nunca (manter carregado)',
 
   // ---------- Settings: sync ----------
   'sync.section': 'Sincronização',

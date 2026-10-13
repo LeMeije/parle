@@ -18,6 +18,41 @@ pub mod windows;
 #[cfg(target_os = "windows")]
 pub use windows as imp;
 
+/// The OS's own verdict on memory, as the idle model reaper reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryPressure {
+    Normal,
+    Warn,
+    Critical,
+}
+
+/// macOS: the kernel's pressure level, the signal behind Activity Monitor's
+/// pressure graph. Windows has no equivalent wired up yet and always reports
+/// Normal, so only the idle timeout applies there.
+pub fn memory_pressure() -> MemoryPressure {
+    #[cfg(target_os = "macos")]
+    {
+        macos::memory_pressure()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        MemoryPressure::Normal
+    }
+}
+
+/// This process's physical footprint in bytes, the figure in Activity
+/// Monitor's Memory column. Only for log lines; None where not implemented.
+pub fn footprint_bytes() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::footprint_bytes()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HotkeyId {

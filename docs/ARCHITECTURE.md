@@ -56,6 +56,8 @@ so switching the tool could report on the previous one. `set()` in
   with Cancelled as an exit from any active state. Hotkey events are the only inputs that start/stop it.
 - UI: app.emit broadcasts for all pipeline events (levels are throttled to ~30 Hz with tiny
   payloads, measured fine; migrate to ipc::Channel only if profiling ever shows IPC cost).
+- Idle model reaper (`model_idle.rs`, thread `parle-model-idle`): wakes every 10 s and only ever
+  `try_lock`s the engine, so it can never wait on, or delay, an engine that is in use.
 
 ## Data flow on stop
 audio buffer -> final ASR pass -> Tier-1 deterministic cleanup (Rust) -> dictionary post-correction ->
@@ -78,6 +80,16 @@ confidence + timestamps, streaming partial callback }. Backends: whisper-rs (v1)
 (feature `parakeet`), llama-cpp-2 cleanup (feature `cleanup`). Model registry is static data (URLs,
 sizes, sha256 where published, speed/accuracy labels per machine class); downloader is resumable with
 progress events.
+
+Model lifecycle (13/10/2026). Loaded and warmed at startup (`prewarm`). Freed by the idle reaper after
+`models.idle_unload_minutes` without use (5 on macOS; 0 means never and is the Windows default), sooner
+under macOS memory pressure (30 s after the last use at "warning", at once at "critical"), and never
+while a recording is live or a take is queued (`Pipeline::is_busy`). Every `pipeline_start` queues
+`Work::Preload` on the serial worker, so a freed model loads while the user is speaking and the take's
+own `StopAndProcess`, queued behind it, finds it ready. No warm-up on reload: ggml-metal keeps its
+device, shader library and compiled pipelines in a process-wide singleton, so they survive a release.
+Why, with the numbers: the model was 548 MB of the app's 607 MB, and under pressure macOS swapped it out
+within a minute of use anyway. See BENCHMARKS.md, "Memory".
 
 ## Behavioural contract (Windows parity)
 shared/*.json test vectors are the spec for everything platform-independent (formatter, dictionary,

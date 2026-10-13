@@ -5,6 +5,7 @@
 use crate::registry::{self, ModelInfo};
 use crate::{AsrEngine, AsrError, AsrOutput, PartialCallback, TranscribeOptions};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 pub struct EngineManager {
     models_dir: PathBuf,
@@ -15,6 +16,12 @@ pub struct EngineManager {
     /// Models the user supplied from their own disk, checked BEFORE the
     /// registry so a custom id can never be shadowed by one.
     custom: Vec<CustomModelSpec>,
+    /// When the loaded engine last did any work: its load, the warm-up, or a
+    /// transcription pass. The app frees the model once this is old enough.
+    last_used: Option<Instant>,
+    /// True from the moment `release` freed a model until the next one loads,
+    /// so the UI can say "resting" instead of "not loaded yet".
+    resting: bool,
 }
 
 /// A user-supplied model, owned rather than `&'static` like `ModelInfo`.
@@ -29,6 +36,8 @@ pub struct CustomModelSpec {
 pub struct EngineStatus {
     pub loaded_model: Option<String>,
     pub warm: bool,
+    /// Freed to give the memory back, and loads again when a recording starts.
+    pub resting: bool,
 }
 
 impl EngineManager {
@@ -40,6 +49,8 @@ impl EngineManager {
             active_model: String::new(),
             fallback_chain: Vec::new(),
             custom: Vec::new(),
+            last_used: None,
+            resting: false,
         }
     }
 
@@ -70,6 +81,7 @@ impl EngineManager {
         EngineStatus {
             loaded_model: self.engine.as_ref().map(|e| e.model_id().to_string()),
             warm: self.engine.is_some(),
+            resting: self.resting && self.engine.is_none(),
         }
     }
 
@@ -79,10 +91,49 @@ impl EngineManager {
         self.ensure_loaded()?;
         if let Some(e) = self.engine.as_mut() {
             e.warmup();
+            self.last_used = Some(Instant::now());
             Ok(e.model_id().to_string())
         } else {
             Err(AsrError::LoadFailed("no engine after ensure_loaded".into()))
         }
+    }
+
+    /// Load the active model, down the fallback chain, if none is in memory.
+    /// No warm-up pass: ggml-metal keeps its device, shader library and
+    /// compiled pipelines in a process-wide singleton, so they survive a
+    /// release. Measured: the first pass after a reload was within the
+    /// run-to-run noise of a warm pass.
+    ///
+    /// Called the moment a recording starts, so the load overlaps the user's
+    /// own speech instead of adding to the wait after it. Returns true when
+    /// this call did the loading.
+    pub fn preload(&mut self) -> Result<bool, AsrError> {
+        if self.engine.is_some() {
+            return Ok(false);
+        }
+        self.ensure_loaded()?;
+        Ok(true)
+    }
+
+    /// Free the loaded model and give its memory back to the OS (whisper.cpp
+    /// allocates the weights with vm_allocate and returns them with
+    /// vm_deallocate, so this is not just a hand-back to malloc). The next
+    /// `preload`, `prewarm` or `transcribe` loads it again. Returns the id that
+    /// was freed, None when nothing was loaded.
+    pub fn release(&mut self) -> Option<String> {
+        let engine = self.engine.take()?;
+        let id = engine.model_id().to_string();
+        drop(engine);
+        self.last_used = None;
+        self.resting = true;
+        Some(id)
+    }
+
+    /// How long the loaded model has gone without work; None when nothing is
+    /// loaded.
+    pub fn idle_for(&self) -> Option<Duration> {
+        self.engine.as_ref()?;
+        self.last_used.map(|t| t.elapsed())
     }
 
     fn candidates(&self) -> Vec<String> {
@@ -115,7 +166,7 @@ impl EngineManager {
                 }
                 match self.load_custom(&spec) {
                     Ok(engine) => {
-                        self.engine = Some(engine);
+                        self.set_loaded(engine);
                         return Ok(());
                     }
                     Err(e) => {
@@ -138,7 +189,7 @@ impl EngineManager {
                     if id != self.active_model {
                         tracing::warn!("fell back from {} to {}", self.active_model, id);
                     }
-                    self.engine = Some(engine);
+                    self.set_loaded(engine);
                     return Ok(());
                 }
                 Err(e) => {
@@ -148,6 +199,14 @@ impl EngineManager {
             }
         }
         Err(last_err)
+    }
+
+    /// The one place a freshly loaded engine is installed, so the idle clock
+    /// and the resting flag can never disagree with what is in memory.
+    fn set_loaded(&mut self, engine: Box<dyn AsrEngine>) {
+        self.engine = Some(engine);
+        self.last_used = Some(Instant::now());
+        self.resting = false;
     }
 
     /// Load a user-supplied whisper.cpp model file.
@@ -219,7 +278,12 @@ impl EngineManager {
             let engine = self.engine.as_mut().unwrap();
             let model_id = engine.model_id().to_string();
             match engine.transcribe(samples, opts, on_partial.take()) {
-                Ok(out) => return Ok((out, model_id)),
+                Ok(out) => {
+                    // Measured from the END of the pass: a 30 s transcription
+                    // must not count as 30 s of idleness.
+                    self.last_used = Some(Instant::now());
+                    return Ok((out, model_id));
+                }
                 Err(e) => {
                     // Transient failures (momentary GPU pressure) deserve one
                     // same-model retry before the model is demoted for the session.
@@ -345,7 +409,74 @@ mod tests {
         let mut m = EngineManager::new(dir.path().to_path_buf(), false);
         m.configure("whisper-small-q5_1", &["whisper-base-q5_1".to_string()]);
         let err = m.prewarm().unwrap_err();
-        matches!(err, AsrError::ModelMissing(_));
+        // `matches!` alone returns a bool nobody read, so this test could not
+        // fail. It asserts now.
+        assert!(matches!(err, AsrError::ModelMissing(_)), "{err:?}");
+    }
+
+    fn fake(id: &str) -> Box<dyn AsrEngine> {
+        Box::new(FakeEngine { id: id.into(), fail: false, calls: Arc::new(Mutex::new(Vec::new())) })
+    }
+
+    #[test]
+    fn release_frees_the_engine_and_reports_resting() {
+        let mut m = EngineManager::new(std::env::temp_dir(), false);
+        m.configure("a", &[]);
+        m.set_loaded(fake("a"));
+        assert!(m.idle_for().is_some(), "a loaded engine has an idle clock");
+        assert!(!m.status().resting);
+
+        assert_eq!(m.release().as_deref(), Some("a"));
+        assert!(m.engine.is_none(), "the engine itself must be dropped, not just flagged");
+        assert!(m.idle_for().is_none(), "nothing loaded, nothing idle");
+        let st = m.status();
+        assert!(st.resting && !st.warm && st.loaded_model.is_none(), "{st:?}");
+        assert_eq!(m.release(), None, "a second release has nothing to free");
+    }
+
+    #[test]
+    fn a_transcription_pass_resets_the_idle_clock() {
+        let mut m = EngineManager::new(std::env::temp_dir(), false);
+        m.configure("a", &[]);
+        m.set_loaded(fake("a"));
+        let Some(ten_minutes_ago) = Instant::now().checked_sub(Duration::from_secs(600)) else {
+            return; // uptime under ten minutes: the clock cannot be backdated
+        };
+        m.last_used = Some(ten_minutes_ago);
+        assert!(m.idle_for().unwrap() >= Duration::from_secs(600));
+        m.transcribe(&[0.0; 100], &TranscribeOptions::default(), None).unwrap();
+        assert!(m.idle_for().unwrap() < Duration::from_secs(5), "a pass is use");
+    }
+
+    #[test]
+    fn preload_leaves_a_loaded_engine_alone() {
+        let mut m = EngineManager::new(std::env::temp_dir(), false);
+        m.configure("a", &[]);
+        m.set_loaded(fake("a"));
+        assert!(!m.preload().unwrap(), "already loaded: nothing to do");
+        assert_eq!(m.status().loaded_model.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn preload_reports_a_missing_model_instead_of_pretending() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = EngineManager::new(dir.path().to_path_buf(), false);
+        m.configure("whisper-small-q5_1", &[]);
+        let err = m.preload().unwrap_err();
+        assert!(matches!(err, AsrError::ModelMissing(_)), "{err:?}");
+        assert!(!m.status().warm);
+    }
+
+    #[test]
+    fn loading_again_ends_the_rest() {
+        let mut m = EngineManager::new(std::env::temp_dir(), false);
+        m.configure("a", &[]);
+        m.set_loaded(fake("a"));
+        m.release();
+        assert!(m.status().resting);
+        m.set_loaded(fake("a"));
+        let st = m.status();
+        assert!(st.warm && !st.resting, "{st:?}");
     }
 
     #[test]

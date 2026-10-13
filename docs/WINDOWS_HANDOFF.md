@@ -179,6 +179,23 @@ npm run tauri build
 `live_program_discovery` is free, runs no API call, and prints the resolved
 path per provider. It is the fastest way to answer "did detection work here".
 
+## What the idle model release means for Windows (13/10/2026)
+
+The model can now be freed when idle and loaded again the moment a recording
+starts (`src-tauri/src/model_idle.rs`, `Work::Preload` in `state.rs`). It is
+**off by default on Windows** (`models.idle_unload_minutes` = 0, see
+`default_idle_unload_minutes` in parle-core) because none of it has been
+measured there: CUDA keeps the weights in VRAM, so the RAM saving is smaller,
+and a reload means uploading them to the GPU again. Memory pressure is not
+wired up on Windows either (`platform::memory_pressure` always reports
+Normal), so once it is switched on only the timeout applies.
+
+To try it on the G14: Settings, General, "Free the model's memory when idle",
+5 minutes. Wait past five minutes, dictate, and look in parle.log for
+`freed model` and then `model loaded for this dictation in N ms`. If N is well
+under the length of a normal recording, make 5 the Windows default in
+`default_idle_unload_minutes` and update its test.
+
 ## Still open
 
 - **Windows benchmarks have not been run.** `docs/BENCHMARKS.md` still contains

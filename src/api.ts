@@ -36,7 +36,7 @@ export const api = {
   cancelDownload: (modelId: string) => invoke<void>('cancel_download', { modelId }),
   deleteModel: (modelId: string) => invoke<void>('delete_model', { modelId }),
   selectModel: (modelId: string) => invoke<void>('select_model', { modelId }),
-  engineStatus: () => invoke<{ loaded_model: string | null; warm: boolean }>('engine_status'),
+  engineStatus: () => invoke<EngineStatus>('engine_status'),
 
   dictList: () => invoke<DictEntry[]>('dict_list'),
   dictAdd: (term: string, corrections: string[]) =>
@@ -79,6 +79,14 @@ export const api = {
     ),
   completeOnboarding: () => invoke<void>('complete_onboarding'),
 };
+
+/** `resting`: freed to give its memory back, loads again when a recording starts. */
+export type EngineStatus = { loaded_model: string | null; warm: boolean; resting?: boolean };
+
+/** Load, release or warm-up finished on the Rust side. */
+export function onEngineStatus(cb: (s: EngineStatus) => void): Promise<UnlistenFn> {
+  return listen<EngineStatus>('engine-status', (e) => cb(e.payload));
+}
 
 export function onPipelineEvent(cb: (e: PipelineEvent) => void): Promise<UnlistenFn> {
   return listen<PipelineEvent>('pipeline-event', (e) => cb(e.payload));

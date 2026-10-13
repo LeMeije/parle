@@ -83,7 +83,7 @@ npm install
 npm run tauri dev              # development
 npm run tauri build            # .app + .dmg (release)
 npm run tauri build -- --bundles app   # .app only, skips the flaky DMG step
-cargo test --workspace         # 718 passing, 11 ignored, incl. behavioural contract vectors
+cargo test --workspace         # 734 passing, 11 ignored, incl. behavioural contract vectors
 npx tsc --noEmit -p tsconfig.json      # the frontend's only gate
 ```
 

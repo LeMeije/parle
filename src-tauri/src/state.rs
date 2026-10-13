@@ -54,6 +54,11 @@ enum Work {
     /// next dictation had already overwritten.
     StopAndProcess(PendingDictation),
     Prewarm(AppHandle),
+    /// A recording just started: load the model if the idle reaper freed it,
+    /// so the load runs while the user talks. Queued ahead of the take's own
+    /// StopAndProcess, which therefore finds the model ready. No warm-up: the
+    /// GPU shaders outlive a release (see `EngineManager::preload`).
+    Preload,
     /// Arbitrary job on the serial worker (engine reconfiguration etc.) so it
     /// queues after any in-flight transcription instead of blocking the caller.
     Run(Box<dyn FnOnce() + Send>),
@@ -179,6 +184,8 @@ impl AppState {
         let (work_tx, work_rx) = crossbeam_channel::unbounded::<Work>();
         {
             let pipeline = pipeline.clone();
+            let engine = engine.clone();
+            let app = app.clone();
             std::thread::Builder::new()
                 .name("parle-worker".into())
                 .spawn(move || {
@@ -187,6 +194,27 @@ impl AppState {
                         match job {
                             Work::StopAndProcess(pending) => pipeline.process(pending),
                             Work::Run(job) => job(),
+                            Work::Preload => {
+                                let started = std::time::Instant::now();
+                                let mut g = engine.lock();
+                                match g.preload() {
+                                    Ok(true) => {
+                                        let status = g.status();
+                                        drop(g);
+                                        tracing::info!(
+                                            "model loaded for this dictation in {} ms",
+                                            started.elapsed().as_millis()
+                                        );
+                                        let _ = app.emit("engine-status", status);
+                                    }
+                                    Ok(false) => {}
+                                    // Not surfaced from here: the take reaches
+                                    // transcription and reports a missing or
+                                    // broken model there, audio preserved, as
+                                    // it did before this preload existed.
+                                    Err(e) => tracing::warn!("could not load the model at record start: {e}"),
+                                }
+                            }
                             Work::Prewarm(app) => {
                                 let state = app.state::<Arc<AppState>>();
                                 // Never at the expense of the hotkey hook.
@@ -211,6 +239,8 @@ impl AppState {
                 })
                 .expect("spawn worker");
         }
+
+        crate::model_idle::spawn(app.clone(), settings.clone(), engine.clone(), pipeline.clone());
 
         let latch = settings.lock().hotkeys.latch_ms;
         let mode = settings.lock().hotkeys.dictation.mode;
@@ -269,7 +299,12 @@ impl AppState {
         // system-wide).
         let ok = self.pipeline.start(mode);
         self.set_recording_flag(ok);
-        if !ok {
+        if ok {
+            // Load the model now if it was freed for being idle: the load then
+            // overlaps the user's speech instead of following it. A no-op
+            // when it is already loaded (including a mid-take mode switch).
+            let _ = self.work_tx.send(Work::Preload);
+        } else {
             self.reset_gestures();
         }
     }

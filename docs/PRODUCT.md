@@ -34,7 +34,9 @@ grant (see LICENSE), so it must stay free of encumbered third-party code.
 Target latencies (measured, not aspirational: benchmarks in `bench/`):
 - hotkey press -> recording active: < 50 ms (audio stream pre-opened, model pre-warmed at startup)
 - release -> text injected (5 s utterance, recommended model): < 800 ms on M2, < 500 ms on the G14
-- idle RAM (tray resident, model warm): report actual numbers; minimise; model memory is the floor
+- idle RAM: report actual numbers; minimise. The model is no longer the floor: on macOS it is freed after
+  5 idle minutes (30 s under memory pressure) and reloads while the next recording runs. Measured
+  13/10/2026 with Large v3 Turbo: 696 MB loaded, 59 MB released. See BENCHMARKS.md, "Memory".
 
 ## Feature surface
 
@@ -150,7 +152,7 @@ never go inside a `Field`) are in docs/UI.md.
 - GPU OOM mid-load -> fallback chain, audio preserved
 
 
-## v1 shipped vs deferred (kept honest: updated 10/09/2026)
+## v1 shipped vs deferred (kept honest: updated 13/10/2026)
 
 SHIPPED: core loop (hold/toggle/hybrid incl. other-key gesture abort), non-activating HUD with
 outcome messages + pill/cassette/minimal styles, live partial transcripts while speaking,
@@ -184,6 +186,12 @@ previously reported on the previous tool). Fixed the bug that made every scoped-
 from the root accent, so Refine surfaces were a blue wash under coral text; the History badge now
 follows the user's chosen Refine colour. One capitalisation rule across the app. Docs: new UI.md and
 TESTING.md.
+
+SHIPPED 13/10 (macOS): the model is freed when idle and loads again the moment a recording starts, so
+the load runs while the user talks. Five idle minutes by default (Settings, General; "Never" restores
+the old behaviour), 30 s under a memory pressure warning, at once under critical, never mid-take.
+Measured in the installed app: 696 MB before the release, 59 MB after. Off by default on Windows
+until measured there (docs/WINDOWS_HANDOFF.md).
 
 DEFERRED (tracked in HUMAN_TASKS.md / WINDOWS_HANDOFF.md): local-LLM cleanup tier (settings
 scaffolded), per-file model checksums, overlay position presets, per-app paste
