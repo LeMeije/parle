@@ -23,7 +23,9 @@ impl ClipboardMonitor {
             std::thread::Builder::new()
                 .name("parle-clipboard".into())
                 .spawn(move || {
-                    let mut last = macos::pasteboard_change_count();
+                    // All AppKit reads happen on the main thread: see
+                    // `macos::on_main` for the crash that taught us.
+                    let mut last = macos::on_main(macos::pasteboard_change_count);
                     // Who was frontmost at the PREVIOUS sample.
                     //
                     // macOS has no equivalent of `GetClipboardOwner`, so the
@@ -46,7 +48,7 @@ impl ClipboardMonitor {
                     // (`clipboard_is_concealed`) is what actually catches the
                     // big password managers; this list is the user's own
                     // additions, which carry no marker at all.
-                    let mut prev_app = macos::frontmost_app();
+                    let mut prev_app = macos::on_main(macos::frontmost_app);
                     while !stop.load(Ordering::SeqCst) {
                         // Every iteration inside an autorelease pool.
                         //
@@ -66,7 +68,7 @@ impl ClipboardMonitor {
                         // Every ObjC call inside one. `continue` cannot cross a
                         // closure boundary, so the body returns the next
                         // `prev_app` and an optional event instead of jumping.
-                        let (next_app, event) = objc2::rc::autoreleasepool(|_| {
+                        let (next_app, event) = macos::on_main(|| objc2::rc::autoreleasepool(|_| {
                             if !enabled.load(Ordering::SeqCst) {
                                 last = macos::pasteboard_change_count();
                                 return (macos::frontmost_app(), None);
@@ -115,7 +117,7 @@ impl ClipboardMonitor {
                                 _ => None,
                             };
                             (macos::frontmost_app(), event)
-                        });
+                        }));
                         if let Some(ev) = event {
                             let _ = tx.send(ev);
                         }

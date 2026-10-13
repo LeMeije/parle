@@ -964,6 +964,44 @@ fn write_clipboard_impl(text: &str, transient: bool, concealed: bool) {
     }
 }
 
+/// Run `f` on the main thread and wait for its result.
+///
+/// For the clipboard watcher. It polled NSPasteboard from its own thread, and
+/// on 13/10/2026 that crashed the app (EXC_BAD_ACCESS in
+/// `-[NSPasteboard changeCount]` -> `-[_NSPasteboardOwnersCollection
+/// handleOwnershipChange]`, thread `parle-clipboard`): AppKit updates the
+/// pasteboard's owner bookkeeping on the main thread, and `changeCount` walks
+/// the same collection. Nothing in Parle was writing the clipboard at the time.
+/// Doing the reads on the main thread serialises them with AppKit's own work.
+pub fn on_main<R: Send, F: FnOnce() -> R + Send>(f: F) -> R {
+    use std::ffi::c_void;
+    extern "C" {
+        static _dispatch_main_q: c_void;
+        fn dispatch_sync_f(queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
+        fn pthread_main_np() -> libc::c_int;
+    }
+    struct Job<F, R> {
+        f: Option<F>,
+        out: Option<R>,
+    }
+    extern "C" fn run<F: FnOnce() -> R, R>(ctx: *mut c_void) {
+        let job = unsafe { &mut *(ctx as *mut Job<F, R>) };
+        if let Some(f) = job.f.take() {
+            job.out = Some(f());
+        }
+    }
+    // Already on it: dispatch_sync onto the main queue from the main thread
+    // would deadlock.
+    if unsafe { pthread_main_np() } != 0 {
+        return f();
+    }
+    let mut job = Job { f: Some(f), out: None };
+    unsafe {
+        dispatch_sync_f(&_dispatch_main_q, (&mut job as *mut Job<F, R>).cast(), run::<F, R>);
+    }
+    job.out.expect("main-thread job ran")
+}
+
 pub fn pasteboard_change_count() -> i64 {
     use objc2_app_kit::NSPasteboard;
     unsafe { NSPasteboard::generalPasteboard().changeCount() as i64 }

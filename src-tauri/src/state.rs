@@ -47,6 +47,10 @@ pub struct AppState {
     pub clipboard_monitor: Mutex<Option<platform::windows::ClipboardMonitor>>,
 }
 
+/// How long a recording's model load waits under memory pressure, so the
+/// overlay can page its web content back in and draw first.
+const PRELOAD_HEAD_START: std::time::Duration = std::time::Duration::from_millis(1500);
+
 enum Work {
     /// The recording is detached from the pipeline BEFORE it is queued, so the
     /// job carries its own audio, marks and latched app. Queuing a bare "go and
@@ -303,7 +307,24 @@ impl AppState {
             // Load the model now if it was freed for being idle: the load then
             // overlaps the user's speech instead of following it. A no-op
             // when it is already loaded (including a mid-take mode switch).
-            let _ = self.work_tx.send(Work::Preload);
+            //
+            // Under memory pressure it waits PRELOAD_HEAD_START first. The
+            // overlay appears at this same instant, and on a Mac that is
+            // swapping its web page may be almost entirely on disk: on
+            // 13/10/2026, with swap full, Parle's pages had about 7 MB of
+            // 82 to 94 MB resident, and the overlay showed an empty pill.
+            // A 548 MB model load started at the same moment competes with
+            // that page-in. The load still finishes while the user talks: 95%
+            // of recordings that start with the model freed run past 6.4 s.
+            if crate::platform::memory_pressure() == crate::platform::MemoryPressure::Normal {
+                let _ = self.work_tx.send(Work::Preload);
+            } else {
+                let tx = self.work_tx.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(PRELOAD_HEAD_START);
+                    let _ = tx.send(Work::Preload);
+                });
+            }
         } else {
             self.reset_gestures();
         }
