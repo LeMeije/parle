@@ -226,6 +226,56 @@ whisper.cpp), so none of it has been COMPILED for Windows yet. On the G14:
 6. **Installer**: `npm run tauri build -- --bundles nsis`, install the
    `_x64-setup.exe`, launch, dictate once.
 
+### Result on the G14 (16/10/2026)
+
+All six pass. Built from `cc1294d` plus one fix (below) with
+`npm run tauri build -- --features cuda --bundles nsis` (7m41s, `cublas64`
+present in the exe), installed over the existing install with NSIS `/S`.
+
+- **Tests**: parle-core 215, parle-sync 30, parle-asr 21, parle lib 397, all
+  green. The sidecar rebuilt byte-identical to the one already installed.
+- **Slim overlay**: renders as specified (red square, clock, cross). The window
+  measures 162 by 72 logical (324 by 144 physical at 200%), centred on exactly
+  the same point as the full 424 by 152 window, so the pill does not move
+  between styles. `WindowFromPoint` 110 logical px from the centre returns the
+  window BEHIND the pill; the old full-size window would have taken that click.
+  Switching back to Pill restores 424 by 152 before the show: not clipped.
+  Clicking the cross cancels and leaves focus in the app being dictated into.
+- **Main window**: close button hides to tray; reopens from the tray menu, the
+  palette hotkey (lands on History with search focused) and a second launch.
+- **Idle release**: `models.idle_unload_minutes` arrives as 0, nothing else in
+  an existing `settings.json` changed. The five-minute trial is still owed.
+- **Installer**: history survived (schema 8, integrity ok). Note: the FIRST
+  `/S` run, two seconds after killing `parle.exe`, exited 0 and rewrote
+  `uninstall.exe` but silently left the OLD `parle.exe` in place, presumably
+  still locked. A second run replaced it. Always compare the installed exe's
+  size against `target/release/parle.exe` after installing.
+
+Found and fixed on the way: **Refine could not find the Claude desktop app's
+CLI on Windows** (item 1 of the 10/09 list above). The real layout is
+`%APPDATA%\Claude\claude-code\<version>\<hash>\claude.exe`, one folder deeper
+than the analogy with macOS assumed. `claude_code_versions_in` now searches
+every subfolder of a version. `live_program_discovery` resolves it and the
+model dropdown parses `fable, opus, sonnet, haiku`. Codex is not installed on
+the G14, so item 2 is still unchecked.
+
+Measured, not acted on:
+
+- The HUD's `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` are stripped by `show()`
+  itself, every time, even with no resize: a fresh process reads `0x8040198`,
+  any shown HUD reads `0x40118`. `reassert_overlay` re-applies them BEFORE the
+  show, which is too early to stick. This is the same `0x40118` the 2026-09-05
+  incident recorded, so that "stripped at runtime" reading was every show, not
+  a one-off event. No visible effect found (the webview is not focusable, and
+  clicking the cross did not move focus), so left alone.
+- "Esc cancels recording" logged `HotKey already registered` during this
+  session. A bare `RegisterHotKey(VK_ESCAPE)` from another process failed the
+  same way while Parle was idle, so another program held a global Esc at the
+  time (most likely the desktop automation used for these checks). Recheck
+  once nothing else is running.
+- The App icon hint in Settings says "the Finder icon updates after a restart"
+  on Windows too.
+
 ## Still open
 
 - **Windows benchmarks have not been run.** `docs/BENCHMARKS.md` still contains
