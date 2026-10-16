@@ -486,6 +486,11 @@ fn claude_code_versions_in(root: &Path) -> Vec<PathBuf> {
                 let q = entry.path();
                 if q.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")) {
                     dirs.push(q.join("Contents").join("MacOS"));
+                } else if q.is_dir() {
+                    // Windows: the desktop app puts claude.exe one level
+                    // deeper, in a hash-named folder (measured on the G14,
+                    // 16/10/2026: `2.1.295\d2e29494ec83\claude.exe`).
+                    dirs.push(q);
                 }
             }
         }
@@ -1349,6 +1354,19 @@ mod tests {
         // An unparseable name sorts last rather than winning.
         assert!(dirs.iter().position(|d| *d == inner("notaversion")).unwrap() > second);
         assert!(claude_code_versions_in(&root.join("nope")).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_windows_desktop_apps_hash_folder_is_searched() {
+        let root = std::env::temp_dir().join(format!("parle-desktop-win-{}", std::process::id()));
+        let hashed = root.join("2.1.295").join("d2e29494ec83");
+        std::fs::create_dir_all(&hashed).unwrap();
+        std::fs::write(hashed.join("claude.exe"), b"x").unwrap();
+        // A sibling file in the version folder is not a directory to search.
+        std::fs::write(root.join("2.1.295").join(".verified"), b"x").unwrap();
+        let dirs = claude_code_versions_in(&root);
+        assert_eq!(dirs, vec![hashed, root.join("2.1.295")]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
