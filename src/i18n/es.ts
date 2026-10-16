@@ -466,7 +466,8 @@ export const es: Record<string, string> = {
   'settings.overlayStyle.pill': 'Cápsula',
   'settings.overlayStyle.cassette': 'Casete',
   'settings.overlayStyle.metal': 'Metal',
-  'settings.overlayStyle.minimal': 'Mínima',
+  'settings.overlayStyle.minimal': 'Compacta',
+  'settings.overlayStyle.slim': 'Mínima',
   'settings.overlayStyle.none': 'Ninguna',
   'settings.waveformSensitivity.label': 'Sensibilidad de la onda',
   'settings.waveformSensitivity.hint':

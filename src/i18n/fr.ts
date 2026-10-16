@@ -448,7 +448,8 @@ export const fr: Record<string, string> = {
   'settings.overlayStyle.pill': 'Pastille',
   'settings.overlayStyle.cassette': 'Cassette',
   'settings.overlayStyle.metal': 'Métal',
-  'settings.overlayStyle.minimal': 'Minimal',
+  'settings.overlayStyle.minimal': 'Compact',
+  'settings.overlayStyle.slim': 'Minimal',
   'settings.overlayStyle.none': 'Aucune',
   'settings.waveformSensitivity.label': 'Sensibilité de l’onde',
   'settings.waveformSensitivity.hint':

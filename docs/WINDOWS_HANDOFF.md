@@ -196,6 +196,36 @@ To try it on the G14: Settings, General, "Free the model's memory when idle",
 under the length of a normal recording, make 5 the Windows default in
 `default_idle_unload_minutes` and update its test.
 
+## Checks owed on Windows for the October 2026 changes (16/10/2026)
+
+Everything from 13/10 to 16/10/2026 was built and tested on the Mac only. The
+Windows code paths were reviewed by reading them: every macOS-only piece has a
+Windows branch that does nothing or falls back, and nothing new calls a Win32
+API. A cross-compile from the Mac cannot get past the C dependencies (ring,
+whisper.cpp), so none of it has been COMPILED for Windows yet. On the G14:
+
+1. `git pull`, `npm ci`, then build as in "A fresh clone does not build until
+   the sidecar is staged" above. `cargo test --workspace` should be green.
+2. **The slim overlay (Settings, Appearance, Overlay style, "Minimal").** The
+   old "Minimal" is now labelled "Compact"; the stored values (`minimal`,
+   `slim`) did not change. Record and check: a small pill (about 122 by 32)
+   with the red square, clock and cross, and a faded waveform moving behind
+   the clock.
+3. **The slim overlay's window shrinks to fit it** (`hud::fit_hud`, called by
+   the page through the `hud_fit` command). The whole window takes clicks, so
+   click just beside the pill: the app behind must receive the click. Then
+   switch to Pill and record: it must NOT be clipped (the window goes back to
+   424 by 152 before every show for any style other than slim). Check at the
+   G14's real display scaling: the pill must stay where it always was, bottom
+   centre. `reassert_overlay` uses SWP_NOMOVE | SWP_NOSIZE, so it does not
+   fight the resize.
+4. **Main window open and close** from the tray, the palette hotkey and the
+   close button. The snapshot-over-reopen code is macOS-only; on Windows
+   `main_window::show/hide` are a plain show + focus and hide, as before.
+5. **Idle model release**: off on Windows, see the section above.
+6. **Installer**: `npm run tauri build -- --bundles nsis`, install the
+   `_x64-setup.exe`, launch, dictate once.
+
 ## Still open
 
 - **Windows benchmarks have not been run.** `docs/BENCHMARKS.md` still contains

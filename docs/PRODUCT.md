@@ -155,7 +155,7 @@ never go inside a `Field`) are in docs/UI.md.
 ## v1 shipped vs deferred (kept honest: updated 13/10/2026)
 
 SHIPPED: core loop (hold/toggle/hybrid incl. other-key gesture abort), non-activating HUD with
-outcome messages + pill/cassette/minimal styles, live partial transcripts while speaking,
+outcome messages + pill/cassette/metal/compact/slim styles (slim shrinks its window to the pill), live partial transcripts while speaking,
 paste+copy+history with honoured copy/restore settings and transient-marked injection writes,
 WAV recovery, deterministic cleanup with reviewable trims, dictionary (bias+fuzzy+auto-learn,
 merge-safe), model manager with measured auto-selection + retry-then-demote ladder, unified

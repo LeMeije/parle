@@ -580,6 +580,15 @@ pub fn cancel_recording(state: State<'_, Arc<AppState>>) {
     state.external_cancel();
 }
 
+/// The HUD page asks for its window to be sized around what it drew (see
+/// `hud::fit_hud`). Zero means the full size. Ignored from any other window.
+#[tauri::command]
+pub fn hud_fit(window: tauri::WebviewWindow, width: f64, height: f64) {
+    if window.label() == crate::hud::HUD_LABEL {
+        crate::hud::fit_hud(&window, width, height);
+    }
+}
+
 // -- Permissions / onboarding ---------------------------------------------------
 
 #[tauri::command]

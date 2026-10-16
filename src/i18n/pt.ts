@@ -453,7 +453,8 @@ export const pt: Record<string, string> = {
   'settings.overlayStyle.pill': 'Pílula',
   'settings.overlayStyle.cassette': 'Cassete',
   'settings.overlayStyle.metal': 'Metal',
-  'settings.overlayStyle.minimal': 'Mínima',
+  'settings.overlayStyle.minimal': 'Compacta',
+  'settings.overlayStyle.slim': 'Mínima',
   'settings.overlayStyle.none': 'Nenhuma',
   'settings.waveformSensitivity.label': 'Sensibilidade da onda',
   'settings.waveformSensitivity.hint':

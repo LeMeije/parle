@@ -451,7 +451,8 @@ export const de: Record<string, string> = {
   'settings.overlayStyle.pill': 'Kapsel',
   'settings.overlayStyle.cassette': 'Kassette',
   'settings.overlayStyle.metal': 'Metall',
-  'settings.overlayStyle.minimal': 'Minimal',
+  'settings.overlayStyle.minimal': 'Kompakt',
+  'settings.overlayStyle.slim': 'Minimal',
   'settings.overlayStyle.none': 'Keines',
   'settings.waveformSensitivity.label': 'Wellenform-Empfindlichkeit',
   'settings.waveformSensitivity.hint':

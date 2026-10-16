@@ -222,6 +222,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
+            commands::hud_fit,
             commands::main_window_painted,
             commands::main_window_ready,
             commands::add_custom_model,

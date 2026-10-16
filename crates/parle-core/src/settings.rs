@@ -795,7 +795,8 @@ impl Default for AudioSettings {
 pub struct OverlaySettings {
     /// "bottom-center" | "bottom-right" | "top-center" | "near-cursor"
     pub position: String,
-    /// "pill" | "cassette" (retro) | "metal" | "minimal" | "hidden"
+    /// "pill" | "cassette" (retro) | "metal" | "minimal" (shown as Compact) |
+    /// "slim" (shown as Minimal) | "hidden"
     ///
     /// "hidden" draws no overlay at all. The only indication that Parle is
     /// listening is then the menu-bar / tray icon's recording dot, which is

@@ -107,6 +107,19 @@ const OVERLAY_STYLES: [string, string, React.ReactNode][] = [
     ),
   ],
   [
+    // Stored as "slim"; shown as Minimal, with the older "minimal" value now
+    // labelled Compact. The stored values never change, so nobody's chosen
+    // style moves under them.
+    'slim',
+    'settings.overlayStyle.slim',
+    glyph(
+      <>
+        <rect x="1.9" y="6.1" width="12.2" height="3.8" rx="1.9" />
+        <path d="M7 7.4v1.2M8.4 7v2M9.8 7.5v1" strokeLinecap="round" />
+      </>,
+    ),
+  ],
+  [
     'hidden',
     'settings.overlayStyle.none',
     // A dashed outline with the menu-bar dot beside it: nothing is drawn on

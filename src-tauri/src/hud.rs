@@ -33,6 +33,41 @@ pub const MAIN_LABEL: &str = "main";
 pub const HUD_WIDTH: f64 = 424.0;
 pub const HUD_HEIGHT: f64 = 152.0;
 
+/// The point the overlay is centred on, in logical pixels, fixed when the
+/// window is created. Resizes are worked out from it rather than from the
+/// window's current frame, so repeated shrink and grow cycles cannot drift.
+static HUD_CENTRE: std::sync::OnceLock<(f64, f64)> = std::sync::OnceLock::new();
+
+/// Size the HUD window around its fixed centre.
+///
+/// Every pixel of the window takes clicks, transparent or not, so the margin
+/// that gives the pill's shadow room also blocks whatever sits just around the
+/// pill. The slim style shrinks the window to its pill plus a small shadow
+/// margin (the page measures itself and asks); every other style uses the
+/// full size. A zero size means the full size.
+pub fn fit_hud(window: &tauri::WebviewWindow, width: f64, height: f64) {
+    let Some(&(cx, cy)) = HUD_CENTRE.get() else {
+        return;
+    };
+    let (w, h) = if width <= 0.0 || height <= 0.0 {
+        (HUD_WIDTH, HUD_HEIGHT)
+    } else {
+        (width.clamp(80.0, HUD_WIDTH).round(), height.clamp(40.0, HUD_HEIGHT).round())
+    };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    if let Ok(cur) = window.inner_size() {
+        let cur = cur.to_logical::<f64>(scale);
+        if (cur.width - w).abs() < 0.5 && (cur.height - h).abs() < 0.5 {
+            return;
+        }
+    }
+    let _ = window.set_size(tauri::LogicalSize::new(w, h));
+    let _ = window.set_position(tauri::LogicalPosition::new(
+        (cx - w / 2.0).round(),
+        (cy - h / 2.0).round(),
+    ));
+}
+
 #[cfg(target_os = "macos")]
 mod panel {
     #[allow(unused_imports)]
@@ -80,6 +115,7 @@ pub fn create_hud(app: &AppHandle) -> tauri::Result<()> {
     };
     let x = (screen_w / scale - HUD_WIDTH) / 2.0;
     let y = screen_h / scale - HUD_HEIGHT - 56.0;
+    let _ = HUD_CENTRE.set((x + HUD_WIDTH / 2.0, y + HUD_HEIGHT / 2.0));
 
     let window = WebviewWindowBuilder::new(app, HUD_LABEL, WebviewUrl::App("index.html#/hud".into()))
         .title("Parle HUD")
@@ -136,6 +172,13 @@ pub fn sync_hud(app: &AppHandle, state: PipelineState) {
     };
     match state {
         PipelineState::Recording | PipelineState::Transcribing | PipelineState::Refining => {
+            // A window left small by the slim style would clip any other
+            // style, and a page that slept while hidden may not ask in time,
+            // so the full size is restored here before the show. The slim
+            // page shrinks the window itself once it has measured its pill.
+            if crate::overlay_style_of(app) != "slim" {
+                fit_hud(&hud, 0.0, 0.0);
+            }
             // Windows can evict this window from the topmost BAND while leaving
             // WS_EX_TOPMOST set, and `show()` does not put it back — the overlay
             // then paints correctly but behind the window being dictated into,

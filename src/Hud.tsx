@@ -2,7 +2,7 @@
 // text + click-to-stop / cancel. The cassette and metal styles render a deck:
 // spinning reels either side of a segmented level meter.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { api, onLevel, onPartial, onPipelineEvent } from './api';
 import { PASTE_KEYS } from './types';
 import { applyLang } from './i18n/apply';
@@ -11,6 +11,15 @@ import { useT } from './i18n/useT';
 import './hud.css';
 
 const BAR_COUNT = 27;
+
+// The slim style's well is narrower than the pill's waveform, so it shows only
+// the most recent bars at the same width each, and the history slides through.
+const SLIM_BAR_COUNT = 14;
+
+// Room left around the slim pill for its shadow (see .hud-slim in hud.css).
+// The whole window takes clicks, so this is kept as tight as the shadow allows.
+const SLIM_MARGIN_X = 20;
+const SLIM_MARGIN_Y = 20;
 
 // Deck meter: discrete segments rather than the pill's continuous bar.
 const SEG_COUNT = 18;
@@ -52,6 +61,8 @@ export default function Hud() {
   const barsRef = useRef<number[]>(new Array(BAR_COUNT).fill(0.05));
   const [, force] = useState(0);
   const envelopeRef = useRef(0);
+  const hudRef = useRef<HTMLDivElement>(null);
+  const fittedRef = useRef('');
 
   useEffect(() => {
     api.getSettings().then((s) => { applyTheme(s); applyLang(s); return s; }).then(setSettings).catch(() => {});
@@ -157,9 +168,27 @@ export default function Hud() {
   const ss = Math.floor((elapsed % 60000) / 1000);
   const time = `${mm}:${ss.toString().padStart(2, '0')}`;
 
+  // Size the window to what was drawn. Runs after every render but only calls
+  // out when the size actually changes (the clock gaining a digit, an outcome
+  // message), so the waveform's re-renders cost nothing here. Layout sizes,
+  // not getBoundingClientRect: the entrance animation scales the pill.
+  useLayoutEffect(() => {
+    const el = hudRef.current;
+    let w = 0;
+    let h = 0;
+    if (style === 'slim' && el) {
+      w = el.offsetWidth + SLIM_MARGIN_X * 2;
+      h = el.offsetHeight + SLIM_MARGIN_Y * 2;
+    }
+    const key = `${w}x${h}`;
+    if (key === fittedRef.current) return;
+    fittedRef.current = key;
+    api.hudFit(w, h).catch(() => {});
+  });
+
   if (state === 'idle' && outcome) {
     return (
-      <div className={`hud hud-${style} idle`}>
+      <div ref={hudRef} className={`hud hud-${style} idle`}>
         <div className={`hud-outcome ${outcome.kind}`}>{outcome.text}</div>
       </div>
     );
@@ -167,10 +196,29 @@ export default function Hud() {
 
   return (
     <div
+      ref={hudRef}
       className={`hud hud-${style} ${state}`}
       onClick={isDeck && state === 'recording' ? () => api.stopRecording() : undefined}
     >
-      {style === 'minimal' ? (
+      {style === 'slim' ? (
+        // Same three things as Compact at the same sizes, with the padding
+        // taken out, and a faded waveform sliding behind the clock so there is
+        // still proof the microphone is hearing you.
+        <div
+          className="hud-slim-inner"
+          title={state === 'recording' ? t('hud.recordingClickToStop') : busyLabel}
+          onClick={() => (state === 'recording' ? api.stopRecording() : undefined)}
+        >
+          {state === 'recording' ? <span className="hud-dot" /> : <Spinner />}
+          <span className="hud-slim-well">
+            {state === 'recording' && <Waveform bars={barsRef.current.slice(-SLIM_BAR_COUNT)} />}
+            <span className="hud-time">{refining ? fmtSecs(refineSecs) : time}</span>
+          </span>
+          <button className="hud-cancel" title={t('hud.cancel')} onClick={(e) => { e.stopPropagation(); api.cancelRecording(); }}>
+            ✕
+          </button>
+        </div>
+      ) : style === 'minimal' ? (
         <div
           className="hud-min-inner"
           title={state === 'recording' ? t('hud.recordingClickToStop') : busyLabel}

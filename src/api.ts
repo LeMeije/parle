@@ -64,6 +64,7 @@ export const api = {
   refineTest: () => invoke<RefineOutcome>('refine_test'),
   stopRecording: () => invoke<void>('stop_recording'),
   cancelRecording: () => invoke<void>('cancel_recording'),
+  hudFit: (width: number, height: number) => invoke<void>('hud_fit', { width, height }),
 
   permissionStatus: () => invoke<PermissionStatus>('permission_status'),
   requestMicrophone: () => invoke<void>('request_microphone'),

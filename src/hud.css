@@ -340,6 +340,59 @@ body[data-window='hud'] #root {
 }
 .hud.hud-minimal { width: 170px; margin-left: 79px; }
 
+/* ---------- Slim style ---------- */
+
+/* Compact's dot, clock and cross at their own sizes, with the padding taken
+   out: the pill hugs its contents and is about half Compact's height. */
+.hud.hud-slim {
+  width: auto;
+  height: 32px;
+  padding: 0 4px 0 10px;
+  border-radius: 16px;
+  /* The window around this pill is shrunk to 20px each side (Hud.tsx), so it
+     gets a shadow that fits inside that rather than the 40px-blur default. */
+  box-shadow: var(--hud-slim-shadow, var(--shadow-2));
+}
+.hud.hud-slim.idle {
+  max-width: 320px;
+  padding: 0 12px;
+}
+
+/* The spinner is 2px wider than the dot; the margin stops the pill twitching
+   as recording hands over to transcribing. */
+.hud-slim-inner > .hud-dot { margin: 0 1px; }
+.hud-slim-inner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+/* The clock sits on top of the waveform. The bars are faded and desaturated
+   so they read as a sign of life behind the numbers rather than competing
+   with them. */
+.hud-slim-well {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 22px;
+}
+.hud-slim-well .wave {
+  position: absolute;
+  inset: 0;
+  height: auto;
+  gap: 1.5px;
+  filter: saturate(0.35);
+  opacity: 0.38;
+  pointer-events: none;
+}
+:root[data-mode='dark'] .hud-slim-well .wave { opacity: 0.5; }
+.hud-slim-well .hud-time {
+  position: relative;
+  color: var(--text);
+}
+
 
 /* ---------- Refine mode ---------- */
 
