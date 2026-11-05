@@ -499,11 +499,13 @@ export const fr: Record<string, string> = {
   'settings.prewarm.label': 'Précharger le modèle au démarrage',
   'settings.prewarm.hint': 'Prépare le modèle au lancement de Parle, pour que même la première dictée soit rapide',
   'settings.idleUnload.label': 'Libérer la mémoire du modèle au repos',
-  'settings.idleUnload.hintMac': 'Rechargé dès que vous commencez à dicter, pendant que vous parlez encore, vous ne devriez donc rien remarquer. Libéré plus tôt si votre Mac manque de mémoire.',
+  'settings.idleUnload.hintMac': 'Rechargé dès que vous commencez à dicter, pendant que vous parlez encore, vous ne devriez donc rien remarquer.',
   'settings.idleUnload.hintWin': 'Rechargé dès que vous commencez à dicter, pendant que vous parlez encore, vous ne devriez donc rien remarquer.',
   'settings.idleUnload.minutes': '{n} minutes',
   'settings.idleUnload.hour': '1 heure',
   'settings.idleUnload.never': 'Jamais (le garder chargé)',
+  'settings.freeUnderPressure.label': 'Libérer plus tôt si la mémoire manque',
+  'settings.freeUnderPressure.hint': 'Libère le modèle 30 secondes après la dictée, ou tout de suite, quand votre ordinateur manque de mémoire. Laissez-le désactivé si votre ordinateur est toujours à la limite : chaque dictée attendrait alors que le modèle se recharge.',
 
   // ---------- Settings: sync ----------
   'sync.section': 'Synchronisation',

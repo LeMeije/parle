@@ -1244,6 +1244,15 @@ export default function SettingsView({
             ))}
           </select>
         </Field>
+        {/* Only meaningful while the model is freed at all: "Never" means never. */}
+        {s.models.idle_unload_minutes !== 0 && (
+          <Toggle
+            label={t('settings.freeUnderPressure.label')}
+            hint={t('settings.freeUnderPressure.hint')}
+            value={s.models.free_under_pressure}
+            onChange={(v) => set((d) => (d.models.free_under_pressure = v))}
+          />
+        )}
       </Section>
 
       <footer className="settings-footer">

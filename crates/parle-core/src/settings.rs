@@ -150,13 +150,22 @@ pub struct ModelSettings {
     ///
     /// Nothing is lost by freeing it: the app loads it again the moment a
     /// recording STARTS, so the load (well under a second) runs while the user
-    /// is still talking. Under macOS memory pressure it is freed sooner.
+    /// is still talking. Sooner under memory pressure, if `free_under_pressure`.
     ///
     /// No field-level `#[serde(default)]` here on purpose: that would fill a
     /// missing key from u32's default, 0, which means "never", and every
     /// existing install would silently keep the old behaviour. The struct-level
     /// attribute fills it from `ModelSettings::default()` instead.
     pub idle_unload_minutes: u32,
+    /// Free the model sooner when the computer runs short of memory: 30 s
+    /// after the last use when the OS reports a warning, at once when it
+    /// reports critical (see model_idle.rs). Off by default since 05/11/2026,
+    /// on macOS too, where it used to be always on. A machine that lives at
+    /// the edge of its RAM reports pressure nearly all the time, so the model
+    /// was freed after almost every dictation and the next one paid the
+    /// reload; the user of such a machine had no way to choose otherwise.
+    /// The idle timeout above applies either way.
+    pub free_under_pressure: bool,
     /// Models the user pointed at themselves, on disk, outside the registry.
     ///
     /// Kept in settings rather than copied into the models directory, so a
@@ -195,6 +204,7 @@ impl Default for ModelSettings {
             backend: "auto".into(),
             prewarm: true,
             idle_unload_minutes: default_idle_unload_minutes(),
+            free_under_pressure: false,
             custom: Vec::new(),
         }
     }
@@ -1229,6 +1239,17 @@ mod tests {
         s.models.idle_unload_minutes = 0;
         s.migrate();
         assert_eq!(s.models.idle_unload_minutes, 0);
+    }
+
+    #[test]
+    fn freeing_under_pressure_is_off_unless_chosen() {
+        // An existing install (no key) gets the default, off, on every OS.
+        let s: Settings = serde_json::from_str(r#"{"models":{"idle_unload_minutes":5}}"#).unwrap();
+        assert!(!s.models.free_under_pressure);
+        let mut on = Settings::default();
+        on.models.free_under_pressure = true;
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(back.models.free_under_pressure);
     }
 
     #[test]

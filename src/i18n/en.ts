@@ -505,11 +505,13 @@ export const en: Record<string, string> = {
   'settings.prewarm.label': 'Pre-warm model at startup',
   'settings.prewarm.hint': 'Gets the model ready as Parle starts, so even the first dictation is quick',
   'settings.idleUnload.label': 'Free the model’s memory when idle',
-  'settings.idleUnload.hintMac': 'Reloaded the moment you start dictating, while you are still talking, so you should not notice. Freed sooner if your Mac runs short of memory.',
+  'settings.idleUnload.hintMac': 'Reloaded the moment you start dictating, while you are still talking, so you should not notice.',
   'settings.idleUnload.hintWin': 'Reloaded the moment you start dictating, while you are still talking, so you should not notice.',
   'settings.idleUnload.minutes': '{n} minutes',
   'settings.idleUnload.hour': '1 hour',
   'settings.idleUnload.never': 'Never (keep it loaded)',
+  'settings.freeUnderPressure.label': 'Free it sooner when memory runs low',
+  'settings.freeUnderPressure.hint': 'Frees the model 30 seconds after you dictate, or straight away, when your computer is short of memory. Leave it off if your computer is always near its limit: every dictation would then wait for the model to reload.',
 
   // ---------- Settings: sync ----------
   'sync.section': 'Sync',

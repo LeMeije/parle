@@ -1445,6 +1445,61 @@ pub fn set_background_priority(on: bool) {
     }
 }
 
+/// Windows' view of memory, mapped onto the macOS levels the idle reaper uses.
+///
+/// Windows has no single pressure level, so three of its own signals are read:
+/// - its low-memory notification (`LowMemoryResourceNotification`), set when
+///   free physical memory falls under a threshold the kernel picks itself;
+/// - commit headroom, how much more the page file can back before allocations
+///   start to fail, which on a machine with a small page file arrives well
+///   before physical memory runs out;
+/// - memory load, the "in use" percentage Task Manager shows.
+///
+/// Unreadable is Normal, so a failure here can only keep the model longer.
+pub fn memory_pressure() -> super::MemoryPressure {
+    use std::sync::OnceLock;
+    use windows::Win32::Foundation::{BOOL, HANDLE};
+    use windows::Win32::System::Memory::{
+        CreateMemoryResourceNotification, LowMemoryResourceNotification, QueryMemoryResourceNotification,
+    };
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    // Created once and kept for the life of the process, as the API intends.
+    // Stored as an address because HANDLE is not Sync.
+    static LOW: OnceLock<Option<usize>> = OnceLock::new();
+    let low = LOW.get_or_init(|| {
+        unsafe { CreateMemoryResourceNotification(LowMemoryResourceNotification) }
+            .ok()
+            .map(|h| h.0 as usize)
+    });
+    let low_signalled = low.is_some_and(|h| {
+        let mut state = BOOL(0);
+        unsafe { QueryMemoryResourceNotification(HANDLE(h as *mut _), &mut state) }.is_ok() && state.as_bool()
+    });
+
+    let mut status = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+    if unsafe { GlobalMemoryStatusEx(&mut status) }.is_err() {
+        return if low_signalled { super::MemoryPressure::Critical } else { super::MemoryPressure::Normal };
+    }
+    classify_memory(status.dwMemoryLoad, status.ullAvailPageFile, status.ullTotalPageFile, low_signalled)
+}
+
+/// The rule behind `memory_pressure`, pure so every threshold is pinned by a
+/// test. `avail_commit` and `commit_limit` are MEMORYSTATUSEX's
+/// ullAvailPageFile and ullTotalPageFile, which despite the names are commit
+/// headroom and the commit limit (RAM plus page file).
+pub fn classify_memory(load_pct: u32, avail_commit: u64, commit_limit: u64, low_signalled: bool) -> super::MemoryPressure {
+    use super::MemoryPressure::*;
+    let headroom_pct = if commit_limit == 0 { 100 } else { avail_commit.saturating_mul(100) / commit_limit };
+    if low_signalled || headroom_pct < 5 {
+        Critical
+    } else if load_pct >= 90 || headroom_pct < 10 {
+        Warn
+    } else {
+        Normal
+    }
+}
+
 /// This process's private commit in bytes: Task Manager's "Commit size". Only
 /// for the idle reaper's log lines. CUDA device memory (the model's weights,
 /// on a GPU) is not in it. Declared by hand rather than through the `windows`
@@ -1516,5 +1571,38 @@ mod clipboard_identity_tests {
              the injected transcript into history a second time and the restore guard will \
              conclude a third party wrote the clipboard"
         );
+    }
+}
+
+#[cfg(test)]
+mod memory_pressure_tests {
+    use super::classify_memory;
+    use crate::platform::MemoryPressure::*;
+
+    const GB: u64 = 1 << 30;
+
+    #[test]
+    fn a_roomy_machine_is_normal() {
+        assert_eq!(classify_memory(40, 50 * GB, 80 * GB, false), Normal);
+        assert_eq!(classify_memory(89, 20 * GB, 80 * GB, false), Normal);
+    }
+
+    #[test]
+    fn high_memory_load_or_thin_commit_is_a_warning() {
+        assert_eq!(classify_memory(90, 20 * GB, 80 * GB, false), Warn);
+        assert_eq!(classify_memory(50, 7 * GB, 80 * GB, false), Warn, "under 10% commit headroom");
+    }
+
+    #[test]
+    fn the_os_low_memory_signal_or_nearly_no_commit_is_critical() {
+        assert_eq!(classify_memory(50, 50 * GB, 80 * GB, true), Critical);
+        assert_eq!(classify_memory(50, 3 * GB, 80 * GB, false), Critical, "under 5% commit headroom");
+    }
+
+    #[test]
+    fn this_machine_reads_without_failing() {
+        // Whatever the level, the call must work on a real Windows box.
+        let _ = super::memory_pressure();
+        let _ = super::memory_pressure();
     }
 }

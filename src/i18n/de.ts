@@ -502,11 +502,13 @@ export const de: Record<string, string> = {
   'settings.prewarm.label': 'Modell beim Start vorladen',
   'settings.prewarm.hint': 'Bereitet das Modell beim Start von Parle vor, damit schon das erste Diktat schnell ist',
   'settings.idleUnload.label': 'Modellspeicher im Leerlauf freigeben',
-  'settings.idleUnload.hintMac': 'Wird neu geladen, sobald Sie zu diktieren beginnen, noch während Sie sprechen, Sie sollten also nichts merken. Früher freigegeben, wenn Ihr Mac knapp an Arbeitsspeicher ist.',
+  'settings.idleUnload.hintMac': 'Wird neu geladen, sobald Sie zu diktieren beginnen, noch während Sie sprechen, Sie sollten also nichts merken.',
   'settings.idleUnload.hintWin': 'Wird neu geladen, sobald Sie zu diktieren beginnen, noch während Sie sprechen, Sie sollten also nichts merken.',
   'settings.idleUnload.minutes': '{n} Minuten',
   'settings.idleUnload.hour': '1 Stunde',
   'settings.idleUnload.never': 'Nie (geladen lassen)',
+  'settings.freeUnderPressure.label': 'Früher freigeben, wenn der Arbeitsspeicher knapp wird',
+  'settings.freeUnderPressure.hint': 'Gibt das Modell 30 Sekunden nach dem Diktieren oder sofort frei, wenn Ihr Computer knapp an Arbeitsspeicher ist. Lassen Sie es aus, wenn Ihr Computer ständig am Limit ist: Sonst wartet jedes Diktat, bis das Modell neu geladen ist.',
 
   // ---------- Settings: sync ----------
   'sync.section': 'Sync',

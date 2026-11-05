@@ -27,14 +27,19 @@ pub enum MemoryPressure {
 }
 
 /// macOS: the kernel's pressure level, the signal behind Activity Monitor's
-/// pressure graph. Windows has no equivalent wired up yet and always reports
-/// Normal, so only the idle timeout applies there.
+/// pressure graph. Windows: its low-memory notification, commit headroom and
+/// memory load (see `windows::memory_pressure`). Only read when the user has
+/// turned on `models.free_under_pressure`.
 pub fn memory_pressure() -> MemoryPressure {
     #[cfg(target_os = "macos")]
     {
         macos::memory_pressure()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::memory_pressure()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         MemoryPressure::Normal
     }

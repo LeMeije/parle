@@ -203,7 +203,15 @@ all the VRAM back, and a 2.3 s reload on every one of 5 cycles. Five minutes
 is now the default everywhere, and a one-time migration (settings version 3)
 moves Windows installs that were saved with 0 to 5. `platform::footprint_bytes`
 reads private commit on Windows, so the reaper's before and after line now
-appears in parle.log. Memory pressure is still not wired up on Windows.
+appears in parle.log.
+
+**Memory pressure, both platforms (05/11/2026).** Freeing the model early
+under pressure is now an option, `models.free_under_pressure`, off by default
+on macOS too (it used to be always on there): a machine that lives at its RAM
+limit reports pressure almost constantly, so every dictation paid a reload.
+Windows reads its low-memory notification, commit headroom and memory load
+(`platform::windows::classify_memory`: critical under 5% commit headroom or
+when the OS signals low memory, warning at 90% load or under 10% headroom).
 
 **Hidden overlay animation (05/11/2026).** With no take in flight the HUD
 still renders its busy layout, hidden, and the slim and minimal styles show a

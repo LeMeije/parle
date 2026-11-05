@@ -517,11 +517,13 @@ export const es: Record<string, string> = {
   'settings.prewarm.label': 'Precargar el modelo al arrancar',
   'settings.prewarm.hint': 'Prepara el modelo al abrir Parle, para que incluso el primer dictado sea rápido',
   'settings.idleUnload.label': 'Liberar la memoria del modelo en reposo',
-  'settings.idleUnload.hintMac': 'Se recarga en cuanto empieza a dictar, mientras aún habla, así que no debería notarlo. Se libera antes si su Mac anda justo de memoria.',
+  'settings.idleUnload.hintMac': 'Se recarga en cuanto empieza a dictar, mientras aún habla, así que no debería notarlo.',
   'settings.idleUnload.hintWin': 'Se recarga en cuanto empieza a dictar, mientras aún habla, así que no debería notarlo.',
   'settings.idleUnload.minutes': '{n} minutos',
   'settings.idleUnload.hour': '1 hora',
   'settings.idleUnload.never': 'Nunca (mantenerlo cargado)',
+  'settings.freeUnderPressure.label': 'Liberarlo antes si falta memoria',
+  'settings.freeUnderPressure.hint': 'Libera el modelo 30 segundos después de dictar, o de inmediato, cuando a su equipo le falta memoria. Déjelo desactivado si su equipo siempre está al límite: cada dictado tendría que esperar a que el modelo se vuelva a cargar.',
 
   // ---------- Settings: sync ----------
   'sync.section': 'Sincronización',

@@ -25,8 +25,10 @@
 //! talking. Across 1,549 real dictations, no recording that followed a gap of
 //! over five minutes was shorter than one second, and 95% ran past 6.4 s.
 //!
-//! Freed sooner under memory pressure: 30 s after the last use when the kernel
-//! reports a warning, as soon as nothing is in flight when it reports critical.
+//! Freed sooner under memory pressure, when the user has asked for it
+//! (`models.free_under_pressure`, off by default since 05/11/2026): 30 s after
+//! the last use when the OS reports a warning, as soon as nothing is in flight
+//! when it reports critical.
 //! Never while a recording is live or a take is still queued.
 
 use crate::pipeline::Pipeline;
@@ -118,7 +120,10 @@ fn tick(
     engine: &Mutex<EngineManager>,
     pipeline: &Pipeline,
 ) -> Option<u64> {
-    let minutes = settings.lock().models.idle_unload_minutes;
+    let (minutes, under_pressure) = {
+        let s = settings.lock();
+        (s.models.idle_unload_minutes, s.models.free_under_pressure)
+    };
     if minutes == 0 || pipeline.is_busy() {
         return None;
     }
@@ -126,7 +131,7 @@ fn tick(
     // warm-up), which is the opposite of idle. Never wait for it.
     let mut guard = engine.try_lock()?;
     let idle = guard.idle_for()?;
-    let pressure = platform::memory_pressure();
+    let pressure = pressure_to_act_on(under_pressure, platform::memory_pressure);
     // `is_busy` again, under the engine lock: a recording that started since
     // the first look has queued a preload, which is now waiting on this lock.
     if !should_release(idle, minutes, pressure, pipeline.is_busy()) {
@@ -142,6 +147,17 @@ fn tick(
     );
     let _ = app.emit("engine-status", status);
     before
+}
+
+/// The pressure the release rule should see: the OS's own reading only when
+/// the user turned the option on, otherwise Normal, so the idle timeout alone
+/// decides. Not read at all while off.
+fn pressure_to_act_on(enabled: bool, read: impl FnOnce() -> MemoryPressure) -> MemoryPressure {
+    if enabled {
+        read()
+    } else {
+        MemoryPressure::Normal
+    }
 }
 
 /// Nothing recording or queued, and no model in memory.
@@ -195,6 +211,14 @@ mod tests {
         // shorter than every timeout a user can pick. Raise it past that and
         // the Warn arm needs `.min(timeout)` back.
         assert!(PRESSURE_GRACE < MIN);
+    }
+
+    #[test]
+    fn pressure_is_ignored_unless_the_user_turned_it_on() {
+        let off = pressure_to_act_on(false, || panic!("must not be read while off"));
+        assert_eq!(off, MemoryPressure::Normal);
+        assert!(!should_release(Duration::ZERO, 5, off, false), "off: only the timeout frees it");
+        assert_eq!(pressure_to_act_on(true, || MemoryPressure::Critical), MemoryPressure::Critical);
     }
 
     #[test]

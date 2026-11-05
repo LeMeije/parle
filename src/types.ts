@@ -13,6 +13,7 @@ export interface Settings {
     prewarm: boolean;
     /** Free the model's memory after this many idle minutes; 0 = never. */
     idle_unload_minutes: number;
+    free_under_pressure: boolean;
   };
   language: {
     language: string;
