@@ -42,7 +42,38 @@ fn mem() -> (f64, f64) {
     (mb(buf[9]), mb(buf[30]))
 }
 
-#[cfg(not(target_os = "macos"))]
+/// (private commit, peak private commit) in MB, from K32GetProcessMemoryInfo.
+/// Private commit is the "Commit size" column in Task Manager's Details tab.
+/// CUDA device memory is not in it: read VRAM with nvidia-smi alongside.
+#[cfg(target_os = "windows")]
+fn mem() -> (f64, f64) {
+    #[repr(C)]
+    #[derive(Default)]
+    struct Counters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set: usize,
+        working_set: usize,
+        quota_peak_paged_pool: usize,
+        quota_paged_pool: usize,
+        quota_peak_non_paged_pool: usize,
+        quota_non_paged_pool: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+        private_usage: usize,
+    }
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn K32GetProcessMemoryInfo(process: isize, counters: *mut Counters, cb: u32) -> i32;
+    }
+    let mut c = Counters { cb: std::mem::size_of::<Counters>() as u32, ..Default::default() };
+    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
+    assert_ne!(ok, 0, "K32GetProcessMemoryInfo failed");
+    let mb = |b: usize| b as f64 / (1024.0 * 1024.0);
+    (mb(c.private_usage), mb(c.peak_pagefile_usage))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn mem() -> (f64, f64) {
     (0.0, 0.0)
 }

@@ -82,7 +82,7 @@ sizes, sha256 where published, speed/accuracy labels per machine class); downloa
 progress events.
 
 Model lifecycle (13/10/2026). Loaded and warmed at startup (`prewarm`). Freed by the idle reaper after
-`models.idle_unload_minutes` without use (5 on macOS; 0 means never and is the Windows default), sooner
+`models.idle_unload_minutes` without use (5 by default, on Windows too since 05/11/2026; 0 means never), sooner
 under macOS memory pressure (30 s after the last use at "warning", at once at "critical"), and never
 while a recording is live or a take is queued (`Pipeline::is_busy`). Every `pipeline_start` queues
 `Work::Preload` on the serial worker, so a freed model loads while the user is speaking and the take's

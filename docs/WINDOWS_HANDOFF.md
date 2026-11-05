@@ -196,6 +196,21 @@ To try it on the G14: Settings, General, "Free the model's memory when idle",
 under the length of a normal recording, make 5 the Windows default in
 `default_idle_unload_minutes` and update its test.
 
+**Measured and switched on (05/11/2026).** On the G14 (RTX 5070 Ti Laptop,
+CUDA, Large v3 Turbo q8_0) the `memory` probe, which now reads private commit
+on Windows, showed 1,359 MB loaded plus 1.3 GB of VRAM, 663 MB once freed with
+all the VRAM back, and a 2.3 s reload on every one of 5 cycles. Five minutes
+is now the default everywhere, and a one-time migration (settings version 3)
+moves Windows installs that were saved with 0 to 5. `platform::footprint_bytes`
+reads private commit on Windows, so the reaper's before and after line now
+appears in parle.log. Memory pressure is still not wired up on Windows.
+
+**Hidden overlay animation (05/11/2026).** With no take in flight the HUD
+still renders its busy layout, hidden, and the slim and minimal styles show a
+spinner there. WebView2 keeps compositing a hidden window, so that spinner
+held 36% of a core in the WebView2 GPU process and 5 to 7% in its renderer for
+as long as Parle ran. `.hud.idle *` now turns every overlay animation off.
+
 ## Checks owed on Windows for the October 2026 changes (16/10/2026)
 
 Everything from 13/10 to 16/10/2026 was built and tested on the Mac only. The
@@ -244,7 +259,8 @@ present in the exe), installed over the existing install with NSIS `/S`.
 - **Main window**: close button hides to tray; reopens from the tray menu, the
   palette hotkey (lands on History with search focused) and a second launch.
 - **Idle release**: `models.idle_unload_minutes` arrives as 0, nothing else in
-  an existing `settings.json` changed. The five-minute trial is still owed.
+  an existing `settings.json` changed. (Measured and switched on 05/11/2026,
+  see above.)
 - **Installer**: history survived (schema 8, integrity ok). Note: the FIRST
   `/S` run, two seconds after killing `parle.exe`, exited 0 and rewrote
   `uninstall.exe` but silently left the OLD `parle.exe` in place, presumably

@@ -1445,6 +1445,36 @@ pub fn set_background_priority(on: bool) {
     }
 }
 
+/// This process's private commit in bytes: Task Manager's "Commit size". Only
+/// for the idle reaper's log lines. CUDA device memory (the model's weights,
+/// on a GPU) is not in it. Declared by hand rather than through the `windows`
+/// crate, whose ProcessStatus feature this would be the only user of.
+pub fn footprint_bytes() -> Option<u64> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct Counters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set: usize,
+        working_set: usize,
+        quota_peak_paged_pool: usize,
+        quota_paged_pool: usize,
+        quota_peak_non_paged_pool: usize,
+        quota_non_paged_pool: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+        private_usage: usize,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn K32GetProcessMemoryInfo(process: isize, counters: *mut Counters, cb: u32) -> i32;
+    }
+    let mut c = Counters { cb: std::mem::size_of::<Counters>() as u32, ..Default::default() };
+    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
+    (ok != 0).then_some(c.private_usage as u64)
+}
+
 #[cfg(test)]
 mod clipboard_identity_tests {
     //! The guard that source inspection could not give.

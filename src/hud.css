@@ -489,3 +489,16 @@ body[data-window='hud'] #root {
 .hud.limit .deck-time { color: rgba(255, 255, 255, 0.85); }
 .hud.limit .deck-cancel { background: rgba(255, 255, 255, 0.3); }
 .hud.limit .deck-cancel:hover { background: rgba(255, 255, 255, 0.5); }
+
+/* Idle: nothing in the overlay moves.
+   With no take in flight the HUD still renders its busy layout (the slim and
+   minimal styles fall through to a spinner), hidden. macOS throttles a hidden
+   web view, but WebView2 keeps compositing it: measured 05/11/2026 on the G14,
+   the hidden overlay's spinner held 36% of a core in the WebView2 GPU process
+   and 5 to 7% in its renderer, for as long as Parle ran.
+   !important because some deck rules (.deck-seg i.sweep) out-rank this one. */
+.hud.idle *,
+.hud.idle *::before,
+.hud.idle *::after {
+  animation: none !important;
+}

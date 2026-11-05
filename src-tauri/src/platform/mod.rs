@@ -40,14 +40,19 @@ pub fn memory_pressure() -> MemoryPressure {
     }
 }
 
-/// This process's physical footprint in bytes, the figure in Activity
-/// Monitor's Memory column. Only for log lines; None where not implemented.
+/// This process's memory in bytes: the physical footprint on macOS (Activity
+/// Monitor's Memory column), private commit on Windows (Task Manager's Commit
+/// size). Only for log lines; None where not implemented.
 pub fn footprint_bytes() -> Option<u64> {
     #[cfg(target_os = "macos")]
     {
         macos::footprint_bytes()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::footprint_bytes()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         None
     }

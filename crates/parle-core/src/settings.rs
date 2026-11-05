@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const SETTINGS_VERSION: u32 = 2;
+pub const SETTINGS_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -206,15 +206,16 @@ impl Default for ModelSettings {
 /// with other builds saturating the machine); and across 1,549 real
 /// dictations, no recording that followed a gap of over five minutes was
 /// shorter than one second, and 95% ran past 6.4 s. The reload starts with the
-/// recording, so it finishes while the user is talking. Off on Windows until
-/// it is measured there (CUDA keeps the weights in VRAM, so the RAM case is
-/// weaker).
+/// recording, so it finishes while the user is talking.
+///
+/// Five on Windows too, since 05/11/2026. Measured on the G14 (RTX 5070 Ti
+/// Laptop, CUDA) with Large v3 Turbo q8_0 in the `memory` probe: loaded, the
+/// process held 1,359 MB of private memory plus 1.3 GB of VRAM; freed, it
+/// settled at 663 MB and all of the VRAM came back. A reload took 2.3 s every
+/// time (5 cycles, no climb), slower than the Mac's 0.6 s but still well
+/// inside the 6.4 s that 95% of recordings run past.
 pub fn default_idle_unload_minutes() -> u32 {
-    if cfg!(target_os = "macos") {
-        5
-    } else {
-        0
-    }
+    5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1002,6 +1003,21 @@ impl Settings {
                 self.history.excluded_apps.extend(added);
             }
         }
+        // Windows shipped with idle unload off ("never", 0) until it was
+        // measured there, and that 0 was written into every Windows
+        // settings.json, where it reads exactly like a user's choice. Move
+        // those installs to the new default ONCE. Gated on the version on
+        // purpose: this must fire a single time, so a "never" chosen after it
+        // stands. A user who had already chosen "never" gets five minutes
+        // once, the same lesser wrong the excluded-apps union accepts above.
+        if self.version < 3 && cfg!(target_os = "windows") && self.models.idle_unload_minutes == 0 {
+            changed = true;
+            self.models.idle_unload_minutes = default_idle_unload_minutes();
+            tracing::info!(
+                "settings: freeing the model after {} idle minutes, now measured on Windows",
+                self.models.idle_unload_minutes
+            );
+        }
         if self.version != SETTINGS_VERSION {
             changed = true;
         }
@@ -1194,13 +1210,33 @@ mod tests {
     }
 
     #[test]
-    fn idle_unload_is_on_for_macos_and_off_elsewhere() {
-        let minutes = ModelSettings::default().idle_unload_minutes;
-        if cfg!(target_os = "macos") {
-            assert_eq!(minutes, 5);
-        } else {
-            assert_eq!(minutes, 0, "unmeasured on Windows, so it keeps the old behaviour there");
-        }
+    fn idle_unload_defaults_to_five_minutes_everywhere() {
+        assert_eq!(ModelSettings::default().idle_unload_minutes, 5);
+    }
+
+    #[test]
+    fn a_windows_install_saved_with_never_moves_to_five_minutes_once() {
+        // The models block of the G14's own settings.json on 05/11/2026.
+        let json = r#"{"version":2,"models":{"active_model":"whisper-large-v3-turbo-q8_0",
+            "backend":"auto","prewarm":true,"idle_unload_minutes":0,"custom":[]}}"#;
+        let mut s: Settings = serde_json::from_str(json).unwrap();
+        assert!(s.migrate());
+        let expected = if cfg!(target_os = "windows") { 5 } else { 0 };
+        assert_eq!(s.models.idle_unload_minutes, expected);
+        assert_eq!(s.version, SETTINGS_VERSION);
+
+        // "Never" chosen after the move is a real choice, and it stands.
+        s.models.idle_unload_minutes = 0;
+        s.migrate();
+        assert_eq!(s.models.idle_unload_minutes, 0);
+    }
+
+    #[test]
+    fn the_windows_move_leaves_a_chosen_timeout_alone() {
+        let json = r#"{"version":2,"models":{"idle_unload_minutes":15}}"#;
+        let mut s: Settings = serde_json::from_str(json).unwrap();
+        s.migrate();
+        assert_eq!(s.models.idle_unload_minutes, 15);
     }
 
     #[test]
