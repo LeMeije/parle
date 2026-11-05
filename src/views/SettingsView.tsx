@@ -337,7 +337,7 @@ export default function SettingsView({
     api
       .refineStatus()
       .then(setRefineStatus)
-      .catch((e) => setRefineStatus({ provider: s.refine.provider, program: null, version: null, logged_in: null, problem: String(e), voice_file_ok: null, models: [] }))
+      .catch((e) => setRefineStatus({ provider: s.refine.provider, program: null, version: null, logged_in: null, problem: String(e), voice_file_ok: null, saved_path_missing: false, models: [] }))
       .finally(() => setRefineChecking(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s.refine.provider]);
@@ -378,7 +378,9 @@ export default function SettingsView({
           <strong>
             {s.refine.program_path.trim() === ''
               ? t('settings.refine.status.foundAuto')
-              : t('settings.refine.status.foundManual')}
+              : refineStatus.saved_path_missing
+                ? t('settings.refine.status.foundInstead')
+                : t('settings.refine.status.foundManual')}
           </strong>
           <code className="mono status-path" title={refineStatus.program ?? ''}>
             {refineStatus.program}

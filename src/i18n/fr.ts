@@ -354,6 +354,7 @@ export const fr: Record<string, string> = {
   'settings.refine.status.notChecked': 'Pas encore vérifié. Activez Reformuler, ou cliquez sur Revérifier.',
   'settings.refine.status.foundAuto': 'Trouvé pour vous',
   'settings.refine.status.foundManual': 'Votre chemin est utilisé',
+  'settings.refine.status.foundInstead': "Le chemin enregistré n'existe plus, Parle l'a trouvé pour vous",
   'settings.refine.status.version': 'version {version}',
   'settings.refine.status.signedIn': 'connecté',
   'settings.refine.status.notSignedIn': 'non connecté',

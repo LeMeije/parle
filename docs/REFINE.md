@@ -102,58 +102,86 @@ against `claude` 2.1.214, took about 9 s.
 
 ### Finding the executable
 
-A GUI app launched from the Finder or the Start menu inherits a PATH with none
-of the places developer tools install to. `candidate_dirs()` searches, in
-order: the PATH we do have, `~/.local/bin` (the native installer), `~/.claude/
-local`, **the copies bundled inside desktop apps** (below), the
-npm/volta/bun/yarn/pnpm/cargo global bins, every nvm and fnm Node version
-(newest first), then `/opt/homebrew/bin`, `/usr/local/bin` and the system bins
-(macOS) or `%APPDATA%\npm`, `%LOCALAPPDATA%\pnpm` and the Node install dir
-(Windows, trying `.exe`, `.cmd`, `.bat`). Last resort: the login shell's
-`command -v` (`where.exe` on Windows) with a 6 s timeout. The answer is cached
-per process and forgotten whenever settings are saved.
+Reworked 22/10/2026 after both built-in tools went missing in the same month.
+Discovery is now **layered**: each layer is an independent way of finding the
+tool, so a vendor reorganising its files defeats one layer, not the feature.
+`find_program()` tries, in order:
 
-#### The tools now live inside their desktop apps
+1. **The path saved in Settings**, if there is one. If nothing is there any
+   more it does NOT fail: it falls through to the automatic search, and
+   Settings says "Your saved path is gone, so Parle found it for you"
+   (`Status::saved_path_missing`). A picked path usually points into a desktop
+   app's versioned copy, which that app deletes on its next update.
+2. **`candidate_dirs()`**: the PATH we do have, `~/.local/bin` (the native
+   installer), `~/.claude/local`, the npm/volta/bun/yarn/pnpm/cargo global
+   bins, every nvm and fnm Node version (newest first), then `/opt/homebrew/bin`,
+   `/usr/local/bin` and the system bins (macOS) or `%APPDATA%\npm`,
+   `%LOCALAPPDATA%\pnpm` and the Node install dir (Windows, trying `.exe`,
+   `.cmd`, `.bat`). A GUI app launched from the Finder or the Start menu
+   inherits a PATH with none of these, so the app has to know them.
+3. **Desktop apps, searched by NAME** (`find_in_desktop_apps`), below.
+4. **Spotlight, by bundle identifier** (macOS, `find_with_spotlight`):
+   `com.anthropic.claude-code` and `com.openai.codex.cli`. This survives a
+   vendor moving a bundle to a folder no path search knows about. Fallback
+   only: Spotlight does not index every bundle (it has no record of the ChatGPT
+   app on the author's Mac) and can be switched off. 3 s timeout.
+5. **The login shell's `command -v`** (`where.exe` on Windows), 6 s timeout.
 
-This is the single biggest thing this feature got wrong, found 10/09/2026 on a
-machine that plainly had Claude Code and where **every stage above came up
-empty**. `which claude` found nothing, and neither did the login shell. The
-only install was the private, versioned copy the Claude desktop app keeps to
-itself and never puts on PATH:
+The answer is cached per process, re-resolved if the cached file disappears
+(an update mid-session), and forgotten whenever settings are saved.
 
-```
-~/Library/Application Support/Claude/claude-code/<version>/claude.app/Contents/MacOS/claude
-```
+`live_program_discovery` prints what EACH layer finds on its own, so a report
+says which one still works and which one a layout change has defeated.
 
-Codex was hiding the same way, inside the ChatGPT app:
+#### The tools live inside their desktop apps, and move
 
-```
-/Applications/ChatGPT.app/Contents/Resources/codex
-```
+Found 10/09/2026 on a machine that plainly had Claude Code and where every
+PATH-based stage came up empty: the only install was the private, versioned
+copy the Claude desktop app keeps to itself, and Codex was inside the ChatGPT
+app. The first fix searched the exact paths seen that day, and **both broke
+within five weeks**:
 
-`desktop_app_cli_dirs()` searches both, and `~/Applications` as well as
-`/Applications` because a user can install into either. Three details in it
-are load-bearing:
+| Tool | Layout | Seen |
+|---|---|---|
+| Claude Code | `~/Library/Application Support/Claude/claude-code/<version>/claude.app/Contents/MacOS/claude` | 10/09/2026 |
+| Claude Code | `.../claude-code/<version>/<build hash>/claude.app/Contents/MacOS/claude`, with `.verified` beside `claude.app` | from 2.1.286, 02/10/2026 |
+| Codex | `/Applications/ChatGPT.app/Contents/Resources/codex` | 10/09/2026 |
+| Codex | `.../Resources/codex-cli/bin/codex` (a `#!/bin/sh` wrapper; `codex-package.json` names it the entry point) around `.../Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` | 13/10/2026 |
 
-- **Version directories are sorted by NUMBER, newest first** (`version_key`
-  splits on `.`, `-`, `+` and parses each part). A string sort puts 2.1.9 above
-  2.1.10. Both 2.1.258 and 2.1.260 were present on the test machine.
-- **`claude-code-vm` is deliberately NOT searched.** The sibling
-  `claude-code-vm/<version>/claude` looks like exactly the right file and is a
-  **Linux ARM ELF** built for the sandbox VM. It cannot run on the host.
-- Each version directory contributes both `*.app/Contents/MacOS` and the
-  directory itself, so a layout that drops a bare executable next to the
-  bundle also works.
+So the desktop-app layer no longer knows any layout. It knows a few stable
+ROOTS (the Claude app's `claude-code` folder on all three platforms;
+`ChatGPT.app` and `Codex.app` in both Applications folders) and walks each one
+breadth first, up to 7 folders deep and 5,000 folders at most, for a file with
+exactly the tool's name. Load-bearing details:
 
-The bundled copy is a full CLI, not a stub: `--version` prints
-`2.1.260 (Claude Code)` and `auth status` prints `loggedIn: true` with the
-`claude.ai` OAuth method, so it works for a subscription-backed `-p` call with
-no API key.
+- **Version folders are sorted by NUMBER, newest first** (`version_key`). A
+  string sort puts 2.1.9 above 2.1.10.
+- **An unfinished update loses.** Within the Claude root, the newest version
+  whose folders contain a `.verified` marker wins; a newer version still being
+  downloaded has none yet. A tree with no markers at all (the older layout)
+  just takes the newest copy.
+- **Shallowest match wins**, which picks the vendor's own entry point (Codex's
+  `bin/codex` wrapper) over the binary it wraps. The wrapper `exec`s, so the
+  PID Parle kills on cancel is Codex itself.
+- **The name must match exactly, case and all.** `Claude.app/Contents/MacOS/Claude`
+  is the desktop app; on a case-insensitive disk a looser match would launch it.
+- **Only files this machine can run** (`is_host_executable`): executable bit
+  set, and a Mach-O header on macOS, ELF on Linux, `MZ` or a `.cmd`/`.bat` on
+  Windows, or a `#!` script. The sibling `claude-code-vm/<version>/claude` has
+  exactly the right name and is a **Linux ARM ELF** for the sandbox VM; it is
+  refused by this check and also pruned by name, along with `Frameworks`,
+  `_CodeSignature`, `node_modules` and `*.lproj`.
 
-**Generalise from this**: assume an AI CLI is inside its desktop app and not on
-PATH. Check `<App>.app/Contents/Resources` and the app's Application Support
-directory before concluding a tool is missing. The Windows equivalents are
-guesses: see "What this round means for Windows" in WINDOWS_HANDOFF.md.
+Running a candidate's `--version` to validate it was considered and rejected:
+it is fast for Claude (0.1 s) but took 5.7 s for Codex on 22/10/2026.
+
+The bundled copy is a full CLI, not a stub: `--version` and `auth status` work,
+so it serves a subscription-backed `-p` call with no API key.
+
+**Generalise from this**: assume an AI CLI is inside its desktop app, not on
+PATH, and that its path inside that app will change. Search by name under a
+stable root, never by a fixed path. The Windows roots are guesses: see "What
+this round means for Windows" in WINDOWS_HANDOFF.md.
 
 #### A path the user typed or picked
 

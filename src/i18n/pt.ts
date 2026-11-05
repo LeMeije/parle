@@ -359,6 +359,7 @@ export const pt: Record<string, string> = {
   'settings.refine.status.notChecked': 'Ainda não verificado. Ligue Refinar ou prima Verificar de novo.',
   'settings.refine.status.foundAuto': 'Encontrámo-lo por si',
   'settings.refine.status.foundManual': 'A usar o seu caminho',
+  'settings.refine.status.foundInstead': 'O caminho guardado já não existe, por isso o Parle encontrou-o por si',
   'settings.refine.status.version': 'versão {version}',
   'settings.refine.status.signedIn': 'sessão iniciada',
   'settings.refine.status.notSignedIn': 'sem sessão',

@@ -358,6 +358,7 @@ export const en: Record<string, string> = {
   'settings.refine.status.notChecked': 'Not checked yet. Turn Refine on, or press Check again.',
   'settings.refine.status.foundAuto': 'Found it for you',
   'settings.refine.status.foundManual': 'Using your path',
+  'settings.refine.status.foundInstead': 'Your saved path is gone, so Parle found it for you',
   'settings.refine.status.version': 'version {version}',
   'settings.refine.status.signedIn': 'signed in',
   'settings.refine.status.notSignedIn': 'not signed in',

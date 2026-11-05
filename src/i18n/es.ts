@@ -368,6 +368,7 @@ export const es: Record<string, string> = {
   'settings.refine.status.notChecked': 'Aún no comprobado. Activa Refinar o pulsa Comprobar de nuevo.',
   'settings.refine.status.foundAuto': 'Lo hemos encontrado',
   'settings.refine.status.foundManual': 'Se usa tu ruta',
+  'settings.refine.status.foundInstead': 'La ruta guardada ya no existe, así que Parle la ha encontrado',
   'settings.refine.status.version': 'versión {version}',
   'settings.refine.status.signedIn': 'sesión iniciada',
   'settings.refine.status.notSignedIn': 'sin sesión',

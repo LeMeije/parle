@@ -125,7 +125,7 @@ What needs checking on the G14, in order of how likely it is to be wrong:
 **1. Where Claude Code actually lives.** The round's whole point was that the
 tool is inside its desktop app and not on PATH. On macOS that is
 `~/Library/Application Support/Claude/claude-code/<version>/claude.app/Contents/MacOS/claude`,
-verified. The Windows equivalent in `desktop_app_cli_dirs()` is
+verified. The Windows root in `claude_code_roots()` is
 `%APPDATA%\Claude\claude-code\<version>\…`, **reasoned by analogy and never
 checked**. Find the truth with:
 
@@ -134,7 +134,7 @@ Get-ChildItem -Path $env:APPDATA, $env:LOCALAPPDATA -Filter claude* -Recurse -De
 where.exe claude
 ```
 
-If the layout differs, fix `desktop_app_cli_dirs()` rather than telling the
+If the layout differs, fix `claude_code_roots()` (or `CLI_CARRYING_APPS`) rather than telling the
 user to set a path. The pre-existing paths are still searched and are the more
 likely hit on Windows anyway: the native installer puts `claude.exe` in
 `%USERPROFILE%\.local\bin`, npm puts `claude.cmd` in `%APPDATA%\npm`.

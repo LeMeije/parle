@@ -40,6 +40,8 @@ const RULES_CAP_BYTES: usize = 16 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long asking the login shell where a program lives may take.
 const SHELL_LOOKUP_TIMEOUT: Duration = Duration::from_secs(6);
+/// Spotlight answers in well under a second; this only bounds a stuck index.
+const SPOTLIGHT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The fixed part of the contract. No user data goes in here, and nothing in
 /// here changes between dictations, which is what lets it ride in the argument
@@ -275,9 +277,22 @@ pub fn resolve_program(cfg: &RefineSettings) -> Result<PathBuf, RefineError> {
     Ok(found)
 }
 
+/// Layered on purpose. Each layer is an independent way of finding the tool,
+/// so a vendor moving its files around defeats one layer, not the feature.
+/// That has happened three times: Claude Code added a build-hash folder under
+/// its version folder (2.1.286, 02/10/2026), and the CLI inside the ChatGPT app
+/// moved from `Resources/codex` into `Resources/codex-cli/` (13/10/2026). Both
+/// broke a search that knew the exact layout.
 fn find_program(name: &str, explicit: &str) -> Option<PathBuf> {
     if !explicit.is_empty() {
-        return resolve_explicit(explicit);
+        if let Some(p) = resolve_explicit(explicit) {
+            return Some(p);
+        }
+        // The saved path is gone. Usually that is because it pointed into a
+        // desktop app's versioned copy, which the app deletes on its next
+        // update, so the copy the user chose has simply been replaced. Search
+        // as if no path were set rather than switching Refine off; Settings
+        // says that this happened (`Status::saved_path_missing`).
     }
     // A path the user typed as the program itself.
     if name.contains(std::path::MAIN_SEPARATOR) || name.contains('/') {
@@ -290,7 +305,9 @@ fn find_program(name: &str, explicit: &str) -> Option<PathBuf> {
             }
         }
     }
-    ask_the_shell(name)
+    find_in_desktop_apps(name)
+        .or_else(|| find_with_spotlight(name))
+        .or_else(|| ask_the_shell(name))
 }
 
 /// A path the user typed or picked in Settings. Three shapes that are not
@@ -377,12 +394,9 @@ pub fn candidate_dirs() -> Vec<PathBuf> {
         // Claude Code's native installer, on every platform.
         dirs.push(h.join(".local").join("bin"));
         dirs.push(h.join(".claude").join("local"));
-        // Desktop apps carry their own private copies of these CLIs and never
-        // put them on PATH, so a machine whose only install came with the app
-        // looks completely empty to every other search here. That is the
-        // common case now, and it used to send the user to a path field with
-        // nothing to type in it.
-        dirs.extend(desktop_app_cli_dirs());
+        // Copies that came inside a desktop app are NOT listed here: their
+        // layout changes between versions, so they are searched for by name
+        // instead, see `find_in_desktop_apps`.
         // npm global prefixes people set up by hand.
         dirs.push(h.join(".npm-global").join("bin"));
         dirs.push(h.join(".npm").join("bin"));
@@ -438,17 +452,62 @@ pub fn candidate_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Where desktop apps keep the CLIs they ship. NONE of these put their CLI on
-/// PATH, so on a machine whose only install of a tool came with its app, every
-/// other search here finds nothing at all.
+/// Desktop apps known to carry a CLI inside their bundle, searched in both
+/// Applications folders. The ChatGPT app is the one that ships Codex; a
+/// standalone Codex app would carry it the same way.
+const CLI_CARRYING_APPS: &[&str] = &["ChatGPT.app", "Codex.app"];
+
+/// How far below a desktop-app root the by-name search goes. The deepest copy
+/// today is five folders down (`Resources/codex-cli/CodexCLI.app/Contents/MacOS`
+/// under the ChatGPT app's `Contents`), so this leaves room for a vendor to
+/// nest one or two more without breaking anything.
+const DESKTOP_SEARCH_DEPTH: usize = 7;
+
+/// A ceiling on folders visited per root, so a surprising tree can only cost a
+/// bounded amount of time. Today's largest root is about 450 entries.
+const DESKTOP_SEARCH_MAX_DIRS: usize = 5000;
+
+/// Folders a CLI never lives in, skipped to keep the walk small. The
+/// `claude-code-vm` copy in particular looks exactly like the right file and is
+/// a Linux binary for the sandbox VM; `is_host_executable` would refuse it
+/// anyway, this just avoids opening it.
+fn is_pruned(dir_name: &std::ffi::OsStr) -> bool {
+    let n = dir_name.to_string_lossy();
+    matches!(n.as_ref(), "Frameworks" | "_CodeSignature" | "node_modules" | "claude-code-vm") || n.ends_with(".lproj")
+}
+
+/// The copies of a CLI that desktop apps ship. NONE of these apps put their
+/// CLI on PATH, so on a machine whose only install of a tool came with its
+/// app, every other search here finds nothing at all.
 ///
-/// Verified on macOS 10/09/2026:
-///  - Claude Code, versioned, inside the Claude app's support directory:
-///    `.../Claude/claude-code/<version>/claude.app/Contents/MacOS/claude`. The
-///    sibling `claude-code-vm` copy is deliberately NOT searched: it is a
-///    Linux ELF built for the sandbox VM and cannot run on the host.
-///  - Codex, inside the ChatGPT app: `ChatGPT.app/Contents/Resources/codex`.
-fn desktop_app_cli_dirs() -> Vec<PathBuf> {
+/// These are found by NAME under a few stable roots, never at a fixed path,
+/// because the layout below those roots is the vendor's private business and
+/// it keeps changing. Seen on macOS:
+///  - Claude Code, 10/09/2026: `claude-code/<version>/claude.app/Contents/MacOS/claude`;
+///    from 2.1.286 (02/10/2026): `claude-code/<version>/<build hash>/claude.app/...`,
+///    with a `.verified` file beside `claude.app` once the update has finished.
+///  - Codex, 10/09/2026: `ChatGPT.app/Contents/Resources/codex`; from
+///    13/10/2026: `Resources/codex-cli/bin/codex`, a wrapper that the bundled
+///    `codex-package.json` names as the entry point, around
+///    `Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`.
+fn find_in_desktop_apps(name: &str) -> Option<PathBuf> {
+    for root in claude_code_roots() {
+        if let Some(hit) = newest_finished_copy(&root, name) {
+            return Some(hit);
+        }
+    }
+    for apps in applications_dirs() {
+        for app in CLI_CARRYING_APPS {
+            if let Some(hit) = find_by_name(&apps.join(app).join("Contents"), name) {
+                return Some(hit);
+            }
+        }
+    }
+    None
+}
+
+/// The Claude desktop app's private, versioned copies of Claude Code.
+fn claude_code_roots() -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(h) = home() {
         roots.push(h.join("Library").join("Application Support").join("Claude").join("claude-code"));
@@ -457,19 +516,36 @@ fn desktop_app_cli_dirs() -> Vec<PathBuf> {
     if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
         roots.push(appdata.join("Claude").join("claude-code"));
     }
-    let mut dirs: Vec<PathBuf> = roots.iter().flat_map(|r| claude_code_versions_in(r)).collect();
-    // Apps that ship a CLI at a fixed place inside the bundle. A user can
-    // install into either Applications folder.
-    for apps in [Some(PathBuf::from("/Applications")), home().map(|h| h.join("Applications"))].into_iter().flatten() {
-        dirs.push(apps.join("ChatGPT.app").join("Contents").join("Resources"));
-    }
-    dirs
+    roots
 }
 
-/// The searchable directories under one `claude-code` root, newest version
-/// first. Split out from the roots so it can be tested against a synthesised
-/// tree rather than whatever happens to be installed on the build machine.
-fn claude_code_versions_in(root: &Path) -> Vec<PathBuf> {
+/// A user can install an app into either Applications folder.
+fn applications_dirs() -> Vec<PathBuf> {
+    [Some(PathBuf::from("/Applications")), home().map(|h| h.join("Applications"))].into_iter().flatten().collect()
+}
+
+/// The newest copy of `name` under a root that holds one folder per version,
+/// preferring one whose update has FINISHED: the app writes `.verified` beside
+/// the bundle when it is done, so a version still being downloaded loses to
+/// the complete one before it. A layout with no marker at all (the one before
+/// 2.1.286) still works, it just takes the newest copy.
+fn newest_finished_copy(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut newest = None;
+    for version in versions_newest_first(root) {
+        let Some(hit) = find_by_name(&version, name) else { continue };
+        let finished = hit.ancestors().take_while(|a| a.starts_with(&version)).any(|a| a.join(".verified").is_file());
+        if finished {
+            return Some(hit);
+        }
+        newest.get_or_insert(hit);
+    }
+    newest
+}
+
+/// The version folders under one root, newest first. Split out so it can be
+/// tested against a synthesised tree rather than whatever happens to be
+/// installed on the build machine.
+fn versions_newest_first(root: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(root) else { return Vec::new() };
     let mut versions: Vec<(Vec<u64>, PathBuf)> = rd
         .flatten()
@@ -479,24 +555,129 @@ fn claude_code_versions_in(root: &Path) -> Vec<PathBuf> {
         .collect();
     // Newest first, and by NUMBER not by string, or 2.1.9 sorts above 2.1.10.
     versions.sort_by(|a, b| b.0.cmp(&a.0));
-    let mut dirs = Vec::new();
-    for (_, v) in versions {
-        if let Ok(inner) = std::fs::read_dir(&v) {
-            for entry in inner.flatten() {
-                let q = entry.path();
-                if q.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")) {
-                    dirs.push(q.join("Contents").join("MacOS"));
-                } else if q.is_dir() {
-                    // Windows: the desktop app puts claude.exe one level
-                    // deeper, in a hash-named folder (measured on the G14,
-                    // 16/10/2026: `2.1.295\d2e29494ec83\claude.exe`).
-                    dirs.push(q);
+    versions.into_iter().map(|(_, p)| p).collect()
+}
+
+/// The shallowest runnable file called `name` below `root`, breadth first.
+/// Shallowest wins because that is the vendor's own entry point where there is
+/// one (Codex's `bin/codex` wrapper) rather than the binary it wraps.
+///
+/// The name must match exactly, case and all: `Claude.app/Contents/MacOS/Claude`
+/// is the desktop app itself, and on a case-insensitive disk a looser match
+/// would launch it in place of the CLI. Symlinked folders are not followed.
+fn find_by_name(root: &Path, name: &str) -> Option<PathBuf> {
+    let wanted: Vec<std::ffi::OsString> = with_extensions(Path::new(name)).into_iter().map(PathBuf::into_os_string).collect();
+    let mut level = vec![root.to_path_buf()];
+    let mut visited = 0usize;
+    for _ in 0..=DESKTOP_SEARCH_DEPTH {
+        let mut next = Vec::new();
+        let mut hits = Vec::new();
+        for dir in &level {
+            visited += 1;
+            if visited > DESKTOP_SEARCH_MAX_DIRS {
+                return None;
+            }
+            let Ok(rd) = std::fs::read_dir(dir) else { continue };
+            for entry in rd.flatten() {
+                let Ok(kind) = entry.file_type() else { continue };
+                let file_name = entry.file_name();
+                if kind.is_dir() {
+                    if !is_pruned(&file_name) {
+                        next.push(entry.path());
+                    }
+                } else if wanted.contains(&file_name) && is_host_executable(&entry.path()) {
+                    hits.push(entry.path());
                 }
             }
         }
-        dirs.push(v);
+        if !hits.is_empty() {
+            hits.sort();
+            return hits.into_iter().next();
+        }
+        if next.is_empty() {
+            break;
+        }
+        next.sort();
+        level = next;
     }
-    dirs
+    None
+}
+
+/// Whether this machine can actually run `path`: an executable file in this
+/// OS's own binary format, or a script with a `#!` line. Desktop apps carry
+/// binaries for OTHER systems too (the Claude app's sandbox VM copy is a Linux
+/// binary with exactly the right name), and running one fails in a way that
+/// reads like Refine is broken.
+fn is_host_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(path).map(|m| m.permissions().mode() & 0o111 == 0).unwrap_or(true) {
+            return false;
+        }
+    }
+    let mut head = [0u8; 4];
+    let n = std::fs::File::open(path).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
+    let head = &head[..n];
+    if head.starts_with(b"#!") {
+        return true;
+    }
+    if cfg!(target_os = "macos") {
+        // Mach-O 64 and 32 bit (stored little-endian), and universal binaries.
+        matches!(head, [0xcf, 0xfa, 0xed, 0xfe] | [0xce, 0xfa, 0xed, 0xfe] | [0xca, 0xfe, 0xba, 0xbe] | [0xca, 0xfe, 0xba, 0xbf])
+    } else if cfg!(target_os = "windows") {
+        // An .exe, or a .cmd/.bat shim, which is plain text.
+        head.starts_with(b"MZ") || path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+    } else {
+        head.starts_with(b"\x7fELF")
+    }
+}
+
+/// The app bundles Spotlight can find a CLI in, by bundle identifier. This
+/// survives a vendor moving the bundle to a new folder, which no path-based
+/// search can. It is a fallback only: Spotlight does not index every bundle
+/// (it has no record of the ChatGPT app on the author's Mac), and it can be
+/// switched off.
+fn spotlight_bundle_ids(name: &str) -> &'static [&'static str] {
+    match name {
+        "claude" => &["com.anthropic.claude-code"],
+        "codex" => &["com.openai.codex.cli"],
+        _ => &[],
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn find_with_spotlight(name: &str) -> Option<PathBuf> {
+    let ids = spotlight_bundle_ids(name);
+    if ids.is_empty() {
+        return None;
+    }
+    // Fixed identifiers from the table above, never user text.
+    let query = ids.iter().map(|id| format!("kMDItemCFBundleIdentifier == '{id}'")).collect::<Vec<_>>().join(" || ");
+    let mut cmd = Command::new("/usr/bin/mdfind");
+    cmd.arg(query).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = cmd.spawn().ok()?;
+    let out = read_all_with_timeout(&mut child, SPOTLIGHT_TIMEOUT)?;
+    let mut hits: Vec<(std::time::SystemTime, PathBuf)> = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| inside_bundle(Path::new(l)))
+        .filter(|p| p.file_name().is_some_and(|f| f == name) && is_host_executable(p))
+        .map(|p| (std::fs::metadata(&p).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), p))
+        .collect();
+    // Several versions can be indexed at once; the most recently installed wins.
+    hits.sort_by(|a, b| b.0.cmp(&a.0));
+    hits.into_iter().next().map(|(_, p)| p)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn find_with_spotlight(name: &str) -> Option<PathBuf> {
+    let _ = spotlight_bundle_ids(name);
+    None
 }
 
 /// A version directory name as comparable numbers. Non-numeric parts sort as
@@ -1007,6 +1188,10 @@ pub struct Status {
     pub problem: Option<String>,
     /// The voice file, checked: None when unset, Some(true) readable.
     pub voice_file_ok: Option<bool>,
+    /// A path is saved in Settings but nothing is there any more, so `program`
+    /// is what the automatic search found instead. Typically the saved path
+    /// pointed into a desktop app's versioned copy and the app has updated.
+    pub saved_path_missing: bool,
     /// Model names this tool will accept, for the Settings dropdown. Empty
     /// when the tool was not reachable or says nothing about models, in which
     /// case Settings falls back to a free text box.
@@ -1029,6 +1214,8 @@ pub fn status(cfg: &RefineSettings) -> Status {
         }
     };
     st.program = Some(program.to_string_lossy().to_string());
+    let saved = cfg.program_path.trim();
+    st.saved_path_missing = cfg.provider != RefineProvider::Custom && !saved.is_empty() && resolve_explicit(saved).is_none();
     match cfg.provider {
         RefineProvider::Custom => {}
         _ => {
@@ -1285,11 +1472,22 @@ mod tests {
     // ---- resolving ----
 
     #[test]
-    fn an_explicit_path_that_does_not_exist_is_not_found() {
-        let mut c = cfg();
-        c.program_path = "/nowhere/claude".into();
+    fn an_explicit_path_that_no_longer_exists_falls_back_to_the_search() {
+        // A saved path into a desktop app's versioned copy is deleted by the
+        // app's next update. That must not switch Refine off: the result is
+        // whatever the automatic search finds, and if that finds nothing the
+        // error names the path the user saved, since that is what they know.
+        let mut gone = cfg();
+        gone.program_path = "/nowhere/claude".into();
         forget_resolved();
-        assert!(matches!(resolve_program(&c), Err(RefineError::ProgramNotFound(p)) if p == "/nowhere/claude"));
+        let via_saved = resolve_program(&gone);
+        forget_resolved();
+        let automatic = resolve_program(&cfg());
+        match (via_saved, automatic) {
+            (Ok(a), Ok(b)) => assert_eq!(a, b),
+            (Err(RefineError::ProgramNotFound(p)), Err(_)) => assert_eq!(p, "/nowhere/claude"),
+            other => panic!("saved-path fallback disagrees with the search: {other:?}"),
+        }
     }
 
     #[test]
@@ -1335,38 +1533,146 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[test]
-    fn the_desktop_apps_bundled_cli_is_searched_newest_version_first() {
-        let root = std::env::temp_dir().join(format!("parle-desktop-{}", std::process::id()));
-        for v in ["2.1.9", "2.1.10", "notaversion"] {
-            std::fs::create_dir_all(root.join(v).join("claude.app").join("Contents").join("MacOS")).unwrap();
+    /// A file this OS will run, as the desktop apps ship it: the right binary
+    /// header and the executable bit.
+    fn fake_native(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let head: &[u8] = if cfg!(target_os = "macos") {
+            &[0xcf, 0xfa, 0xed, 0xfe, 0, 0]
+        } else if cfg!(target_os = "windows") {
+            b"MZ\0\0"
+        } else {
+            b"\x7fELF\0\0"
+        };
+        std::fs::write(path, head).unwrap();
+        make_executable(path);
+    }
+
+    fn make_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        // A layout with the executable straight in the version directory.
-        std::fs::create_dir_all(root.join("2.1.10")).unwrap();
-        let dirs = claude_code_versions_in(&root);
-        let inner = |v: &str| root.join(v).join("claude.app").join("Contents").join("MacOS");
-        // 2.1.10 beats 2.1.9: the ordering is numeric, not lexicographic.
-        let first = dirs.iter().position(|d| *d == inner("2.1.10")).unwrap();
-        let second = dirs.iter().position(|d| *d == inner("2.1.9")).unwrap();
-        assert!(first < second, "{dirs:?}");
-        // The version directory itself is searched too, after its bundle.
-        assert!(dirs.contains(&root.join("2.1.10")));
+        let _ = path;
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("parle-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn exe(name: &str) -> String {
+        if cfg!(target_os = "windows") { format!("{name}.exe") } else { name.to_string() }
+    }
+
+    #[test]
+    fn claude_code_is_found_in_every_layout_the_desktop_app_has_used() {
+        let root = scratch("claude-layouts");
+        let bundle = |base: PathBuf| base.join("claude.app").join("Contents").join("MacOS").join(exe("claude"));
+        // Up to 2.1.285: the bundle straight in the version folder.
+        fake_native(&bundle(root.join("2.1.260")));
+        let old = versions_newest_first(&root).into_iter().find_map(|v| find_by_name(&v, "claude"));
+        assert_eq!(old, Some(bundle(root.join("2.1.260"))));
+        // From 2.1.286: a build-hash folder in between. This is the change that
+        // broke the fixed-path search on 02/10/2026.
+        fake_native(&bundle(root.join("2.1.304").join("6bbba6adc37f")));
+        assert_eq!(newest_finished_copy(&root, "claude"), Some(bundle(root.join("2.1.304").join("6bbba6adc37f"))));
+        // And one more level the vendor has not added yet, to prove headroom.
+        fake_native(&bundle(root.join("2.1.400").join("abc").join("arm64")));
+        assert_eq!(newest_finished_copy(&root, "claude"), Some(bundle(root.join("2.1.400").join("abc").join("arm64"))));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn versions_sort_by_number_and_an_unfinished_update_loses() {
+        let root = scratch("claude-versions");
+        let bundle = |v: &str| root.join(v).join("h").join("claude.app").join("Contents").join("MacOS").join(exe("claude"));
+        for v in ["2.1.9", "2.1.10", "notaversion"] {
+            fake_native(&bundle(v));
+        }
+        // 2.1.10 beats 2.1.9: numeric, not lexicographic. No markers anywhere,
+        // which is the older layout, so the newest copy simply wins.
+        assert_eq!(newest_finished_copy(&root, "claude"), Some(bundle("2.1.10")));
         // An unparseable name sorts last rather than winning.
-        assert!(dirs.iter().position(|d| *d == inner("notaversion")).unwrap() > second);
-        assert!(claude_code_versions_in(&root.join("nope")).is_empty());
+        assert_eq!(versions_newest_first(&root).last(), Some(&root.join("notaversion")));
+        // Once markers exist, a newer version still being downloaded (no
+        // `.verified` yet) loses to the finished one before it.
+        std::fs::write(root.join("2.1.9").join("h").join(".verified"), b"x").unwrap();
+        assert_eq!(newest_finished_copy(&root, "claude"), Some(bundle("2.1.9")));
+        std::fs::write(root.join("2.1.10").join("h").join(".verified"), b"x").unwrap();
+        assert_eq!(newest_finished_copy(&root, "claude"), Some(bundle("2.1.10")));
+        assert!(newest_finished_copy(&root.join("nope"), "claude").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_is_found_in_both_layouts_the_chatgpt_app_has_used() {
+        let contents = scratch("chatgpt").join("ChatGPT.app").join("Contents");
+        let resources = contents.join("Resources");
+        // Up to 13/10/2026.
+        fake_native(&resources.join(exe("codex")));
+        assert_eq!(find_by_name(&contents, "codex"), Some(resources.join(exe("codex"))));
+        std::fs::remove_file(resources.join(exe("codex"))).unwrap();
+        // Since: the binary in a nested bundle, plus the wrapper the vendor's
+        // manifest names as the entry point. The shallower wrapper wins.
+        let cli = resources.join("codex-cli");
+        fake_native(&cli.join("CodexCLI.app").join("Contents").join("MacOS").join(exe("codex")));
+        assert_eq!(find_by_name(&contents, "codex"), Some(cli.join("CodexCLI.app").join("Contents").join("MacOS").join(exe("codex"))));
+        if cfg!(unix) {
+            std::fs::create_dir_all(cli.join("bin")).unwrap();
+            std::fs::write(cli.join("bin").join("codex"), b"#!/bin/sh\nexec true\n").unwrap();
+            make_executable(&cli.join("bin").join("codex"));
+            assert_eq!(find_by_name(&contents, "codex"), Some(cli.join("bin").join("codex")));
+        }
+        let _ = std::fs::remove_dir_all(contents.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn the_search_refuses_what_this_machine_cannot_run() {
+        let root = scratch("not-runnable");
+        let target = root.join("a").join(exe("claude"));
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        // A binary for another OS, with exactly the right name: the Claude
+        // app's sandbox VM copy is a Linux binary.
+        let foreign: &[u8] = if cfg!(target_os = "linux") { &[0xcf, 0xfa, 0xed, 0xfe] } else { b"\x7fELF" };
+        std::fs::write(&target, foreign).unwrap();
+        make_executable(&target);
+        assert!(find_by_name(&root, "claude").is_none());
+        if cfg!(unix) {
+            // The right format but not executable.
+            fake_native(&target);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            assert!(find_by_name(&root, "claude").is_none());
+        }
+        // The desktop app's own executable is `Claude`: never the CLI.
+        let app = root.join("Claude.app").join("Contents").join("MacOS").join("Claude");
+        fake_native(&app);
+        if !cfg!(target_os = "windows") {
+            assert!(find_by_name(&root, "claude").is_none());
+        }
+        // A pruned folder is never entered, even with a perfect copy inside.
+        fake_native(&root.join("claude-code-vm").join("2.1.304").join(exe("claude")));
+        assert!(find_by_name(&root, "claude").is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn the_windows_desktop_apps_hash_folder_is_searched() {
         let root = std::env::temp_dir().join(format!("parle-desktop-win-{}", std::process::id()));
-        let hashed = root.join("2.1.295").join("d2e29494ec83");
-        std::fs::create_dir_all(&hashed).unwrap();
-        std::fs::write(hashed.join("claude.exe"), b"x").unwrap();
+        // Measured on the G14, 16/10/2026: `2.1.295\d2e29494ec83\claude.exe`.
+        let version = root.join("2.1.295");
+        let hashed = version.join("d2e29494ec83").join(exe("claude"));
+        fake_native(&hashed);
         // A sibling file in the version folder is not a directory to search.
-        std::fs::write(root.join("2.1.295").join(".verified"), b"x").unwrap();
-        let dirs = claude_code_versions_in(&root);
-        assert_eq!(dirs, vec![hashed, root.join("2.1.295")]);
+        std::fs::write(version.join(".verified"), b"x").unwrap();
+        assert_eq!(find_by_name(&version, "claude"), Some(hashed));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1568,10 +1874,14 @@ mod tests {
             forget_resolved();
             eprintln!("{provider:?} -> {:?}", resolve_program(&c));
         }
-        for dir in candidate_dirs() {
-            if dir.join("claude").is_file() {
-                eprintln!("  candidate hit: {}", dir.display());
-            }
+        // Each layer on its own, so a report says WHICH one still works and
+        // which one a vendor's latest layout change has defeated.
+        for name in ["claude", "codex"] {
+            let on_path = candidate_dirs().into_iter().map(|d| d.join(name)).find(|p| p.is_file());
+            eprintln!("{name}: path dirs -> {on_path:?}");
+            eprintln!("{name}: desktop apps -> {:?}", find_in_desktop_apps(name));
+            eprintln!("{name}: spotlight -> {:?}", find_with_spotlight(name));
+            eprintln!("{name}: login shell -> {:?}", ask_the_shell(name));
         }
     }
 

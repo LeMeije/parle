@@ -357,6 +357,7 @@ export const de: Record<string, string> = {
   'settings.refine.status.notChecked': 'Noch nicht geprüft. Schalten Sie Überarbeiten ein oder klicken Sie auf Erneut prüfen.',
   'settings.refine.status.foundAuto': 'Für Sie gefunden',
   'settings.refine.status.foundManual': 'Ihr Pfad wird verwendet',
+  'settings.refine.status.foundInstead': 'Der gespeicherte Pfad existiert nicht mehr, Parle hat ihn für Sie gefunden',
   'settings.refine.status.version': 'Version {version}',
   'settings.refine.status.signedIn': 'angemeldet',
   'settings.refine.status.notSignedIn': 'nicht angemeldet',

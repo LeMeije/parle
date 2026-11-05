@@ -69,12 +69,25 @@ most common Refine complaint. It prints where discovery landed for every
 provider:
 
 ```
-resolved: Ok("/Users/…/Library/Application Support/Claude/claude-code/2.1.260/claude.app/Contents/MacOS/claude")
+resolved: Ok("/Users/…/Library/Application Support/Claude/claude-code/2.1.304/6bbba6adc37f/claude.app/Contents/MacOS/claude")
 models offered: ["fable", "opus", "sonnet", "haiku"]
 Claude -> Ok("/Users/…/claude.app/Contents/MacOS/claude")
-Codex  -> Ok("/Applications/ChatGPT.app/Contents/Resources/codex")
+Codex -> Ok("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
 Gemini -> Err(ProgramNotFound("gemini"))
+claude: path dirs -> None
+claude: desktop apps -> Some(".../claude-code/2.1.304/6bbba6adc37f/claude.app/Contents/MacOS/claude")
+claude: spotlight -> Some(".../claude-code/2.1.304/6bbba6adc37f/claude.app/Contents/MacOS/claude")
+claude: login shell -> None
+codex: path dirs -> None
+codex: desktop apps -> Some("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
+codex: spotlight -> None
+codex: login shell -> None
 ```
+
+That is the 22/10/2026 output. The per-layer lines say WHICH search still
+works, so when a vendor next moves its files you can see at once whether the
+by-name walk lost it (and the walk's roots, depth or prune list need a look)
+or whether only a fallback is carrying it.
 
 It also proves the model dropdown against the **installed** help text rather
 than a copy of it pasted into a unit test.

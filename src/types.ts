@@ -134,6 +134,9 @@ export interface RefineStatus {
   logged_in: boolean | null;
   problem: string | null;
   voice_file_ok: boolean | null;
+  /** A path is saved but nothing is there any more (a desktop app updated
+   *  and removed the copy it pointed at), so `program` was found instead. */
+  saved_path_missing: boolean;
   /** Model names the tool says it accepts. Empty means "no list available",
    *  and Settings falls back to a free text box. */
   models: string[];
