@@ -69,6 +69,8 @@ export interface Settings {
     input_device: string;
     min_duration_ms: number;
     sounds: boolean;
+    /** Soft chime when a take reaches the 15-minute cap. */
+    limit_chime: boolean;
   };
   overlay: {
     position: string;

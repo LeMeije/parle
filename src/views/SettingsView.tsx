@@ -1195,6 +1195,7 @@ export default function SettingsView({
         <Field label={t('settings.minDuration.label')}>
           <NumberInput value={s.audio.min_duration_ms} min={100} max={2000} step={100} suffix="ms" onChange={(v) => set((d) => (d.audio.min_duration_ms = v))} />
         </Field>
+        <Toggle label={t('settings.limitChime.label')} hint={t('settings.limitChime.hint')} value={s.audio.limit_chime} onChange={(v) => set((d) => (d.audio.limit_chime = v))} />
         {perms && perms.microphone === 'denied' && (
           <div className="callout warn">
             {t('settings.microphoneDenied')}{' '}

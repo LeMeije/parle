@@ -495,6 +495,8 @@ export const en: Record<string, string> = {
   'settings.microphone.label': 'Microphone',
   'settings.microphone.systemDefault': 'System default',
   'settings.minDuration.label': 'Ignore recordings shorter than',
+  'settings.limitChime.label': 'Chime at the 15-minute limit',
+  'settings.limitChime.hint': 'A soft sound when a recording reaches 15 minutes and stops being kept, so you notice even when you are not looking at the screen.',
   'settings.microphoneDenied': 'Microphone access is denied.',
 
   // ---------- Settings: general ----------

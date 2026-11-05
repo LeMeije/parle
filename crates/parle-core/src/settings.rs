@@ -782,11 +782,14 @@ pub struct AudioSettings {
     pub min_duration_ms: u64,
     /// Play subtle start/stop sounds.
     pub sounds: bool,
+    /// Play a soft chime when a take reaches the 15-minute cap and stops
+    /// keeping audio, for when the user is not looking at the screen.
+    pub limit_chime: bool,
 }
 
 impl Default for AudioSettings {
     fn default() -> Self {
-        Self { input_device: String::new(), min_duration_ms: 300, sounds: true }
+        Self { input_device: String::new(), min_duration_ms: 300, sounds: true, limit_chime: true }
     }
 }
 

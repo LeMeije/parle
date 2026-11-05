@@ -489,6 +489,8 @@ export const fr: Record<string, string> = {
   'settings.microphone.label': 'Micro',
   'settings.microphone.systemDefault': 'Par défaut du système',
   'settings.minDuration.label': 'Ignorer les enregistrements de moins de',
+  'settings.limitChime.label': 'Carillon à la limite de 15 minutes',
+  'settings.limitChime.hint': 'Un son discret quand un enregistrement atteint 15 minutes et n’est plus conservé, pour le remarquer même sans regarder l’écran.',
   'settings.microphoneDenied': 'L’accès au micro est refusé.',
 
   // ---------- Settings: general ----------

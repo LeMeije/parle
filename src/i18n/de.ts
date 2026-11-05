@@ -492,6 +492,8 @@ export const de: Record<string, string> = {
   'settings.microphone.label': 'Mikrofon',
   'settings.microphone.systemDefault': 'Systemstandard',
   'settings.minDuration.label': 'Aufnahmen ignorieren unter',
+  'settings.limitChime.label': 'Signalton beim 15-Minuten-Limit',
+  'settings.limitChime.hint': 'Ein sanfter Ton, wenn eine Aufnahme 15 Minuten erreicht und nichts mehr aufgenommen wird. So merken Sie es auch, wenn Sie nicht auf den Bildschirm schauen.',
   'settings.microphoneDenied': 'Der Mikrofonzugriff wurde verweigert.',
 
   // ---------- Settings: general ----------

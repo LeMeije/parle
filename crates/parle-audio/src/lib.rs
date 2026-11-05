@@ -3,6 +3,7 @@
 //! one consumer drains the channel IN ORDER; all ASR input is 16 kHz mono f32.
 
 pub mod capture;
+pub mod chime;
 pub mod level;
 pub mod recorder;
 pub mod resample;

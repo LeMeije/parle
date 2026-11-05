@@ -375,7 +375,18 @@ impl Pipeline {
         *self.mode.lock() = mode;
 
         let sink = self.sink.clone();
-        let on_level = move |u: LevelUpdate| sink(PipelineEvent::Level(u));
+        let settings = self.settings.clone();
+        // Once per take, read at the moment it happens so a toggle mid-take counts.
+        let mut chimed = false;
+        let on_level = move |u: LevelUpdate| {
+            if u.capped && !chimed {
+                chimed = true;
+                if settings.lock().audio.limit_chime {
+                    parle_audio::chime::play();
+                }
+            }
+            sink(PipelineEvent::Level(u))
+        };
         self.marks.lock().clear();
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         match Recorder::start(&device, on_level) {
