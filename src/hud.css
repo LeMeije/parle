@@ -423,3 +423,69 @@ body[data-window='hud'] #root {
   text-overflow: ellipsis;
 }
 .hud-outcome.error { color: var(--danger); }
+
+/* ---------- Limit reached (15-minute cap) ---------- */
+
+/* The microphone is still open but nothing more is being kept. Every style
+   keeps its own shape and size and turns solid red with a pulsing ring, so the
+   moment is caught in peripheral vision while the user is still talking.
+   One fixed red in both modes: the dark palette's lighter --danger is too pale
+   to carry white text. */
+.hud.limit {
+  --limit-red: #d92d20;
+  --limit-red-deep: #a8190f;
+  background: linear-gradient(180deg, var(--limit-red) 0%, var(--limit-red-deep) 100%);
+  border-color: transparent;
+  color: #fff;
+  animation: hud-limit-ring 1.4s ease-out infinite;
+}
+
+/* The ring is spread, not blurred, so it stays inside the tight window the slim
+   style sits in. */
+@keyframes hud-limit-ring {
+  0% { box-shadow: 0 0 0 0 rgba(217, 45, 32, 0.7), 0 8px 22px rgba(120, 10, 0, 0.35); }
+  70% { box-shadow: 0 0 0 12px rgba(217, 45, 32, 0), 0 8px 22px rgba(120, 10, 0, 0.35); }
+  100% { box-shadow: 0 0 0 0 rgba(217, 45, 32, 0), 0 8px 22px rgba(120, 10, 0, 0.35); }
+}
+
+/* The record square stops pulsing and goes white: nothing is recording. */
+.hud.limit .hud-dot {
+  background: #fff;
+  animation: none;
+}
+.hud.limit .hud-stop { background: rgba(255, 255, 255, 0.22); }
+.hud.limit .hud-time,
+.hud.limit .hud-slim-well .hud-time {
+  color: #fff;
+  font-weight: 700;
+}
+.hud.limit .hud-cancel { color: rgba(255, 255, 255, 0.8); }
+.hud.limit .hud-cancel:hover {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+.hud.limit .hud-limit-title {
+  color: #fff;
+  font-weight: 700;
+}
+.hud.limit .hud-limit-sub { color: rgba(255, 255, 255, 0.85); }
+
+/* Decks: the tape has run out. The shell goes red, the reels stop and the meter
+   lights end to end, flashing together. */
+.hud.hud-cassette.limit,
+.hud.hud-metal.limit {
+  background: linear-gradient(168deg, #e5392c 0%, var(--limit-red) 45%, var(--limit-red-deep) 100%);
+}
+.hud.hud-cassette.limit::before { border-color: rgba(255, 255, 255, 0.18); }
+.hud.limit .deck-seg i.full {
+  background: #fff;
+  animation: deck-full 0.9s steps(1) infinite;
+}
+@keyframes deck-full {
+  0%, 55% { opacity: 1; }
+  56%, 100% { opacity: 0.3; }
+}
+.hud.limit .deck-label { color: #fff; }
+.hud.limit .deck-time { color: rgba(255, 255, 255, 0.85); }
+.hud.limit .deck-cancel { background: rgba(255, 255, 255, 0.3); }
+.hud.limit .deck-cancel:hover { background: rgba(255, 255, 255, 0.5); }

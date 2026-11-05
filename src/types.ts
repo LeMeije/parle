@@ -223,6 +223,9 @@ export interface LevelUpdate {
   peak: number;
   envelope: number;
   elapsed_ms: number;
+  /// The take hit the 15-minute cap: the microphone is open but nothing more
+  /// is being kept.
+  capped: boolean;
 }
 
 export type PipelineEvent =

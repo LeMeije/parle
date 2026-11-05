@@ -22,6 +22,10 @@ pub struct LevelUpdate {
     pub peak: f32,
     pub envelope: f32,
     pub elapsed_ms: u64,
+    /// The take has hit `MAX_SAMPLES`: the microphone is still open but its
+    /// audio is being thrown away. The HUD turns red on this so the cap cannot
+    /// pass unnoticed while the user goes on talking.
+    pub capped: bool,
 }
 
 pub struct Recording {
@@ -312,13 +316,14 @@ fn consume(
                 }
                 samples_since_level += mono16k.len();
                 let elapsed_ms = (state.samples.len() as u64 * 1000) / ASR_SAMPLE_RATE as u64;
+                let capped = state.samples.len() >= MAX_SAMPLES;
                 drop(guard);
                 // Not once a stop is in flight. The elapsed time rides on these
                 // updates, so a late one drives the overlay's clock: it went on
                 // counting up while the overlay said "Transcribing".
                 if samples_since_level >= level_interval && !stop_flag.load(Ordering::SeqCst) {
                     samples_since_level = 0;
-                    on_level(LevelUpdate { rms, peak, envelope, elapsed_ms });
+                    on_level(LevelUpdate { rms, peak, envelope, elapsed_ms, capped });
                 }
             }
             // Nothing to do here: the stop check at the top of the loop owns it.
@@ -482,6 +487,48 @@ mod tests {
         assert!(levels.lock().is_empty(), "emitted a level update after stop");
         // The queued audio was still collected, not thrown away.
         assert!(!result.lock().as_ref().unwrap().samples.is_empty());
+    }
+
+    /// The HUD's red "limit reached" state rides on this flag, so it must be
+    /// false for the whole take and flip exactly when the cap starts discarding.
+    #[test]
+    fn level_updates_report_the_cap() {
+        let (tx, rx) = capture::chunk_channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let result = Arc::new(Mutex::new(Some(RecordingState {
+            samples: Vec::new(),
+            out_of_order: false,
+        })));
+        let levels = Arc::new(Mutex::new(Vec::new()));
+
+        // One-second chunks, five seconds past the cap. Fed from a thread: the
+        // channel holds 512 and this is more than that.
+        let secs = MAX_SAMPLES as u64 / ASR_SAMPLE_RATE as u64 + 5;
+        let feeder = std::thread::spawn(move || {
+            for seq in 0..secs {
+                let chunk = AudioChunk {
+                    seq,
+                    samples: vec![0.1; ASR_SAMPLE_RATE as usize],
+                    channels: 1,
+                    sample_rate: ASR_SAMPLE_RATE,
+                };
+                tx.send(chunk).unwrap();
+            }
+        });
+
+        {
+            let levels = levels.clone();
+            let mut cb = move |u: LevelUpdate| levels.lock().push(u);
+            consume(rx, ASR_SAMPLE_RATE, stop, Arc::new(AtomicBool::new(false)), result.clone(), &mut cb);
+        }
+        feeder.join().unwrap();
+
+        let levels = levels.lock();
+        let cap_ms = MAX_SAMPLES as u64 * 1000 / ASR_SAMPLE_RATE as u64;
+        assert!(levels.iter().any(|u| u.capped), "the cap was never reported");
+        for u in levels.iter() {
+            assert_eq!(u.capped, u.elapsed_ms >= cap_ms, "wrong flag at {} ms", u.elapsed_ms);
+        }
     }
 
     #[test]

@@ -45,6 +45,9 @@ export default function Hud() {
   const [partial, setPartial] = useState('');
   const [outcome, setOutcome] = useState<{ text: string; kind: 'ok' | 'error' } | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  // The take hit the recorder's 15-minute cap. The microphone stays open but
+  // nothing more is kept, so every style turns red to stop the user talking on.
+  const [capped, setCapped] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   // Mirrored into a ref because the level subscription below is registered
   // once and would otherwise close over the settings as they were at mount,
@@ -76,6 +79,7 @@ export default function Hud() {
           setPartial('');
           setOutcome(null);
           setElapsed(0);
+          setCapped(false);
           barsRef.current = new Array(BAR_COUNT).fill(0.05);
         }
       }
@@ -106,7 +110,10 @@ export default function Hud() {
       envelopeRef.current = u.envelope;
       // Frozen once the microphone closes: what it reads then is the length of
       // the take, which is what it should go on showing while we transcribe.
-      if (recordingRef.current) setElapsed(u.elapsed_ms);
+      if (recordingRef.current) {
+        setElapsed(u.elapsed_ms);
+        setCapped(u.capped);
+      }
       const bars = barsRef.current;
       // Perceptual mapping: speech RMS spans a narrow linear range, so a raw
       // mapping looks flat. dB scale (-44dB floor .. -12dB ceiling) with a
@@ -164,6 +171,8 @@ export default function Hud() {
     ? t('hud.refining', { provider: providerName(settings?.refine.provider), secs: refineSecs })
     : t('hud.transcribing');
   const showPartial = settings?.overlay.show_partial_text ?? true;
+  const limit = state === 'recording' && capped;
+  const recordingTitle = limit ? `${t('hud.limitReached')}. ${t('hud.limitStopped')}` : t('hud.recordingClickToStop');
   const mm = Math.floor(elapsed / 60000);
   const ss = Math.floor((elapsed % 60000) / 1000);
   const time = `${mm}:${ss.toString().padStart(2, '0')}`;
@@ -197,7 +206,7 @@ export default function Hud() {
   return (
     <div
       ref={hudRef}
-      className={`hud hud-${style} ${state}`}
+      className={`hud hud-${style} ${state}${limit ? ' limit' : ''}`}
       onClick={isDeck && state === 'recording' ? () => api.stopRecording() : undefined}
     >
       {style === 'slim' ? (
@@ -206,12 +215,12 @@ export default function Hud() {
         // still proof the microphone is hearing you.
         <div
           className="hud-slim-inner"
-          title={state === 'recording' ? t('hud.recordingClickToStop') : busyLabel}
+          title={state === 'recording' ? recordingTitle : busyLabel}
           onClick={() => (state === 'recording' ? api.stopRecording() : undefined)}
         >
           {state === 'recording' ? <span className="hud-dot" /> : <Spinner />}
           <span className="hud-slim-well">
-            {state === 'recording' && <Waveform bars={barsRef.current.slice(-SLIM_BAR_COUNT)} />}
+            {state === 'recording' && !limit && <Waveform bars={barsRef.current.slice(-SLIM_BAR_COUNT)} />}
             <span className="hud-time">{refining ? fmtSecs(refineSecs) : time}</span>
           </span>
           <button className="hud-cancel" title={t('hud.cancel')} onClick={(e) => { e.stopPropagation(); api.cancelRecording(); }}>
@@ -221,7 +230,7 @@ export default function Hud() {
       ) : style === 'minimal' ? (
         <div
           className="hud-min-inner"
-          title={state === 'recording' ? t('hud.recordingClickToStop') : busyLabel}
+          title={state === 'recording' ? recordingTitle : busyLabel}
           onClick={() => (state === 'recording' ? api.stopRecording() : undefined)}
         >
           {state === 'recording' ? <span className="hud-dot" /> : <Spinner />}
@@ -236,6 +245,7 @@ export default function Hud() {
           recording={state === 'recording'}
           refining={refining}
           refineMode={mode === 'refine'}
+          full={limit}
           envelope={envelopeRef.current}
           time={refining ? fmtSecs(refineSecs) : time}
         />
@@ -244,7 +254,9 @@ export default function Hud() {
           <button
             className="hud-stop"
             title={
-              state === 'recording'
+              limit
+                ? recordingTitle
+                : state === 'recording'
                 ? mode === 'refine'
                   ? t('hud.stopAndRefine')
                   : t('hud.stopAndPaste')
@@ -255,15 +267,20 @@ export default function Hud() {
             {state === 'recording' ? <span className="hud-dot" /> : <Spinner />}
           </button>
           <div className="hud-center">
-            {state === 'recording' ? (
+            {limit ? (
+              <>
+                <span className="hud-status hud-limit-title">{t('hud.limitReached')}</span>
+                <div className="hud-partial hud-limit-sub">{t('hud.limitStopped')}</div>
+              </>
+            ) : state === 'recording' ? (
               <Waveform bars={barsRef.current} />
             ) : (
               <span className="hud-status">{busyLabel}</span>
             )}
-            {mode === 'refine' && state === 'recording' && (
+            {mode === 'refine' && state === 'recording' && !limit && (
               <div className="hud-partial hud-mode-tag">{t('hud.refineTag')}</div>
             )}
-            {showPartial && partial && state !== 'refining' && <div className="hud-partial">{partial}</div>}
+            {showPartial && partial && state !== 'refining' && !limit && <div className="hud-partial">{partial}</div>}
           </div>
           <div className="hud-right">
             <span className="hud-time">{refining ? fmtSecs(refineSecs) : time}</span>
@@ -299,6 +316,7 @@ function Deck({
   recording,
   refining,
   refineMode,
+  full,
   envelope,
   time,
 }: {
@@ -308,6 +326,9 @@ function Deck({
   /// The take will go to the AI. The decks are fixed-colour objects, so the
   /// mode shows in the label rather than in a tint.
   refineMode: boolean;
+  /// The take hit the length cap: the tape has run out. Reels stop, the meter
+  /// fills and the label says so.
+  full: boolean;
   envelope: number;
   time: string;
 }) {
@@ -318,12 +339,14 @@ function Deck({
   const lit = Math.round(level * SEG_COUNT);
   return (
     <>
-      <Reel variant={variant} spinning={recording} rewinding={!recording} />
+      <Reel variant={variant} spinning={recording && !full} rewinding={!recording} />
       <div className="deck-mid">
         <div className="deck-seg">
           {Array.from({ length: SEG_COUNT }, (_, i) => {
             // Transcribing: there is no live level any more, so run an
             // indeterminate sweep instead of leaving the last frame frozen.
+            // Tape full: every segment lit, flashing together.
+            if (full) return <i key={i} className="full" />;
             if (!recording) {
               return (
                 <i
@@ -342,12 +365,12 @@ function Deck({
           })}
         </div>
         <div className={`deck-label${recording ? '' : ' working'}`}>
-          {refining ? t('hud.deck.ai') : recording ? t('hud.deck.rec') : t('hud.deck.proc')}
-          {refineMode && !refining && <span className="deck-ai"> {t('hud.deck.aiTag')}</span>}{' '}
+          {full ? t('hud.deck.full') : refining ? t('hud.deck.ai') : recording ? t('hud.deck.rec') : t('hud.deck.proc')}
+          {refineMode && !refining && !full && <span className="deck-ai"> {t('hud.deck.aiTag')}</span>}{' '}
           <span className="deck-time">{time}</span>
         </div>
       </div>
-      <Reel variant={variant} spinning={recording} rewinding={!recording} slow />
+      <Reel variant={variant} spinning={recording && !full} rewinding={!recording} slow />
       {variant === 'cassette' && <span className="deck-stripe" />}
       <button
         className="deck-cancel"

@@ -47,6 +47,9 @@ export const en: Record<string, string> = {
   'hud.deck.proc': 'PROC',
   'hud.deck.ai': 'AI',
   'hud.deck.aiTag': '· AI',
+  'hud.limitReached': 'Limit reached',
+  'hud.limitStopped': 'No longer recording',
+  'hud.deck.full': 'TAPE FULL',
 
   // ---------- History ----------
   'history.searchPlaceholder': 'Search transcriptions and clipboard…  (↑↓ · Enter pastes · {copyKeys} copies)',
