@@ -1011,7 +1011,7 @@ impl Drop for ClipboardMonitor {
 /// answers "may I capture this" by collapsing every refusal into `None`, which
 /// is the right answer for the monitor and useless to the RESTORE path, which
 /// has to put the content back exactly as it found it, marking included.
-fn clipboard_is_excluded() -> bool {
+pub(crate) fn clipboard_is_excluded() -> bool {
     unsafe {
         if !open_clipboard_retry() {
             // Cannot tell. The conservative reading is that it was marked, so

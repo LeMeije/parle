@@ -42,6 +42,8 @@ export interface Settings {
     refine: HotkeyBinding;
     history_palette: HotkeyBinding;
     cancel: HotkeyBinding;
+    /** Air paste: puts the clipboard into the live take. Armed only while recording. */
+    paste_clipboard: HotkeyBinding;
     latch_ms: number;
     suppress_copilot: boolean;
   };
@@ -241,6 +243,8 @@ export type PipelineEvent =
   | { kind: 'mode_changed'; mode: DictationMode }
   | { kind: 'partial'; text: string }
   | { kind: 'mark_added'; at_ms: number; text: string }
+  /** Air paste was pressed and nothing went in: 'empty', 'secret' or a message. */
+  | { kind: 'mark_refused'; reason: string }
   | {
       kind: 'completed';
       item_id: number;

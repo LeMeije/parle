@@ -405,8 +405,9 @@ impl AppState {
         if let Some(h) = self.hotkeys.lock().as_ref() {
             h.set_recording(on);
         }
-        // Arm the cancel key as a REAL global shortcut for as long as we are
-        // recording, and disarm it the moment we stop.
+        // Arm the cancel key (and the air-paste chord) as REAL global
+        // shortcuts for as long as we are recording, and disarm them the
+        // moment we stop.
         //
         // The event tap was the only thing listening for it, and the tap does
         // not receive ordinary key events when Accessibility has not been
@@ -419,7 +420,7 @@ impl AppState {
         // Escape would swallow the key system-wide, which is exactly why the
         // setting is off by default in the first place.
         if let Some(app) = self.app.lock().clone() {
-            crate::set_cancel_shortcut_armed(&app, self, on);
+            crate::set_recording_shortcuts_armed(&app, self, on);
         }
     }
 
@@ -649,7 +650,43 @@ impl AppState {
                     crate::hud::toggle_palette(app);
                 }
             }
+            HotkeyId::PasteClipboard => {
+                if phase == KeyPhase::Down {
+                    self.air_paste();
+                }
+            }
         }
+    }
+
+    /// Air paste: splice the clipboard into the live take at this moment.
+    ///
+    /// The same `add_mark` the dictation bar's insert box uses, so the text
+    /// lands at the same point in the transcript, shows in the same list and
+    /// goes through the same delivery. Only the source is different.
+    ///
+    /// A refusal is TOLD, never silent: the user pressed a key, looked away
+    /// and kept talking, and finding out at the end that the link is missing
+    /// is the failure this feature exists to prevent.
+    pub fn air_paste(&self) {
+        if !self.pipeline.is_recording() {
+            // The chord is only armed while recording, so this is a press that
+            // raced the end of the take. Nothing to put it in.
+            return;
+        }
+        use crate::platform::ClipboardForTake;
+        let reason = match crate::platform::clipboard_for_take() {
+            ClipboardForTake::Text(text) => match self.pipeline.add_mark(&text) {
+                Ok(at_ms) => {
+                    tracing::info!("air paste: {} chars at {at_ms} ms", text.chars().count());
+                    return;
+                }
+                Err(e) => e,
+            },
+            ClipboardForTake::Empty => "empty".to_string(),
+            ClipboardForTake::Secret => "secret".to_string(),
+        };
+        tracing::info!("air paste refused: {reason}");
+        self.pipeline.notify_mark_refused(&reason);
     }
 }
 

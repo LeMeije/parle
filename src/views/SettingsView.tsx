@@ -266,7 +266,7 @@ export default function SettingsView({
   const [customPicked, setCustomPicked] = useState(false);
   const [customPickedRefine, setCustomPickedRefine] = useState(false);
   // Which binding the next keypress is captured into, or null.
-  const [capturing, setCapturing] = useState<null | 'dictation' | 'refine'>(null);
+  const [capturing, setCapturing] = useState<null | 'dictation' | 'refine' | 'paste'>(null);
   // Refine: the CLI probe and the sample run. Both spawn processes, so they
   // are triggered by the user (and once on open), never on every keystroke.
   const [refineStatus, setRefineStatus] = useState<RefineStatus | null>(null);
@@ -314,9 +314,14 @@ export default function SettingsView({
       }
       const binding = bindingFromEvent(e);
       if (!binding) return;
+      // Air paste is a chord the shortcut plugin registers, so a bare modifier
+      // (the first key down of most chords) means "keep listening", and a
+      // single key without one would steal ordinary typing mid-take.
+      if (target === 'paste' && !binding.includes('+')) return;
       setCapturing(null);
       set((d) => {
         if (target === 'refine') d.hotkeys.refine.key = binding;
+        else if (target === 'paste') d.hotkeys.paste_clipboard.key = binding;
         else d.hotkeys.dictation.key = binding;
       });
     };
@@ -482,6 +487,19 @@ export default function SettingsView({
       (s.hotkeys.dictation_alt.enabled && refineKey === s.hotkeys.dictation_alt.key) ||
       (s.hotkeys.history_palette.enabled && refineKey === s.hotkeys.history_palette.key));
 
+  // Same check as `set_recording_shortcuts_armed` in Rust, which refuses to
+  // arm a take-only key that is already a permanent shortcut.
+  const pasteKey = s.hotkeys.paste_clipboard.key;
+  const pasteClash =
+    s.hotkeys.paste_clipboard.enabled &&
+    [
+      s.hotkeys.dictation,
+      s.hotkeys.dictation_alt,
+      s.hotkeys.history_palette,
+      s.hotkeys.refine,
+      s.hotkeys.cancel,
+    ].some((b) => b.enabled && b.key && sameChord(b.key, pasteKey));
+
   return (
     <div className="settings">
       <header className="view-head">
@@ -568,6 +586,23 @@ export default function SettingsView({
             onChange={(e) => set((d) => (d.hotkeys.history_palette.key = e.target.value))}
           />
         </Field>
+        <Toggle
+          label={t('settings.airPaste.label')}
+          hint={t('settings.airPaste.hint')}
+          value={s.hotkeys.paste_clipboard.enabled}
+          onChange={(v) => set((d) => (d.hotkeys.paste_clipboard.enabled = v))}
+        />
+        {s.hotkeys.paste_clipboard.enabled && (
+          <Field label={t('settings.customBinding.label')}>
+            <button
+              className={`btn key-capture ${capturing === 'paste' ? 'listening' : ''}`}
+              onClick={() => setCapturing('paste')}
+            >
+              {capturing === 'paste' ? t('settings.customBinding.listening') : keyLabel(pasteKey)}
+            </button>
+          </Field>
+        )}
+        {pasteClash && <div className="callout warn">{t('settings.airPaste.clash')}</div>}
         {!IS_MAC && (
           <Toggle
             label={t('settings.suppressCopilot.label')}
@@ -2068,8 +2103,30 @@ function modifierFamilyOf(key: string): RefineModifier | null {
   }
 }
 
+/// Mirrors `same_chord` in lib.rs: order, case and the platform spellings of
+/// one modifier do not make two chords different.
+function sameChord(a: string, b: string): boolean {
+  const norm = (k: string) =>
+    k
+      .split('+')
+      .map((p) => {
+        const x = p.trim().toLowerCase();
+        if (['cmd', 'command', 'super', 'meta', 'win'].includes(x)) return 'super';
+        if (x === 'option') return 'alt';
+        if (x === 'control') return 'ctrl';
+        if (x === 'esc') return 'escape';
+        return x;
+      })
+      .sort()
+      .join('+');
+  return norm(a) === norm(b);
+}
+
 function chordPartLabel(part: string): string {
-  if (part === 'Super') return IS_MAC ? '⌘' : 'Win';
+  if (part === 'Super' || part === 'Cmd') return IS_MAC ? '⌘' : 'Win';
+  if (IS_MAC && part === 'Alt') return '⌥';
+  if (IS_MAC && part === 'Shift') return '⇧';
+  if (IS_MAC && part === 'Ctrl') return '⌃';
   if (part.startsWith('Arrow')) return part.slice(5);
   return part;
 }

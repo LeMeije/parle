@@ -604,18 +604,24 @@ fn spawn_platform(
 /// Native-only keys (Fn, bare modifiers, Copilot) are handled by the platform
 /// listener instead. Safe to call repeatedly: clears previous registrations
 /// first so settings changes apply without a restart.
-/// Arm or disarm the cancel key as a global shortcut.
+/// Arm or disarm the keys that only mean something DURING a take: the cancel
+/// key and the air-paste chord.
 ///
-/// Called from `set_recording_flag`, so the key is only claimed for the
-/// duration of a recording. It is a genuine global shortcut (Carbon
-/// `RegisterEventHotKey` under the plugin) rather than an event tap, which
-/// means it still fires when Accessibility has not been granted, and that is
-/// the case where the tap-based path silently did nothing at all.
+/// Called from `set_recording_flag`, so the keys are only claimed for the
+/// duration of a recording. Each is a genuine global shortcut (Carbon
+/// `RegisterEventHotKey` on macOS, `RegisterHotKey` on Windows, under the
+/// plugin) rather than an event tap, which means it still fires when
+/// Accessibility has not been granted, and that is the case where the
+/// tap-based cancel path silently did nothing at all.
 ///
-/// The tap path is deliberately left in place as well. It is the faster of the
-/// two and it swallows the key properly; this is the belt to its braces. Both
-/// firing is harmless: the second cancel arrives when there is no longer a
-/// recording to cancel and is a no-op.
+/// Cancel: the tap path is deliberately left in place as well. It is the
+/// faster of the two and it swallows the key properly; this is the belt to its
+/// braces. Both firing is harmless: the second cancel arrives when there is no
+/// longer a recording to cancel and is a no-op.
+///
+/// Air paste: armed only while recording so the chord belongs to whatever app
+/// it is pressed in the rest of the time. A press that lands as the take ends
+/// finds nothing recording and does nothing.
 ///
 /// EVERY call into the global-shortcut plugin in this file goes through
 /// `on_main_thread`, and NO handler registered with it ever calls back into
@@ -630,44 +636,113 @@ fn spawn_platform(
 /// the main thread, so a shortcut firing in that window deadlocks the other
 /// way round. Handlers therefore only forward an event to the dispatcher
 /// channel, and plugin calls run where the lock lives.
-pub(crate) fn set_cancel_shortcut_armed(app: &AppHandle, state: &AppState, armed: bool) {
-    let binding = state.settings.lock().hotkeys.cancel.clone();
-    if !binding.enabled || binding.key.is_empty() {
+pub(crate) fn set_recording_shortcuts_armed(app: &AppHandle, state: &AppState, armed: bool) {
+    let (cancel, paste, permanent) = {
+        let s = state.settings.lock();
+        // Chords registered for the whole session. A take-only key that equals
+        // one of them must not be armed, or disarming it at the end of the take
+        // would unregister the permanent one with it.
+        let permanent: Vec<String> = [
+            &s.hotkeys.dictation,
+            &s.hotkeys.dictation_alt,
+            &s.hotkeys.history_palette,
+            &s.hotkeys.refine,
+        ]
+        .iter()
+        .filter(|b| b.enabled && !b.key.is_empty())
+        .map(|b| b.key.clone())
+        .collect();
+        (s.hotkeys.cancel.clone(), s.hotkeys.paste_clipboard.clone(), permanent)
+    };
+    let mut keys: Vec<(platform::HotkeyId, String)> = Vec::new();
+    for (id, binding) in [
+        (platform::HotkeyId::Cancel, cancel),
+        (platform::HotkeyId::PasteClipboard, paste),
+    ] {
+        if !binding.enabled || binding.key.is_empty() {
+            continue;
+        }
+        if permanent.iter().any(|k| same_chord(k, &binding.key)) {
+            tracing::warn!("{id:?} key '{}' is already another shortcut; not armed", binding.key);
+            continue;
+        }
+        if keys.iter().any(|(_, k)| same_chord(k, &binding.key)) {
+            tracing::warn!("{id:?} key '{}' is already the cancel key; not armed", binding.key);
+            continue;
+        }
+        keys.push((id, binding.key));
+    }
+    let mut shortcuts = Vec::new();
+    for (id, key) in keys {
+        // "Escape" is the stored name; the shortcut parser wants "Esc".
+        let spelled = match key.as_str() {
+            "Escape" => "Esc".to_string(),
+            other => other.to_string(),
+        };
+        let Ok(shortcut) = spelled.parse::<tauri_plugin_global_shortcut::Shortcut>() else {
+            tracing::warn!("{id:?} key '{key}' is not a registrable shortcut");
+            continue;
+        };
+        shortcuts.push((id, key, shortcut));
+    }
+    if shortcuts.is_empty() {
         return;
     }
-    // "Escape" is the stored name; the shortcut parser wants "Esc".
-    let spelled = match binding.key.as_str() {
-        "Escape" => "Esc".to_string(),
-        other => other.to_string(),
-    };
-    let Ok(shortcut) = spelled.parse::<tauri_plugin_global_shortcut::Shortcut>() else {
-        tracing::warn!("cancel key '{}' is not a registrable shortcut", binding.key);
-        return;
-    };
-    let key_name = binding.key.clone();
     let tx = state.platform_tx.lock().clone();
     on_main_thread(app, move |app| {
         use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-        if !armed {
-            let _ = app.global_shortcut().unregister(shortcut);
-            return;
-        }
-        let result = app.global_shortcut().on_shortcut(shortcut, move |_a, _sc, event| {
-            if matches!(event.state(), ShortcutState::Pressed) {
-                // Forwarded, never handled here: see the note above.
-                if let Some(tx) = tx.as_ref() {
-                    let _ = tx.send(platform::PlatformEvent::Hotkey {
-                        id: platform::HotkeyId::Cancel,
-                        phase: hotkey_logic::KeyPhase::Down,
-                        mods: platform::Mods::default(),
-                    });
-                }
+        for (id, key_name, shortcut) in shortcuts {
+            if !armed {
+                let _ = app.global_shortcut().unregister(shortcut);
+                continue;
             }
-        });
-        if let Err(e) = result {
-            tracing::warn!("could not arm the cancel shortcut '{key_name}': {e}");
+            // Already registered (a settings change re-armed mid-take): the
+            // plugin refuses a second registration, which is not a failure.
+            if app.global_shortcut().is_registered(shortcut) {
+                continue;
+            }
+            let tx = tx.clone();
+            let result = app.global_shortcut().on_shortcut(shortcut, move |_a, _sc, event| {
+                if matches!(event.state(), ShortcutState::Pressed) {
+                    // Forwarded, never handled here: see the note above.
+                    if let Some(tx) = tx.as_ref() {
+                        let _ = tx.send(platform::PlatformEvent::Hotkey {
+                            id,
+                            phase: hotkey_logic::KeyPhase::Down,
+                            mods: platform::Mods::default(),
+                        });
+                    }
+                }
+            });
+            if let Err(e) = result {
+                tracing::warn!("could not arm the {id:?} shortcut '{key_name}': {e}");
+            }
         }
     });
+}
+
+/// Do two stored chord strings name the same keys? Order and case of the
+/// parts do not matter ("Alt+Shift+V" and "shift+alt+v" are one chord), and
+/// the platform spellings of the same modifier are folded together.
+pub(crate) fn same_chord(a: &str, b: &str) -> bool {
+    fn norm(k: &str) -> Vec<String> {
+        let mut parts: Vec<String> = k
+            .split('+')
+            .map(|p| {
+                let p = p.trim().to_ascii_lowercase();
+                match p.as_str() {
+                    "cmd" | "command" | "super" | "meta" | "win" => "super".into(),
+                    "option" | "alt" => "alt".into(),
+                    "control" | "ctrl" => "ctrl".into(),
+                    "esc" | "escape" => "escape".into(),
+                    _ => p,
+                }
+            })
+            .collect();
+        parts.sort();
+        parts
+    }
+    norm(a) == norm(b)
 }
 
 /// Run `f` on the main thread, where the global-shortcut plugin's lock lives.
@@ -700,7 +775,7 @@ pub(crate) fn register_chord_shortcuts(app: &AppHandle, state: &Arc<AppState>) {
     let state = state.clone();
 
     // Plugin calls on the main thread only, and handlers that only forward.
-    // See `set_cancel_shortcut_armed` for why both halves are load-bearing.
+    // See `set_recording_shortcuts_armed` for why both halves are load-bearing.
     on_main_thread(app, move |app| {
         use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
@@ -745,10 +820,11 @@ pub(crate) fn register_chord_shortcuts(app: &AppHandle, state: &Arc<AppState>) {
                 let _ = app.emit("shortcut-error", format!("{}: {e}", binding.key));
             }
         }
-        // `unregister_all` also dropped the cancel key armed for a recording in
-        // progress. Put it back, or Esc does nothing until the next take.
+        // `unregister_all` also dropped the take-only keys armed for a
+        // recording in progress. Put them back, or Esc and air paste do
+        // nothing until the next take.
         if recording {
-            set_cancel_shortcut_armed(app, &state, true);
+            set_recording_shortcuts_armed(app, &state, true);
         }
     });
 }
@@ -823,6 +899,7 @@ mod shortcut_defaults_tests {
             ("dictation_alt", &s.hotkeys.dictation_alt),
             ("refine", &s.hotkeys.refine),
             ("cancel", &s.hotkeys.cancel),
+            ("paste_clipboard", &s.hotkeys.paste_clipboard),
         ] {
             if binding.key.is_empty() {
                 continue;
@@ -853,6 +930,25 @@ mod shortcut_defaults_tests {
         let native = crate::platform::NativeKey::parse(key).is_some();
         let chord = key.parse::<Shortcut>().is_ok();
         assert!(native ^ chord, "'{key}': native={native} chord={chord}");
+    }
+
+    /// Air paste is a chord the plugin owns, never a native key: the native
+    /// listener has no idea what to do with it.
+    #[test]
+    fn the_air_paste_default_is_a_plugin_chord() {
+        let s = parle_core::settings::Settings::default();
+        let key = &s.hotkeys.paste_clipboard.key;
+        assert!(crate::platform::NativeKey::parse(key).is_none(), "'{key}'");
+        assert!(key.parse::<Shortcut>().is_ok(), "'{key}'");
+    }
+
+    #[test]
+    fn chords_compare_regardless_of_order_case_and_spelling() {
+        assert!(crate::same_chord("Alt+Shift+V", "shift+alt+v"));
+        assert!(crate::same_chord("Cmd+Alt+V", "Super+Option+V"));
+        assert!(crate::same_chord("Escape", "Esc"));
+        assert!(!crate::same_chord("Cmd+Alt+V", "Ctrl+Cmd+V"));
+        assert!(!crate::same_chord("Alt+Shift+V", "Ctrl+Shift+V"));
     }
 
     /// The specific string this test was written for.

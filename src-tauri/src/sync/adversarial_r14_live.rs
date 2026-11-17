@@ -85,12 +85,12 @@ fn r14_live_the_cancel_key_has_a_path_that_does_not_need_the_tap() {
 
     // THE CLAIM: a dedicated path exists, and recording state drives it.
     assert!(
-        lib.contains("fn set_cancel_shortcut_armed("),
+        lib.contains("fn set_recording_shortcuts_armed("),
         "the cancel key has no registration path outside the event tap, so the setting does \
          nothing whenever the tap is not delivering key events"
     );
     assert!(
-        state.contains("set_cancel_shortcut_armed(&app, self, on)"),
+        state.contains("set_recording_shortcuts_armed(&app, self, on)"),
         "the cancel shortcut is never armed from recording state, so it is either always \
          registered (swallowing Escape system-wide) or never"
     );

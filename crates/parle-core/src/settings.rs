@@ -344,6 +344,15 @@ pub struct HotkeySettings {
     pub history_palette: HotkeyBinding,
     /// Cancel current recording without injecting.
     pub cancel: HotkeyBinding,
+    /// "Air paste": drops whatever is on the clipboard into the LIVE take at
+    /// this moment, exactly as if it had been typed into the dictation bar's
+    /// insert box. Copy a link, press this, keep talking.
+    ///
+    /// Armed only WHILE RECORDING, like `cancel`, so the chord belongs to the
+    /// app it is pressed in for the rest of the day. That is also why it can
+    /// be on by default: it costs nothing when you are not dictating.
+    #[serde(default = "default_paste_clipboard_binding")]
+    pub paste_clipboard: HotkeyBinding,
     /// Tap shorter than this latches Hybrid mode into Toggle (ms).
     pub latch_ms: u64,
     /// Windows: suppress the default Copilot launch when bound.
@@ -374,6 +383,7 @@ impl Default for HotkeySettings {
             // (dismissing a dialog, another window), and losing a take you have
             // already spoken is far worse than having to stop with the hotkey.
             cancel: HotkeyBinding { key: "Escape".into(), mode: HotkeyMode::Toggle, enabled: false },
+            paste_clipboard: default_paste_clipboard_binding(),
             latch_ms: 450,
             suppress_copilot: true,
         }
@@ -443,6 +453,26 @@ fn default_refine_key() -> &'static str {
     { "RightAlt" }
     #[cfg(not(target_os = "macos"))]
     { "Ctrl+Shift+Space" }
+}
+
+/// The suggested air-paste chord: V for paste, one modifier away from the
+/// paste the user already knows.
+///
+/// macOS: Cmd+Option+V. Its only system meaning is Finder's "move here", and
+/// the chord is claimed only while a take is recording.
+///
+/// Windows: Alt+Shift+V. NOT Ctrl+Alt+V: Windows reads Ctrl+Alt as AltGr, so
+/// on French, German, Polish and many other layouts that chord types a
+/// character. And not Ctrl+Shift+V, which is the palette.
+pub fn default_paste_clipboard_key() -> &'static str {
+    #[cfg(target_os = "macos")]
+    { "Cmd+Alt+V" }
+    #[cfg(not(target_os = "macos"))]
+    { "Alt+Shift+V" }
+}
+
+fn default_paste_clipboard_binding() -> HotkeyBinding {
+    HotkeyBinding { key: default_paste_clipboard_key().into(), mode: HotkeyMode::Toggle, enabled: true }
 }
 
 fn default_refine_binding() -> HotkeyBinding {
@@ -946,6 +976,7 @@ impl Settings {
             // Its OWN default, not the palette chord: resetting a dead Refine
             // key to the palette chord would make one keystroke do two things.
             (&mut self.hotkeys.refine, default_refine_key()),
+            (&mut self.hotkeys.paste_clipboard, default_paste_clipboard_key()),
         ] {
             if is_unregisterable_chord(&b.key) {
                 changed = true;
@@ -1271,6 +1302,36 @@ mod tests {
     }
 
     // ---- the history-palette chord ----
+
+    // ---- air paste ----
+
+    #[test]
+    fn air_paste_is_on_by_default_with_a_chord_of_its_own() {
+        let s = Settings::default();
+        let k = &s.hotkeys.paste_clipboard;
+        assert!(k.enabled, "armed only while recording, so it is safe to have on");
+        assert_eq!(k.key, default_paste_clipboard_key());
+        assert!(k.key.contains('+'), "must be a chord: a bare key would eat typing mid-take");
+        assert_ne!(k.key, s.hotkeys.history_palette.key, "one keystroke must not do two things");
+        assert_ne!(k.key, s.hotkeys.refine.key);
+        assert_ne!(k.key, s.hotkeys.dictation.key);
+    }
+
+    #[test]
+    fn a_settings_file_from_before_air_paste_gains_it_on() {
+        let json = r#"{"version":2,"onboarding_complete":true,"hotkeys":{"dictation":{"key":"Fn","mode":"hybrid","enabled":true}}}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!(s.hotkeys.paste_clipboard.enabled);
+        assert_eq!(s.hotkeys.paste_clipboard.key, default_paste_clipboard_key());
+    }
+
+    #[test]
+    fn an_fn_air_paste_chord_is_reset_rather_than_left_dead() {
+        let mut s = Settings::default();
+        s.hotkeys.paste_clipboard.key = "Fn+V".into();
+        assert!(s.migrate());
+        assert_eq!(s.hotkeys.paste_clipboard.key, default_paste_clipboard_key());
+    }
 
     // ---- Refine ----
 

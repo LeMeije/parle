@@ -300,6 +300,28 @@ Measured, not acted on:
 - The App icon hint in Settings says "the Finder icon updates after a restart"
   on Windows too.
 
+## Air paste checks owed on Windows (17/11/2026)
+
+New feature, built and tested on the Mac only. The Windows side has NOT been
+compiled: `cargo check --target x86_64-pc-windows-msvc` stops on `ring`'s C
+build on a Mac. The Windows-only change is small (`clipboard_is_excluded` made
+`pub(crate)` and called from `platform::clipboard_for_take`). The chord goes
+through the global-shortcut plugin (`RegisterHotKey`), armed only while a take
+is recording (`set_recording_shortcuts_armed` in lib.rs), so nothing new runs in
+the hook helper. The clipboard is read with the existing `read_clipboard`;
+content marked excluded (password managers, `clipboard_is_excluded`) is refused.
+
+1. Settings > Hotkeys: "Air paste" is on, key shows `Alt + Shift + V`.
+2. Start a take (double tap Left Ctrl), copy a URL in a browser with Ctrl+C,
+   press Alt+Shift+V, say a few more words, stop. The pasted text sits at the
+   point you pressed it, and the overlay said "Pasted from clipboard".
+3. With no take running, Alt+Shift+V reaches the focused app as normal (the
+   chord is not held outside a take).
+4. Copy an image (no text), air paste mid-take: overlay says "Nothing pasted".
+5. Copy a password from Bitwarden or 1Password, air paste: "Not pasted: that
+   copy is a password", and the password is not in the transcript.
+6. Change the chord in Settings mid-take: the new one works at once.
+
 ## Still open
 
 - **Windows benchmarks have not been run.** `docs/BENCHMARKS.md` still contains

@@ -122,6 +122,10 @@ Target latencies (measured, not aspirational: benchmarks in `bench/`):
   bottom of the main window (stop, clock, level, insert box) so pasted or typed content can be
   pinned into the recording from any tab. Paste fills the box, Enter (or Insert) commits it, which
   leaves room to edit clipboard text before it is spliced in verbatim. Compose lists the inserts.
+- Air paste (17/11/2026): copy something, then press the air-paste chord mid-take (Cmd+Option+V on
+  macOS, Alt+Shift+V on Windows, changeable in Settings) and the clipboard is spliced into the take
+  at that moment, the same as the insert box, without opening Parle. Armed only while recording.
+  The overlay confirms "Pasted from clipboard" or says why not (no text, or a password manager's copy).
 - 60 fps micro-interactions (motion library), Lucide icons. Morphs animate transform and opacity
   ONLY: neither border-radius nor background-color is compositable, and animating them turned a
   320ms expansion into three visible jumps.

@@ -74,6 +74,10 @@ pub enum PipelineEvent {
     Partial { text: String },
     /// User pasted/typed content mid-recording; spliced in at this timestamp.
     MarkAdded { at_ms: u64, text: String },
+    /// Air paste was pressed and nothing went in. `reason` is a code the UI
+    /// translates: "empty" (no text on the clipboard), "secret" (a password
+    /// manager's copy) or anything else, shown as it is.
+    MarkRefused { reason: String },
     Completed {
         item_id: i64,
         /// The row did NOT go into a syncing history, and the user needs to
@@ -523,6 +527,11 @@ impl Pipeline {
         self.marks.lock().push((at_ms, text.clone()));
         (self.sink)(PipelineEvent::MarkAdded { at_ms, text });
         Ok(at_ms)
+    }
+
+    /// Tell the front ends an air paste put nothing into the take.
+    pub fn notify_mark_refused(&self, reason: &str) {
+        (self.sink)(PipelineEvent::MarkRefused { reason: reason.to_string() });
     }
 
     pub fn cancel(&self) {

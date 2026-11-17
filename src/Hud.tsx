@@ -49,6 +49,11 @@ export default function Hud() {
   // nothing more is kept, so every style turns red to stop the user talking on.
   const [capped, setCapped] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
+  // Air paste feedback. The user pressed a chord without looking at Parle and
+  // went on talking, so the overlay confirms it went in, or says why not, for
+  // a moment, in place of the live text.
+  const [flash, setFlash] = useState<{ ok: boolean; text: string } | null>(null);
+  const flashTimer = useRef<number | undefined>(undefined);
   // Mirrored into a ref because the level subscription below is registered
   // once and would otherwise close over the settings as they were at mount,
   // so changing the sensitivity would not take effect until the HUD remounted.
@@ -80,8 +85,22 @@ export default function Hud() {
           setOutcome(null);
           setElapsed(0);
           setCapped(false);
+          setFlash(null);
           barsRef.current = new Array(BAR_COUNT).fill(0.05);
         }
+      }
+      if (e.kind === 'mark_added' || e.kind === 'mark_refused') {
+        const ok = e.kind === 'mark_added';
+        const text = ok
+          ? t('hud.airPasted')
+          : e.reason === 'empty'
+            ? t('hud.airPasteEmpty')
+            : e.reason === 'secret'
+              ? t('hud.airPasteSecret')
+              : e.reason;
+        setFlash({ ok, text });
+        window.clearTimeout(flashTimer.current);
+        flashTimer.current = window.setTimeout(() => setFlash(null), ok ? 1600 : 2600);
       }
       if (e.kind === 'empty') setOutcome({ text: e.reason, kind: 'ok' });
       // A withheld dictation still needs the paste instruction. It IS on the
@@ -142,6 +161,7 @@ export default function Hud() {
     });
     const un3 = onPartial((text) => setPartial(text));
     return () => {
+      window.clearTimeout(flashTimer.current);
       un1.then((f) => f());
       un2.then((f) => f());
       un3.then((f) => f());
@@ -176,6 +196,9 @@ export default function Hud() {
   const mm = Math.floor(elapsed / 60000);
   const ss = Math.floor((elapsed % 60000) / 1000);
   const time = `${mm}:${ss.toString().padStart(2, '0')}`;
+  const showFlash = flash !== null && state === 'recording';
+  const flashShort = flash ? (flash.ok ? t('hud.airPastedShort') : t('hud.airPasteFailedShort')) : '';
+  const flashClass = showFlash ? (flash!.ok ? ' flash-ok' : ' flash-error') : '';
 
   // Size the window to what was drawn. Runs after every render but only calls
   // out when the size actually changes (the clock gaining a digit, an outcome
@@ -206,7 +229,7 @@ export default function Hud() {
   return (
     <div
       ref={hudRef}
-      className={`hud hud-${style} ${state}${limit ? ' limit' : ''}`}
+      className={`hud hud-${style} ${state}${limit ? ' limit' : ''}${flashClass}`}
       onClick={isDeck && state === 'recording' ? () => api.stopRecording() : undefined}
     >
       {style === 'slim' ? (
@@ -220,8 +243,12 @@ export default function Hud() {
         >
           {state === 'recording' ? <span className="hud-dot" /> : <Spinner />}
           <span className="hud-slim-well">
-            {state === 'recording' && !limit && <Waveform bars={barsRef.current.slice(-SLIM_BAR_COUNT)} />}
-            <span className="hud-time">{refining ? fmtSecs(refineSecs) : time}</span>
+            {state === 'recording' && !limit && !showFlash && <Waveform bars={barsRef.current.slice(-SLIM_BAR_COUNT)} />}
+            {showFlash ? (
+              <span className="hud-time hud-flash" title={flash!.text}>{flashShort}</span>
+            ) : (
+              <span className="hud-time">{refining ? fmtSecs(refineSecs) : time}</span>
+            )}
           </span>
           <button className="hud-cancel" title={t('hud.cancel')} onClick={(e) => { e.stopPropagation(); api.cancelRecording(); }}>
             ✕
@@ -234,7 +261,11 @@ export default function Hud() {
           onClick={() => (state === 'recording' ? api.stopRecording() : undefined)}
         >
           {state === 'recording' ? <span className="hud-dot" /> : <Spinner />}
-          <span className="hud-time">{refining ? fmtSecs(refineSecs) : time}</span>
+          {showFlash ? (
+            <span className="hud-time hud-flash" title={flash!.text}>{flashShort}</span>
+          ) : (
+            <span className="hud-time">{refining ? fmtSecs(refineSecs) : time}</span>
+          )}
           <button className="hud-cancel" title={t('hud.cancel')} onClick={(e) => { e.stopPropagation(); api.cancelRecording(); }}>
             ✕
           </button>
@@ -248,6 +279,7 @@ export default function Hud() {
           full={limit}
           envelope={envelopeRef.current}
           time={refining ? fmtSecs(refineSecs) : time}
+          flash={showFlash ? (flash!.ok ? t('hud.deck.pasted') : t('hud.deck.noPaste')) : null}
         />
       ) : (
         <>
@@ -280,7 +312,11 @@ export default function Hud() {
             {mode === 'refine' && state === 'recording' && !limit && (
               <div className="hud-partial hud-mode-tag">{t('hud.refineTag')}</div>
             )}
-            {showPartial && partial && state !== 'refining' && !limit && <div className="hud-partial">{partial}</div>}
+            {showFlash && !limit ? (
+              <div className="hud-partial hud-flash">{flash!.text}</div>
+            ) : (
+              showPartial && partial && state !== 'refining' && !limit && <div className="hud-partial">{partial}</div>
+            )}
           </div>
           <div className="hud-right">
             <span className="hud-time">{refining ? fmtSecs(refineSecs) : time}</span>
@@ -319,6 +355,7 @@ function Deck({
   full,
   envelope,
   time,
+  flash,
 }: {
   variant: 'cassette' | 'metal';
   recording: boolean;
@@ -331,6 +368,8 @@ function Deck({
   full: boolean;
   envelope: number;
   time: string;
+  /// Air paste confirmation, shown in place of the label for a moment.
+  flash: string | null;
 }) {
   const t = useT();
   // Same dB window as the pill waveform, quantised into discrete segments.
@@ -365,7 +404,7 @@ function Deck({
           })}
         </div>
         <div className={`deck-label${recording ? '' : ' working'}`}>
-          {full ? t('hud.deck.full') : refining ? t('hud.deck.ai') : recording ? t('hud.deck.rec') : t('hud.deck.proc')}
+          {full ? t('hud.deck.full') : refining ? t('hud.deck.ai') : flash ? <span className="deck-flash">{flash}</span> : recording ? t('hud.deck.rec') : t('hud.deck.proc')}
           {refineMode && !refining && !full && <span className="deck-ai"> {t('hud.deck.aiTag')}</span>}{' '}
           <span className="deck-time">{time}</span>
         </div>

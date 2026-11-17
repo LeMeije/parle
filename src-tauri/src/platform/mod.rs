@@ -73,6 +73,40 @@ pub enum HotkeyId {
     Refine,
     Cancel,
     Palette,
+    /// Air paste: put the clipboard into the live take at this moment.
+    PasteClipboard,
+}
+
+/// What the clipboard offered when the user asked for it in a take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardForTake {
+    Text(String),
+    /// No text on it (an image, a file, or nothing at all).
+    Empty,
+    /// A password manager marked it as not to be kept. A take is pasted into
+    /// a field AND stored in a history that can sync to the user's other
+    /// machines, so a secret has no business being spliced into one.
+    Secret,
+}
+
+/// Read the clipboard for air paste.
+pub fn clipboard_for_take() -> ClipboardForTake {
+    #[cfg(target_os = "macos")]
+    {
+        if imp::clipboard_is_password() {
+            return ClipboardForTake::Secret;
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if imp::clipboard_is_excluded() {
+            return ClipboardForTake::Secret;
+        }
+    }
+    match imp::read_clipboard() {
+        Some(t) if !t.trim().is_empty() => ClipboardForTake::Text(t),
+        _ => ClipboardForTake::Empty,
+    }
 }
 
 /// Which modifiers were held at the instant a hotkey event was generated.

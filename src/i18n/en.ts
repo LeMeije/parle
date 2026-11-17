@@ -49,6 +49,13 @@ export const en: Record<string, string> = {
   'hud.deck.aiTag': '· AI',
   'hud.limitReached': 'Limit reached',
   'hud.limitStopped': 'No longer recording',
+  'hud.airPasted': 'Pasted from clipboard',
+  'hud.airPastedShort': 'Pasted',
+  'hud.airPasteEmpty': 'Nothing pasted: no text on the clipboard',
+  'hud.airPasteSecret': 'Not pasted: that copy is a password',
+  'hud.airPasteFailedShort': 'Not pasted',
+  'hud.deck.pasted': 'PASTED',
+  'hud.deck.noPaste': 'NO PASTE',
   'hud.deck.full': 'TAPE FULL',
 
   // ---------- History ----------
@@ -223,6 +230,9 @@ export const en: Record<string, string> = {
     'Off by default: Esc gets pressed for all sorts of unrelated reasons, and discarding a take you already spoke is worse than stopping it with your hotkey',
   'settings.historyPalette.label': 'History palette',
   'settings.historyPalette.hint': 'Chord shortcut for search',
+  'settings.airPaste.label': 'Air paste',
+  'settings.airPaste.hint': 'Copy something, then press this while dictating: it drops into your text at that exact point. Only active during a take, so the shortcut is free the rest of the time',
+  'settings.airPaste.clash': 'This combination is already another Parle shortcut, so air paste will not fire. Pick a different one',
   'settings.suppressCopilot.label': 'Suppress Copilot launch',
   'settings.suppressCopilot.hint':
     'When the Copilot key is bound (or this is on), the default Copilot app never opens',
